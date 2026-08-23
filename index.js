@@ -62,7 +62,7 @@ const commands = [
     .addIntegerOption(option =>
       option
         .setName("answer")
-        .setDescription("The correct answer from 1 to 10000")
+        .setDescription("Secret answer from 1 to 10000")
         .setRequired(true)
         .setMinValue(1)
         .setMaxValue(10000)
@@ -122,7 +122,7 @@ function updateStatus() {
   const serverCount = client.guilds.cache.size;
 
   client.user.setActivity(
-    `Free Source (FS) • ${serverCount} Server${serverCount === 1 ? "" : "s"}`,
+    `You •  ${serverCount} Server${serverCount === 1 ? "" : "s"}`,
     {
       type: 3
     }
@@ -196,10 +196,8 @@ client.on("interactionCreate", async interaction => {
         .setStyle(ButtonStyle.Primary)
     );
 
-    await interaction.deferReply({
-      ephemeral: true
-    });
-
+    // No visible slash-command response
+    await interaction.deferReply({ ephemeral: true });
     await interaction.deleteReply();
 
     await interaction.channel.send({
@@ -367,13 +365,13 @@ client.on("messageCreate", async message => {
 
   const guess = Number(content);
 
-  // Must be 1 - 10000
+  // Only 1 - 10000
   if (guess < 1 || guess > 10000) {
     return;
   }
 
   // ====================
-  // Winner
+  // CORRECT ANSWER
   // ====================
 
   if (guess === game.answer) {
@@ -396,14 +394,56 @@ client.on("messageCreate", async message => {
   }
 
   // ====================
-  // Wrong Guess
+  // DISTANCE
   // ====================
 
-  if (guess < game.answer) {
-    await message.react("⬆️");
-  } else {
-    await message.react("⬇️");
+  const difference =
+    Math.abs(game.answer - guess);
+
+  // 50 or less away
+  if (difference <= 50) {
+
+    return message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x808080)
+          .setDescription(
+            `> 😱 **YOU’RE SO CLOSE BRO!**`
+          )
+      ]
+    });
   }
+
+  // 51 - 100 away
+  if (difference <= 100) {
+
+    if (guess < game.answer) {
+
+      return message.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x808080)
+            .setDescription(
+              `> 💀 **HIGHER**`
+            )
+        ]
+      });
+
+    } else {
+
+      return message.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x808080)
+            .setDescription(
+              `> 🤝 **LOWER BRO!**`
+            )
+        ]
+      });
+    }
+  }
+
+  // More than 100 away = no response
 });
 
 // ====================
