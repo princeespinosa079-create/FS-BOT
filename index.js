@@ -133,38 +133,7 @@ const commands = [
 ].map(command => command.toJSON());
 
 // ==================================================
-// REGISTER COMMANDS
-// ==================================================
-
-async function registerCommands() {
-  try {
-    console.log("🔄 Registering slash commands...");
-
-    const rest = new REST({
-      version: "10"
-    }).setToken(TOKEN);
-
-    await rest.put(
-      Routes.applicationGuildCommands(
-        CLIENT_ID,
-        GUILD_ID
-      ),
-      {
-        body: commands
-      }
-    );
-
-    console.log("✅ Slash commands registered successfully.");
-  } catch (error) {
-    console.error(
-      "❌ Slash command registration failed:",
-      error
-    );
-  }
-}
-
-// ==================================================
-// COLORS
+// COLOR FUNCTION
 // ==================================================
 
 function getColor(color) {
@@ -188,6 +157,41 @@ function getColor(color) {
 }
 
 // ==================================================
+// REGISTER GUILD COMMANDS
+// ==================================================
+
+async function registerCommands() {
+  try {
+    console.log("🔄 Registering slash commands...");
+
+    const rest = new REST({
+      version: "10"
+    }).setToken(TOKEN);
+
+    await rest.put(
+      Routes.applicationGuildCommands(
+        CLIENT_ID,
+        GUILD_ID
+      ),
+      {
+        body: commands
+      }
+    );
+
+    console.log(
+      "✅ Slash commands registered successfully."
+    );
+
+  } catch (error) {
+    console.error(
+      "❌ Slash command registration failed:"
+    );
+
+    console.error(error);
+  }
+}
+
+// ==================================================
 // READY
 // ==================================================
 
@@ -204,7 +208,7 @@ client.once("ready", async () => {
 });
 
 // ==================================================
-// INTERACTIONS
+// INTERACTION HANDLER
 // ==================================================
 
 client.on("interactionCreate", async interaction => {
@@ -234,7 +238,7 @@ client.on("interactionCreate", async interaction => {
         interaction.options.getInteger("answer");
 
       console.log(
-        `🎯 Guess answer: ${answer}`
+        `🎯 Answer received: ${answer}`
       );
 
       if (
@@ -242,6 +246,7 @@ client.on("interactionCreate", async interaction => {
         answer < 1 ||
         answer > 10000
       ) {
+
         await interaction.reply({
           content:
             "❌ Please provide an answer from 1 to 10000.",
@@ -276,7 +281,7 @@ client.on("interactionCreate", async interaction => {
       });
 
       // ==================================================
-      // ACKNOWLEDGE IMMEDIATELY
+      // RESPOND IMMEDIATELY
       // ==================================================
 
       await interaction.reply({
@@ -313,12 +318,12 @@ client.on("interactionCreate", async interaction => {
       } catch (error) {
 
         console.log(
-          "⚠️ Could not DM host. DMs may be disabled."
+          "⚠️ Could not DM host."
         );
       }
 
       // ==================================================
-      // PUBLIC GAME
+      // PUBLIC GAME EVENT
       // ==================================================
 
       const gameEmbed =
@@ -349,7 +354,7 @@ client.on("interactionCreate", async interaction => {
         });
 
         console.log(
-          "🎮 Public game message sent."
+          "🎮 Public game event sent."
         );
 
       } catch (error) {
@@ -388,14 +393,15 @@ client.on("interactionCreate", async interaction => {
         new EmbedBuilder()
           .setColor(getColor(color))
           .setFooter({
-            text: `Today at ${new Date().toLocaleTimeString(
-              "en-PH",
-              {
-                hour: "2-digit",
-                minute: "2-digit",
-                hour12: false
-              }
-            )}`
+            text:
+              `Today at ${new Date().toLocaleTimeString(
+                "en-PH",
+                {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  hour12: false
+                }
+              )}`
           });
 
       if (
@@ -456,14 +462,12 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      // ==================================================
-      // PERMISSION
-      // ==================================================
-
+      // HOST
       const isHost =
         interaction.user.id ===
         game.hostId;
 
+      // MANAGE MESSAGES
       const canManageMessages =
         interaction.memberPermissions?.has(
           PermissionFlagsBits.ManageMessages
@@ -494,7 +498,7 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      // ACKNOWLEDGE BUTTON
+      // ACK BUTTON
       await interaction.deferUpdate();
 
       game.started = true;
@@ -662,7 +666,7 @@ client.on("messageCreate", async message => {
 });
 
 // ==================================================
-// DISCORD ERROR EVENTS
+// DISCORD ERRORS
 // ==================================================
 
 client.on("error", error => {
@@ -711,22 +715,51 @@ process.on(
 );
 
 // ==================================================
-// LOGIN
+// DISCORD LOGIN
 // ==================================================
 
 console.log(
   "🔑 Logging into Discord..."
 );
 
+const loginTimeout =
+  setTimeout(() => {
+
+    console.error(
+      "❌ Discord login timed out after 30 seconds."
+    );
+
+    console.error(
+      "⚠️ The bot could not establish a Discord Gateway connection."
+    );
+
+    console.error(
+      "⚠️ Check your DISCORD_TOKEN and Discord connection."
+    );
+
+    process.exit(1);
+
+  }, 30000);
+
 client.login(TOKEN)
   .then(() => {
+
+    clearTimeout(loginTimeout);
+
     console.log(
-      "🔐 Discord login request sent."
+      "🔐 Discord login request completed."
     );
+
   })
   .catch(error => {
+
+    clearTimeout(loginTimeout);
+
     console.error(
-      "❌ DISCORD LOGIN FAILED:",
-      error
+      "❌ DISCORD LOGIN FAILED:"
     );
+
+    console.error(error);
+
+    process.exit(1);
   });
