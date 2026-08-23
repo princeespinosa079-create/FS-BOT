@@ -113,36 +113,12 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
 })();
 
 // ====================
-// Auto Status
-// ====================
-
-function updateStatus() {
-  if (!client.user) return;
-
-  const serverCount = client.guilds.cache.size;
-
-  client.user.setActivity(
-    `You •  ${serverCount} Server${serverCount === 1 ? "" : "s"}`,
-    {
-      type: 3
-    }
-  );
-}
-
-// ====================
 // Bot Ready
 // ====================
 
 client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
-
-  updateStatus();
-
-  setInterval(updateStatus, 5 * 60 * 1000);
 });
-
-client.on("guildCreate", updateStatus);
-client.on("guildDelete", updateStatus);
 
 // ====================
 // Interactions
@@ -181,6 +157,30 @@ client.on("interactionCreate", async interaction => {
       started: false
     });
 
+    // ====================
+    // DM Host
+    // ====================
+
+    try {
+      await host.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0x808080)
+            .setTitle("🔐 GUESS NUMBER ANSWER")
+            .setDescription(
+              `> 🔢 **Answer:** \`${answer}\`\n` +
+              `> 📌 **Range:** \`1 - 10000\``
+            )
+        ]
+      });
+    } catch (error) {
+      console.log(`Could not DM ${host.tag}.`);
+    }
+
+    // ====================
+    // Public Game Event
+    // ====================
+
     const embed = new EmbedBuilder()
       .setColor(0x808080)
       .setTitle("GAME EVENT 🧧")
@@ -196,8 +196,10 @@ client.on("interactionCreate", async interaction => {
         .setStyle(ButtonStyle.Primary)
     );
 
-    // No visible slash-command response
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({
+      ephemeral: true
+    });
+
     await interaction.deleteReply();
 
     await interaction.channel.send({
@@ -298,11 +300,9 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
-    // Host can start
     const isHost =
       interaction.user.id === game.hostId;
 
-    // Manage Messages can start
     const canManageMessages =
       interaction.memberPermissions?.has(
         PermissionFlagsBits.ManageMessages
@@ -366,9 +366,7 @@ client.on("messageCreate", async message => {
   const guess = Number(content);
 
   // Only 1 - 10000
-  if (guess < 1 || guess > 10000) {
-    return;
-  }
+  if (guess < 1 || guess > 10000) return;
 
   // ====================
   // CORRECT ANSWER
@@ -394,16 +392,18 @@ client.on("messageCreate", async message => {
   }
 
   // ====================
-  // DISTANCE
+  // 10% CLOSE RANGE
   // ====================
 
   const difference =
     Math.abs(game.answer - guess);
 
-  // 50 or less away
-  if (difference <= 50) {
+  const closeRange =
+    Math.max(1, Math.floor(game.answer * 0.10));
 
-    return message.reply({
+  if (difference <= closeRange) {
+
+    await message.reply({
       embeds: [
         new EmbedBuilder()
           .setColor(0x808080)
@@ -413,37 +413,6 @@ client.on("messageCreate", async message => {
       ]
     });
   }
-
-  // 51 - 100 away
-  if (difference <= 100) {
-
-    if (guess < game.answer) {
-
-      return message.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0x808080)
-            .setDescription(
-              `> 💀 **HIGHER**`
-            )
-        ]
-      });
-
-    } else {
-
-      return message.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0x808080)
-            .setDescription(
-              `> 🤝 **LOWER BRO!**`
-            )
-        ]
-      });
-    }
-  }
-
-  // More than 100 away = no response
 });
 
 // ====================
