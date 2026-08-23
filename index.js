@@ -8,8 +8,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  PermissionFlagsBits,
-  AttachmentBuilder
+  PermissionFlagsBits
 } = require("discord.js");
 
 const express = require("express");
@@ -17,15 +16,23 @@ const fs = require("fs");
 const path = require("path");
 
 // ====================
-// Environment
+// ENVIRONMENT
 // ====================
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
 const PORT = process.env.PORT || 3000;
 
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.error(
+    "❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID."
+  );
+  process.exit(1);
+}
+
 // ====================
-// Render Web Server
+// RENDER WEB SERVER
 // ====================
 
 const app = express();
@@ -45,7 +52,7 @@ app.listen(PORT, "0.0.0.0", () => {
 });
 
 // ====================
-// File Storage
+// FILE STORAGE
 // ====================
 
 const FILE_DIR = path.join(__dirname, "files");
@@ -57,7 +64,7 @@ if (!fs.existsSync(FILE_DIR)) {
 }
 
 // ====================
-// Discord Client
+// DISCORD CLIENT
 // ====================
 
 const client = new Client({
@@ -69,7 +76,7 @@ const client = new Client({
 });
 
 // ====================
-// Data
+// DATA
 // ====================
 
 const games = new Map();
@@ -81,8 +88,10 @@ const fsChannels = new Set();
 
 const storedFiles = new Map();
 
+const fsSessions = new Map();
+
 // ====================
-// Slash Commands
+// SLASH COMMANDS
 // ====================
 
 const commands = [
@@ -140,7 +149,7 @@ const commands = [
     .addChannelOption(option =>
       option
         .setName("channel")
-        .setDescription("Channel for the FS Finder")
+        .setDescription("Channel for FS Finder")
         .setRequired(true)
     )
     .setDefaultMemberPermissions(
@@ -150,7 +159,7 @@ const commands = [
   // /scanchannel
   new SlashCommandBuilder()
     .setName("scanchannel")
-    .setDescription("Scan a channel and save its attached files")
+    .setDescription("Scan a channel and save attached files")
     .addChannelOption(option =>
       option
         .setName("channel")
@@ -164,78 +173,100 @@ const commands = [
 ].map(command => command.toJSON());
 
 // ====================
-// Register Commands
+// INSTANT GUILD COMMAND REGISTRATION
 // ====================
 
 const rest = new REST({
   version: "10"
 }).setToken(TOKEN);
 
-(async () => {
+async function registerCommands() {
   try {
-    console.log("Registering slash commands...");
+
+    console.log(
+      "Registering guild slash commands..."
+    );
 
     await rest.put(
-      Routes.applicationCommands(CLIENT_ID),
+      Routes.applicationGuildCommands(
+        CLIENT_ID,
+        GUILD_ID
+      ),
       {
         body: commands
       }
     );
 
-    console.log("Slash commands registered!");
+    console.log(
+      "✅ Slash commands registered instantly!"
+    );
+
   } catch (error) {
+
     console.error(
-      "Command registration error:",
+      "❌ Command registration error:",
       error
     );
   }
-})();
+}
 
 // ====================
-// Helper: Save File
+// SAVE FILE
 // ====================
 
-async function saveAttachment(attachment, message) {
+async function saveAttachment(
+  attachment,
+  message
+) {
 
   try {
 
-    const fileName = path.basename(
-      attachment.name || "unknown_file"
-    );
+    const originalName =
+      path.basename(
+        attachment.name || "unknown_file"
+      );
 
-    const safeName = fileName.replace(
-      /[^a-zA-Z0-9._ -]/g,
-      "_"
-    );
+    const safeName =
+      originalName.replace(
+        /[^a-zA-Z0-9._ -]/g,
+        "_"
+      );
 
     const uniqueName =
       `${Date.now()}_${message.id}_${safeName}`;
 
     const filePath =
-      path.join(FILE_DIR, uniqueName);
-
-    // 20 MB limit
-    if (attachment.size > 20 * 1024 * 1024) {
-      console.log(
-        `Skipped large file: ${fileName}`
+      path.join(
+        FILE_DIR,
+        uniqueName
       );
+
+    // 25 MB limit
+    if (
+      attachment.size >
+      25 * 1024 * 1024
+    ) {
+
+      console.log(
+        `Skipped large file: ${originalName}`
+      );
+
       return null;
     }
 
-    const response = await fetch(
-      attachment.url
-    );
+    const response =
+      await fetch(
+        attachment.url
+      );
 
     if (!response.ok) {
-      console.log(
-        `Failed downloading: ${fileName}`
-      );
       return null;
     }
 
-    const buffer = Buffer.from(
-      await response.arrayBuffer()
-    );
+    const buffer =
+      Buffer.from(
+        await response.arrayBuffer()
+      );
 
     fs.writeFileSync(
       filePath,
@@ -243,17 +274,38 @@ async function saveAttachment(attachment, message) {
     );
 
     const fileData = {
-      id: `${message.id}_${attachment.id}`,
-      originalName: fileName,
-      storedName: uniqueName,
-      path: filePath,
-      size: buffer.length,
-      messageId: message.id,
-      channelId: message.channel.id,
-      guildId: message.guild.id,
-      uploadedBy: message.author.id,
-      createdAt: new Date().toISOString(),
-      url: attachment.url
+
+      id:
+        `${message.id}_${attachment.id}`,
+
+      originalName,
+
+      storedName:
+        uniqueName,
+
+      path:
+        filePath,
+
+      size:
+        buffer.length,
+
+      messageId:
+        message.id,
+
+      channelId:
+        message.channel.id,
+
+      guildId:
+        message.guild.id,
+
+      uploadedBy:
+        message.author.id,
+
+      createdAt:
+        new Date().toISOString(),
+
+      url:
+        attachment.url
     };
 
     storedFiles.set(
@@ -275,12 +327,13 @@ async function saveAttachment(attachment, message) {
 }
 
 // ====================
-// Helper: Scan Channel
+// SCAN CHANNEL
 // ====================
 
 async function scanChannel(channel) {
 
-  let lastId = null;
+  let before = undefined;
+
   let totalMessages = 0;
   let totalFiles = 0;
 
@@ -290,22 +343,30 @@ async function scanChannel(channel) {
       limit: 100
     };
 
-    if (lastId) {
-      options.before = lastId;
+    if (before) {
+      options.before = before;
     }
 
     const messages =
-      await channel.messages.fetch(options);
+      await channel.messages.fetch(
+        options
+      );
 
     if (messages.size === 0) {
       break;
     }
 
-    totalMessages += messages.size;
+    totalMessages +=
+      messages.size;
 
-    for (const message of messages.values()) {
+    for (
+      const message
+      of messages.values()
+    ) {
 
-      if (!message.attachments.size) {
+      if (
+        message.attachments.size === 0
+      ) {
         continue;
       }
 
@@ -326,7 +387,7 @@ async function scanChannel(channel) {
       }
     }
 
-    lastId =
+    before =
       messages.last().id;
 
     if (messages.size < 100) {
@@ -335,20 +396,24 @@ async function scanChannel(channel) {
   }
 
   return {
-    messages: totalMessages,
-    files: totalFiles
+    messages:
+      totalMessages,
+
+    files:
+      totalFiles
   };
 }
 
 // ====================
-// Helper: Search Files
+// SEARCH FILES
 // ====================
 
-function searchFiles(searchText) {
+function searchFiles(query) {
 
   const words =
-    searchText
+    query
       .toLowerCase()
+      .trim()
       .split(/\s+/)
       .filter(Boolean);
 
@@ -358,16 +423,17 @@ function searchFiles(searchText) {
 
   const results = [];
 
-  for (const file of storedFiles.values()) {
+  for (
+    const file
+    of storedFiles.values()
+  ) {
 
-    const name =
+    const filename =
       file.originalName.toLowerCase();
 
-    // Every search word must appear
-    // somewhere in the filename.
     const matches =
       words.every(word =>
-        name.includes(word)
+        filename.includes(word)
       );
 
     if (matches) {
@@ -379,22 +445,174 @@ function searchFiles(searchText) {
 }
 
 // ====================
-// Bot Ready
+// FS RESULT
 // ====================
 
-client.once("ready", () => {
+async function sendFSResult(
+  interaction,
+  results,
+  index,
+  sessionId,
+  update = false
+) {
 
-  console.log(
-    `Logged in as ${client.user.tag}`
-  );
+  if (!results.length) {
 
-  console.log(
-    `Stored files: ${storedFiles.size}`
-  );
-});
+    const embed =
+      new EmbedBuilder()
+        .setColor(0x808080)
+        .setTitle(
+          "FS Bot Finder"
+        )
+        .setDescription(
+          "> ❌ **No matching files found.**"
+        );
+
+    if (update) {
+
+      return interaction.update({
+        embeds: [embed],
+        components: []
+      });
+
+    } else {
+
+      return interaction.reply({
+        embeds: [embed]
+      });
+    }
+  }
+
+  if (index < 0) {
+    index =
+      results.length - 1;
+  }
+
+  if (
+    index >=
+    results.length
+  ) {
+    index = 0;
+  }
+
+  const file =
+    results[index];
+
+  const now =
+    new Date();
+
+  const time =
+    now.toLocaleTimeString(
+      "en-US",
+      {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }
+    );
+
+  // ====================
+  // GRAY FS EMBED
+  // ====================
+
+  const embed =
+    new EmbedBuilder()
+      .setColor(0x808080)
+      .setTitle(
+        "FS Bot Finder"
+      )
+      .setDescription(
+        `> Here is the file twin!\n\n` +
+        `📁 **${file.originalName}**\n` +
+        `Today at ${time}`
+      );
+
+  // ====================
+  // GRAY BUTTONS
+  // ====================
+
+  const row =
+    new ActionRowBuilder()
+      .addComponents(
+
+        // BACK
+        new ButtonBuilder()
+          .setCustomId(
+            `fs_prev:${sessionId}`
+          )
+          .setEmoji("⬅️")
+          .setStyle(
+            ButtonStyle.Secondary
+          ),
+
+        // PAGE
+        new ButtonBuilder()
+          .setCustomId(
+            `fs_page:${sessionId}`
+          )
+          .setLabel(
+            `${index + 1}/${results.length}`
+          )
+          .setStyle(
+            ButtonStyle.Secondary
+          )
+          .setDisabled(true),
+
+        // NEXT
+        new ButtonBuilder()
+          .setCustomId(
+            `fs_next:${sessionId}`
+          )
+          .setEmoji("➡️")
+          .setStyle(
+            ButtonStyle.Secondary
+          )
+      );
+
+  const fileAttachment = {
+    attachment:
+      file.path,
+
+    name:
+      file.originalName
+  };
+
+  if (update) {
+
+    await interaction.update({
+      embeds: [embed],
+      components: [row],
+      files: [fileAttachment]
+    });
+
+  } else {
+
+    await interaction.reply({
+      embeds: [embed],
+      components: [row],
+      files: [fileAttachment]
+    });
+  }
+}
 
 // ====================
-// Interactions
+// BOT READY
+// ====================
+
+client.once(
+  "ready",
+  async () => {
+
+    console.log(
+      `✅ Logged in as ${client.user.tag}`
+    );
+
+    await registerCommands();
+  }
+);
+
+// ====================
+// INTERACTIONS
 // ====================
 
 client.on(
@@ -402,18 +620,32 @@ client.on(
   async interaction => {
 
     // ====================
-    // /guessnumber
+    // GUESS NUMBER
     // ====================
 
     if (
       interaction.isChatInputCommand() &&
-      interaction.commandName === "guessnumber"
+      interaction.commandName ===
+        "guessnumber"
     ) {
 
       const answer =
         interaction.options.getInteger(
           "answer"
         );
+
+      // FIX NULL
+      if (
+        answer === null ||
+        answer === undefined
+      ) {
+
+        return interaction.reply({
+          content:
+            "❌ Please provide an answer from 1 to 10000.",
+          ephemeral: true
+        });
+      }
 
       const host =
         interaction.user;
@@ -430,15 +662,22 @@ client.on(
         });
       }
 
-      // Save answer FIRST
-      games.set(gameId, {
-        hostId: host.id,
-        answer: answer,
-        started: false
-      });
+      games.set(
+        gameId,
+        {
+          hostId:
+            host.id,
+
+          answer:
+            Number(answer),
+
+          started:
+            false
+        }
+      );
 
       // ====================
-      // DM Answer
+      // DM ANSWER TO HOST
       // ====================
 
       try {
@@ -460,12 +699,12 @@ client.on(
       } catch (error) {
 
         console.log(
-          `Could not DM ${host.tag}.`
+          "⚠️ Could not DM host."
         );
       }
 
       // ====================
-      // Public Event
+      // PUBLIC EVENT
       // ====================
 
       const embed =
@@ -485,16 +724,19 @@ client.on(
 
             new ButtonBuilder()
               .setCustomId(
-                `guess_start_${gameId}`
+                `guess_start:${gameId}`
               )
-              .setLabel("Start")
+              .setLabel(
+                "Start"
+              )
               .setStyle(
                 ButtonStyle.Primary
               )
 
           );
 
-      await interaction.deferReply({
+      await interaction.reply({
+        content: "",
         ephemeral: true
       });
 
@@ -509,22 +751,29 @@ client.on(
     }
 
     // ====================
-    // /whitelist
+    // WHITELIST
     // ====================
 
     if (
       interaction.isChatInputCommand() &&
-      interaction.commandName === "whitelist"
+      interaction.commandName ===
+        "whitelist"
     ) {
 
       const user =
-        interaction.options.getUser("user");
+        interaction.options.getUser(
+          "user"
+        );
 
       const role =
-        interaction.options.getRole("role");
+        interaction.options.getRole(
+          "role"
+        );
 
       const mode =
-        interaction.options.getString("mode");
+        interaction.options.getString(
+          "mode"
+        );
 
       if (!user && !role) {
 
@@ -534,11 +783,6 @@ client.on(
           ephemeral: true
         });
       }
-
-      const action =
-        mode === "add"
-          ? "added to"
-          : "removed from";
 
       if (user) {
 
@@ -580,6 +824,11 @@ client.on(
         );
       }
 
+      const action =
+        mode === "add"
+          ? "added to"
+          : "removed from";
+
       const embed =
         new EmbedBuilder()
           .setColor(0x808080)
@@ -587,7 +836,9 @@ client.on(
             "WHITELIST"
           )
           .setDescription(
-            `> ✅ ${targets.join(" and ")} **${action} the whitelist.**`
+            `> ✅ ${targets.join(
+              " and "
+            )} **${action} the whitelist.**`
           );
 
       return interaction.reply({
@@ -597,12 +848,13 @@ client.on(
     }
 
     // ====================
-    // /setchannel
+    // SET CHANNEL
     // ====================
 
     if (
       interaction.isChatInputCommand() &&
-      interaction.commandName === "setchannel"
+      interaction.commandName ===
+        "setchannel"
     ) {
 
       const channel =
@@ -635,7 +887,7 @@ client.on(
           .setDescription(
             `> ✅ **FS Finder enabled!**\n` +
             `> 📁 Channel: ${channel}\n` +
-            `> 🔎 Members can now use \`!fs <filename>\` here.`
+            `> 🔎 Use \`!fs <filename>\` here.`
           );
 
       return interaction.reply({
@@ -644,12 +896,13 @@ client.on(
     }
 
     // ====================
-    // /scanchannel
+    // SCAN CHANNEL
     // ====================
 
     if (
       interaction.isChatInputCommand() &&
-      interaction.commandName === "scanchannel"
+      interaction.commandName ===
+        "scanchannel"
     ) {
 
       const channel =
@@ -671,20 +924,23 @@ client.on(
 
       await interaction.reply({
         content:
-          "🔍 Scanning channel messages and downloading files...",
+          "🔍 **Scanning channel...**",
         ephemeral: true
       });
 
       try {
 
         const result =
-          await scanChannel(channel);
+          await scanChannel(
+            channel
+          );
 
         await interaction.editReply({
           content:
-            `✅ Scan complete!\n` +
+            `✅ **Scan complete!**\n\n` +
             `📨 Messages scanned: **${result.messages}**\n` +
-            `📁 Files saved: **${result.files}**`
+            `📁 Files saved: **${result.files}**\n` +
+            `💾 Total files: **${storedFiles.size}**`
         });
 
       } catch (error) {
@@ -696,7 +952,7 @@ client.on(
 
         await interaction.editReply({
           content:
-            "❌ I couldn't scan that channel. Make sure the bot has **View Channel**, **Read Message History**, and **View Messages** permissions."
+            "❌ Scan failed. Make sure the bot can **View Channel** and **Read Message History**."
         });
       }
 
@@ -704,20 +960,19 @@ client.on(
     }
 
     // ====================
-    // Start Button
+    // START GAME
     // ====================
 
     if (
       interaction.isButton() &&
       interaction.customId.startsWith(
-        "guess_start_"
+        "guess_start:"
       )
     ) {
 
       const gameId =
-        interaction.customId.replace(
-          "guess_start_",
-          ""
+        interaction.customId.substring(
+          "guess_start:".length
         );
 
       const game =
@@ -748,7 +1003,7 @@ client.on(
 
         return interaction.reply({
           content:
-            "❌ Only the **host** or members with **Manage Messages** permission can start this game.",
+            "❌ Only the **host** or members with **Manage Messages** can start this game.",
           ephemeral: true
         });
       }
@@ -782,63 +1037,80 @@ client.on(
     }
 
     // ====================
-    // FS Pagination
+    // FS BACK / NEXT
     // ====================
 
     if (
       interaction.isButton() &&
-      interaction.customId.startsWith(
-        "fs_"
+      (
+        interaction.customId.startsWith(
+          "fs_prev:"
+        ) ||
+        interaction.customId.startsWith(
+          "fs_next:"
+        )
       )
     ) {
 
-      const parts =
-        interaction.customId.split(":");
+      const [
+        action,
+        sessionId
+      ] =
+        interaction.customId.split(
+          ":"
+        );
 
-      const direction =
-        parts[1];
+      const session =
+        fsSessions.get(
+          sessionId
+        );
 
-      const page =
-        Number(parts[2]);
-
-      const search =
-        parts.slice(3).join(":");
-
-      const results =
-        searchFiles(search);
-
-      if (!results.length) {
+      if (!session) {
 
         return interaction.reply({
           content:
-            "❌ No files found.",
+            "❌ This FS search has expired.",
           ephemeral: true
         });
       }
 
-      let newPage = page;
+      let index =
+        session.index;
 
-      if (direction === "next") {
-        newPage++;
+      if (
+        action === "fs_next"
+      ) {
+        index++;
       }
 
-      if (direction === "back") {
-        newPage--;
+      if (
+        action === "fs_prev"
+      ) {
+        index--;
       }
 
-      if (newPage < 0) {
-        newPage = results.length - 1;
+      if (
+        index < 0
+      ) {
+        index =
+          session.results.length - 1;
       }
 
-      if (newPage >= results.length) {
-        newPage = 0;
+      if (
+        index >=
+        session.results.length
+      ) {
+        index = 0;
       }
+
+      session.index =
+        index;
 
       await sendFSResult(
         interaction,
-        results,
-        newPage,
-        search,
+        session.results,
+        index,
+        sessionId,
         true
       );
 
@@ -848,112 +1120,7 @@ client.on(
 );
 
 // ====================
-// FS Finder
-// ====================
-
-async function sendFSResult(
-  interaction,
-  results,
-  index,
-  search,
-  update = false
-) {
-
-  const file =
-    results[index];
-
-  const total =
-    results.length;
-
-  const now =
-    new Date();
-
-  const time =
-    now.toLocaleTimeString(
-      "en-US",
-      {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false
-      }
-    );
-
-  const embed =
-    new EmbedBuilder()
-      .setColor(0x808080)
-      .setTitle(
-        "FS Bot Finder"
-      )
-      .setDescription(
-        `> Here is the file twin!\n\n` +
-        `📁 **${file.originalName}**\n` +
-        `Today at ${time}`
-      );
-
-  const row =
-    new ActionRowBuilder()
-      .addComponents(
-
-        new ButtonBuilder()
-          .setCustomId(
-            `fs:back:${index}:${search}`
-          )
-          .setEmoji("⬅️")
-          .setStyle(
-            ButtonStyle.Secondary
-          ),
-
-        new ButtonBuilder()
-          .setCustomId(
-            `fs:page:${index}:${search}`
-          )
-          .setLabel(
-            `${index + 1}/${total}`
-          )
-          .setStyle(
-            ButtonStyle.Secondary
-          )
-          .setDisabled(true),
-
-        new ButtonBuilder()
-          .setCustomId(
-            `fs:next:${index}:${search}`
-          )
-          .setEmoji("➡️")
-          .setStyle(
-            ButtonStyle.Secondary
-          )
-
-      );
-
-  const attachment =
-    new AttachmentBuilder(
-      file.path,
-      {
-        name: file.originalName
-      }
-    );
-
-  if (update) {
-
-    await interaction.update({
-      embeds: [embed],
-      components: [row],
-      files: [attachment]
-    });
-
-  } else {
-
-    await interaction.reply({
-      embeds: [embed],
-      components: [row],
-      files: [attachment]
-    });
-  }
-}
-
-// ====================
-// Message Create
+// MESSAGE CREATE
 // ====================
 
 client.on(
@@ -969,7 +1136,7 @@ client.on(
     }
 
     // ====================
-    // !fs
+    // !FS
     // ====================
 
     if (
@@ -978,19 +1145,19 @@ client.on(
         .startsWith("!fs")
     ) {
 
-      const channelKey =
+      const key =
         `${message.guild.id}:${message.channel.id}`;
 
-      if (!fsChannels.has(channelKey)) {
+      if (!fsChannels.has(key)) {
         return;
       }
 
-      const search =
+      const query =
         message.content
           .slice(3)
           .trim();
 
-      if (!search) {
+      if (!query) {
 
         return message.reply(
           "❌ Usage: `!fs <filename>`"
@@ -998,7 +1165,7 @@ client.on(
       }
 
       const results =
-        searchFiles(search);
+        searchFiles(query);
 
       if (!results.length) {
 
@@ -1010,17 +1177,37 @@ client.on(
                 "FS Bot Finder"
               )
               .setDescription(
-                `> ❌ No file found for **${search}**`
+                `> ❌ **No file found for:** \`${query}\``
               )
           ]
         });
       }
 
+      const sessionId =
+        `${message.id}_${Date.now()}`;
+
+      fsSessions.set(
+        sessionId,
+        {
+          results,
+          index: 0
+        }
+      );
+
+      setTimeout(
+        () => {
+          fsSessions.delete(
+            sessionId
+          );
+        },
+        30 * 60 * 1000
+      );
+
       await sendFSResult(
         message,
         results,
         0,
-        search,
+        sessionId,
         false
       );
 
@@ -1028,7 +1215,7 @@ client.on(
     }
 
     // ====================
-    // Guess Number
+    // GUESS NUMBER
     // ====================
 
     const gameId =
@@ -1062,7 +1249,7 @@ client.on(
     }
 
     // ====================
-    // Correct Answer
+    // WINNER
     // ====================
 
     if (
@@ -1082,19 +1269,32 @@ client.on(
         embeds: [embed]
       });
 
-      games.delete(gameId);
+      games.delete(
+        gameId
+      );
 
       return;
     }
 
     // ====================
-    // 10% Close Range
+    // CLOSE MESSAGE
     // ====================
 
     const difference =
       Math.abs(
         game.answer - guess
       );
+
+    /*
+     * 10% of the answer.
+     *
+     * Example:
+     * Answer 900
+     * 10% = 90
+     *
+     * Answer 10000
+     * 10% = 1000
+     */
 
     const closeRange =
       Math.max(
@@ -1113,7 +1313,7 @@ client.on(
           new EmbedBuilder()
             .setColor(0x808080)
             .setDescription(
-              `> 😱 **YOU’RE SO CLOSE BRO!**`
+              "> 😱 **YOU’RE SO CLOSE BRO!**"
             )
         ]
       });
@@ -1122,7 +1322,7 @@ client.on(
 );
 
 // ====================
-// Error Handling
+// ERROR HANDLING
 // ====================
 
 client.on(
@@ -1146,7 +1346,7 @@ process.on(
 );
 
 // ====================
-// Login
+// LOGIN
 // ====================
 
 client.login(TOKEN);
