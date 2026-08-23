@@ -13,53 +13,37 @@ const {
 
 const express = require("express");
 
-// ==================================================
-// ENVIRONMENT
-// ==================================================
-
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const PORT = process.env.PORT || 3000;
 
-if (!TOKEN) {
-  console.error("❌ DISCORD_TOKEN is missing.");
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.error("❌ Missing environment variables.");
   process.exit(1);
 }
 
-if (!CLIENT_ID) {
-  console.error("❌ CLIENT_ID is missing.");
-  process.exit(1);
-}
-
-if (!GUILD_ID) {
-  console.error("❌ GUILD_ID is missing.");
-  process.exit(1);
-}
-
-// ==================================================
-// RENDER WEB SERVER
-// ==================================================
+// ==============================
+// Render Web Server
+// ==============================
 
 const app = express();
 
 app.get("/", (req, res) => {
-  res.status(200).send("Discord Bot is online!");
+  res.status(200).send("FS Bot Online");
 });
 
 app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "online"
-  });
+  res.status(200).json({ status: "online" });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Web server running on port ${PORT}`);
 });
 
-// ==================================================
-// DISCORD CLIENT
-// ==================================================
+// ==============================
+// Discord
+// ==============================
 
 const client = new Client({
   intents: [
@@ -69,15 +53,11 @@ const client = new Client({
   ]
 });
 
-// ==================================================
-// GAME STORAGE
-// ==================================================
-
 const games = new Map();
 
-// ==================================================
-// SLASH COMMANDS
-// ==================================================
+// ==============================
+// Commands
+// ==============================
 
 const commands = [
   new SlashCommandBuilder()
@@ -94,7 +74,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("embed")
-    .setDescription("Create a custom embed")
+    .setDescription("Create an embed")
     .addStringOption(option =>
       option
         .setName("title")
@@ -121,26 +101,22 @@ const commands = [
           { name: "Purple", value: "purple" },
           { name: "Pink", value: "pink" },
           { name: "Cyan", value: "cyan" },
-          { name: "Aqua", value: "aqua" },
           { name: "Gold", value: "gold" },
           { name: "White", value: "white" },
           { name: "Gray", value: "gray" },
           { name: "Black", value: "black" }
         )
     )
-].map(command => command.toJSON());
+].map(x => x.toJSON());
 
-// ==================================================
-// REGISTER GUILD COMMANDS
-// ==================================================
+// ==============================
+// Register Commands
+// ==============================
 
 async function registerCommands() {
   try {
-    console.log("🔄 Registering guild commands...");
-
-    const rest = new REST({
-      version: "10"
-    }).setToken(TOKEN);
+    const rest = new REST({ version: "10" })
+      .setToken(TOKEN);
 
     await rest.put(
       Routes.applicationGuildCommands(
@@ -152,58 +128,18 @@ async function registerCommands() {
       }
     );
 
-    console.log("✅ Guild commands registered successfully.");
+    console.log("✅ Slash commands registered.");
   } catch (error) {
     console.error(
-      "❌ Command registration failed:",
+      "❌ Command registration error:",
       error
     );
   }
 }
 
-// ==================================================
-// COLORS
-// ==================================================
-
-function getColor(color) {
-  const colors = {
-    blue: 0x3498DB,
-    red: 0xE74C3C,
-    green: 0x2ECC71,
-    yellow: 0xF1C40F,
-    orange: 0xE67E22,
-    purple: 0x9B59B6,
-    pink: 0xFF69B4,
-    cyan: 0x00FFFF,
-    aqua: 0x1ABC9C,
-    gold: 0xFFD700,
-    white: 0xFFFFFF,
-    gray: 0x808080,
-    black: 0x000000
-  };
-
-  return colors[color] ?? colors.gray;
-}
-
-// ==================================================
-// TIME
-// ==================================================
-
-function getCurrentTime() {
-  return new Date().toLocaleTimeString(
-    "en-US",
-    {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-      timeZone: "Asia/Manila"
-    }
-  );
-}
-
-// ==================================================
-// BOT READY
-// ==================================================
+// ==============================
+// Ready
+// ==============================
 
 client.once("ready", async () => {
   console.log(
@@ -213,231 +149,213 @@ client.once("ready", async () => {
   await registerCommands();
 });
 
-// ==================================================
+// ==============================
 // INTERACTIONS
-// ==================================================
+// ==============================
 
 client.on("interactionCreate", async interaction => {
 
-  // ==================================================
-  // SLASH COMMANDS
-  // ==================================================
+  console.log(
+    `📥 Interaction received: ${
+      interaction.isChatInputCommand()
+        ? interaction.commandName
+        : interaction.type
+    }`
+  );
 
-  if (interaction.isChatInputCommand()) {
+  // ==============================
+  // GUESSNUMBER
+  // ==============================
 
-    // ==================================================
-    // /guessnumber
-    // ==================================================
+  if (
+    interaction.isChatInputCommand() &&
+    interaction.commandName === "guessnumber"
+  ) {
 
-    if (interaction.commandName === "guessnumber") {
+    const answer =
+      interaction.options.getInteger("answer");
 
-      const answer =
-        interaction.options.getInteger("answer");
+    console.log(
+      `🎯 Answer received: ${answer}`
+    );
 
-      // ALWAYS ACKNOWLEDGE FIRST
-      if (!answer || answer < 1 || answer > 10000) {
-        try {
-          await interaction.reply({
-            content:
-              "❌ Please provide an answer from 1 to 10000.",
-            ephemeral: true
-          });
-        } catch (error) {
-          console.error(
-            "❌ Answer validation error:",
-            error
-          );
-        }
+    // RESPOND IMMEDIATELY
+    try {
 
-        return;
-      }
-
-      const gameId =
-        `${interaction.guildId}-${interaction.channelId}`;
-
-      if (games.has(gameId)) {
-
-        try {
-          await interaction.reply({
-            content:
-              "❌ There is already a Guess Number game in this channel.",
-            ephemeral: true
-          });
-        } catch (error) {
-          console.error(
-            "❌ Existing game reply error:",
-            error
-          );
-        }
-
-        return;
-      }
-
-      const host = interaction.user;
-
-      // Save answer as a NUMBER
-      games.set(gameId, {
-        hostId: host.id,
-        answer: Number(answer),
-        started: false
+      await interaction.reply({
+        content: "✅ Command received!",
+        ephemeral: true
       });
 
-      // ==================================================
-      // ACKNOWLEDGE DISCORD IMMEDIATELY
-      // ==================================================
+      console.log(
+        "✅ Discord interaction acknowledged."
+      );
 
-      try {
-        await interaction.reply({
-          content: "\u200b",
-          ephemeral: true
-        });
-      } catch (error) {
-        console.error(
-          "❌ Could not acknowledge /guessnumber:",
-          error
-        );
+    } catch (error) {
 
-        games.delete(gameId);
-        return;
-      }
-
-      // ==================================================
-      // DM ANSWER TO HOST
-      // ==================================================
-
-      try {
-        const dmEmbed =
-          new EmbedBuilder()
-            .setColor(0x808080)
-            .setDescription(
-              `> 🔢 **Answer:** \`${answer}\`\n` +
-              `> 📌 **Range:** \`1 - 10000\``
-            );
-
-        await host.send({
-          embeds: [dmEmbed]
-        });
-
-        console.log(
-          `📩 Answer ${answer} sent to ${host.tag}`
-        );
-
-      } catch (error) {
-        console.log(
-          `⚠️ Could not DM ${host.tag}. Their DMs may be disabled.`
-        );
-      }
-
-      // ==================================================
-      // PUBLIC GAME EMBED
-      // ==================================================
-
-      const gameEmbed =
-        new EmbedBuilder()
-          .setColor(0x808080)
-          .setTitle("GAME EVENT 🧧")
-          .setDescription(
-            `> **Host by <@${host.id}>**\n` +
-            `> **Click \`Start Button\` below to start the Guess Number Game.**`
-          );
-
-      const row =
-        new ActionRowBuilder()
-          .addComponents(
-            new ButtonBuilder()
-              .setCustomId(
-                `guess_start_${gameId}`
-              )
-              .setLabel("Start")
-              .setStyle(ButtonStyle.Primary)
-          );
-
-      // Send public message
-      try {
-        await interaction.channel.send({
-          embeds: [gameEmbed],
-          components: [row]
-        });
-
-        console.log(
-          `🎮 Guess game created in ${interaction.channel.name}`
-        );
-
-      } catch (error) {
-
-        console.error(
-          "❌ Could not send game message:",
-          error
-        );
-
-        games.delete(gameId);
-
-        try {
-          await interaction.editReply({
-            content:
-              "❌ I couldn't send the game message in this channel."
-          });
-        } catch {}
-      }
+      console.error(
+        "❌ REPLY FAILED:",
+        error
+      );
 
       return;
     }
 
-    // ==================================================
-    // /embed
-    // ==================================================
+    // Everything below happens AFTER Discord has received response
 
-    if (interaction.commandName === "embed") {
+    const gameId =
+      `${interaction.guildId}-${interaction.channelId}`;
 
-      const title =
-        interaction.options.getString("title");
-
-      const description =
-        interaction.options.getString("description");
-
-      const color =
-        interaction.options.getString("color") || "gray";
-
-      const embed =
-        new EmbedBuilder()
-          .setColor(getColor(color))
-          .setFooter({
-            text: `Today at ${getCurrentTime()}`
-          });
-
-      if (title && title.trim() !== "") {
-        embed.setTitle(title);
-      }
-
-      if (
-        description &&
-        description.trim() !== ""
-      ) {
-        embed.setDescription(description);
-      }
-
-      // Immediate response
-      try {
-
-        await interaction.reply({
-          embeds: [embed]
-        });
-
-      } catch (error) {
-
-        console.error(
-          "❌ /embed response error:",
-          error
-        );
-      }
-
+    if (games.has(gameId)) {
+      await interaction.editReply({
+        content:
+          "❌ There is already a game in this channel."
+      });
       return;
     }
+
+    games.set(gameId, {
+      hostId: interaction.user.id,
+      answer: answer,
+      started: false
+    });
+
+    // DM host
+    try {
+
+      const dm = new EmbedBuilder()
+        .setColor(0x808080)
+        .setDescription(
+          `> 🔢 **Answer:** \`${answer}\`\n` +
+          `> 📌 **Range:** \`1 - 10000\``
+        );
+
+      await interaction.user.send({
+        embeds: [dm]
+      });
+
+    } catch (error) {
+      console.log(
+        "⚠️ Could not DM host."
+      );
+    }
+
+    // Public embed
+    const embed = new EmbedBuilder()
+      .setColor(0x808080)
+      .setTitle("GAME EVENT 🧧")
+      .setDescription(
+        `> **Host by <@${interaction.user.id}>**\n` +
+        `> **Click \`Start Button\` below to start the Guess Number Game.**`
+      );
+
+    const row = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            `guess_start_${gameId}`
+          )
+          .setLabel("Start")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+    try {
+
+      await interaction.channel.send({
+        embeds: [embed],
+        components: [row]
+      });
+
+      await interaction.editReply({
+        content: " "
+      });
+
+    } catch (error) {
+
+      console.error(
+        "❌ Could not send game:",
+        error
+      );
+    }
+
+    return;
   }
 
-  // ==================================================
+  // ==============================
+  // EMBED
+  // ==============================
+
+  if (
+    interaction.isChatInputCommand() &&
+    interaction.commandName === "embed"
+  ) {
+
+    const title =
+      interaction.options.getString("title");
+
+    const description =
+      interaction.options.getString("description");
+
+    const color =
+      interaction.options.getString("color") || "gray";
+
+    const colors = {
+      blue: 0x3498DB,
+      red: 0xE74C3C,
+      green: 0x2ECC71,
+      yellow: 0xF1C40F,
+      orange: 0xE67E22,
+      purple: 0x9B59B6,
+      pink: 0xFF69B4,
+      cyan: 0x00FFFF,
+      gold: 0xFFD700,
+      white: 0xFFFFFF,
+      gray: 0x808080,
+      black: 0x000000
+    };
+
+    const embed = new EmbedBuilder()
+      .setColor(colors[color] || 0x808080)
+      .setFooter({
+        text: `Today at ${new Date().toLocaleTimeString(
+          "en-PH",
+          {
+            hour: "2-digit",
+            minute: "2-digit"
+          }
+        )}`
+      });
+
+    if (title) {
+      embed.setTitle(title);
+    }
+
+    if (description) {
+      embed.setDescription(description);
+    }
+
+    try {
+      await interaction.reply({
+        embeds: [embed]
+      });
+
+      console.log(
+        "✅ /embed responded."
+      );
+
+    } catch (error) {
+      console.error(
+        "❌ /embed error:",
+        error
+      );
+    }
+
+    return;
+  }
+
+  // ==============================
   // START BUTTON
-  // ==================================================
+  // ==============================
 
   if (
     interaction.isButton() &&
@@ -456,228 +374,148 @@ client.on("interactionCreate", async interaction => {
       games.get(gameId);
 
     if (!game) {
-
-      try {
-        await interaction.reply({
-          content:
-            "❌ This game no longer exists.",
-          ephemeral: true
-        });
-      } catch {}
-
-      return;
+      return interaction.reply({
+        content:
+          "❌ This game no longer exists.",
+        ephemeral: true
+      });
     }
-
-    // ==================================================
-    // CHECK PERMISSION
-    // ==================================================
 
     const isHost =
       interaction.user.id === game.hostId;
 
-    const canManageMessages =
+    const canManage =
       interaction.memberPermissions?.has(
         PermissionFlagsBits.ManageMessages
-      ) === true;
+      );
 
-    if (
-      !isHost &&
-      !canManageMessages
-    ) {
-
-      try {
-        await interaction.reply({
-          content:
-            "❌ Only the **host** or members with **Manage Messages** can start this game.",
-          ephemeral: true
-        });
-      } catch {}
-
-      return;
+    if (!isHost && !canManage) {
+      return interaction.reply({
+        content:
+          "❌ Only the host or a member with Manage Messages can start.",
+        ephemeral: true
+      });
     }
 
     if (game.started) {
-
-      try {
-        await interaction.reply({
-          content:
-            "❌ The game has already started!",
-          ephemeral: true
-        });
-      } catch {}
-
-      return;
+      return interaction.reply({
+        content:
+          "❌ Game already started.",
+        ephemeral: true
+      });
     }
-
-    // ==================================================
-    // ACKNOWLEDGE BUTTON IMMEDIATELY
-    // ==================================================
 
     try {
       await interaction.deferUpdate();
     } catch (error) {
       console.error(
-        "❌ Button acknowledgement failed:",
+        "❌ Button error:",
         error
       );
-
       return;
     }
 
     game.started = true;
 
-    // ==================================================
-    // START GAME EMBED
-    // ==================================================
-
-    const startEmbed =
-      new EmbedBuilder()
-        .setColor(0x808080)
-        .setDescription(
-          `> 🔓 **UNLOCK!**\n` +
-          `> 🔢 **1 - 10000**\n` +
-          `> 💀 **TRY TO WIN**`
-        );
-
-    try {
-
-      await interaction.message.edit({
-        embeds: [startEmbed],
-        components: []
-      });
-
-    } catch (error) {
-
-      console.error(
-        "❌ Could not update Start button:",
-        error
+    const embed = new EmbedBuilder()
+      .setColor(0x808080)
+      .setDescription(
+        `> 🔓 **UNLOCK!**\n` +
+        `> 🔢 **1 - 10000**\n` +
+        `> 💀 **TRY TO WIN**`
       );
-    }
+
+    await interaction.message.edit({
+      embeds: [embed],
+      components: []
+    });
 
     return;
   }
 });
 
-// ==================================================
-// NUMBER GUESSING
-// ==================================================
+// ==============================
+// Guessing
+// ==============================
 
 client.on("messageCreate", async message => {
 
-  try {
+  if (message.author.bot) return;
+  if (!message.guild) return;
 
-    if (message.author.bot) return;
-    if (!message.guild) return;
+  const gameId =
+    `${message.guild.id}-${message.channel.id}`;
 
-    const gameId =
-      `${message.guild.id}-${message.channel.id}`;
+  const game =
+    games.get(gameId);
 
-    const game =
-      games.get(gameId);
+  if (!game || !game.started) return;
 
-    if (!game || !game.started) {
-      return;
-    }
+  const content =
+    message.content.trim();
 
-    const content =
-      message.content.trim();
+  if (!/^\d+$/.test(content)) return;
 
-    // Only accept numbers
-    if (!/^\d+$/.test(content)) {
-      return;
-    }
+  const guess =
+    Number(content);
 
-    const guess =
-      Number(content);
+  if (
+    guess < 1 ||
+    guess > 10000
+  ) return;
 
-    // Must be 1 - 10000
-    if (
-      guess < 1 ||
-      guess > 10000
-    ) {
-      return;
-    }
+  // WIN
+  if (guess === game.answer) {
 
-    // ==================================================
-    // WINNER
-    // ==================================================
-
-    if (guess === game.answer) {
-
-      const winEmbed =
-        new EmbedBuilder()
-          .setColor(0x808080)
-          .setDescription(
-            `> 🔒 **LOCK!**\n` +
-            `> 🎊 <@${message.author.id}> **WON!**\n` +
-            `> ✅ **${guess}**`
-          );
-
-      await message.channel.send({
-        embeds: [winEmbed]
-      });
-
-      games.delete(gameId);
-
-      return;
-    }
-
-    // ==================================================
-    // CLOSE MESSAGE
-    // ==================================================
-
-    const difference =
-      Math.abs(
-        game.answer - guess
+    const embed = new EmbedBuilder()
+      .setColor(0x808080)
+      .setDescription(
+        `> 🔒 **LOCK!**\n` +
+        `> 🎊 <@${message.author.id}> **WON!**\n` +
+        `> ✅ **${guess}**`
       );
 
-    // 10% of answer
-    const closeRange =
-      Math.max(
-        1,
-        Math.floor(
-          game.answer * 0.10
-        )
-      );
+    await message.channel.send({
+      embeds: [embed]
+    });
 
-    if (difference <= closeRange) {
+    games.delete(gameId);
 
-      const closeEmbed =
-        new EmbedBuilder()
-          .setColor(0x808080)
-          .setDescription(
-            "> 😱 **YOU’RE SO CLOSE BRO!**"
-          );
+    return;
+  }
 
-      await message.reply({
-        embeds: [closeEmbed]
-      });
-    }
+  // CLOSE
+  const difference =
+    Math.abs(game.answer - guess);
 
-  } catch (error) {
-
-    console.error(
-      "❌ Message handling error:",
-      error
+  const closeRange =
+    Math.max(
+      1,
+      Math.floor(game.answer * 0.10)
     );
+
+  if (difference <= closeRange) {
+
+    const embed = new EmbedBuilder()
+      .setColor(0x808080)
+      .setDescription(
+        "> 😱 **YOU’RE SO CLOSE BRO!**"
+      );
+
+    await message.reply({
+      embeds: [embed]
+    });
   }
 });
 
-// ==================================================
-// DISCORD ERRORS
-// ==================================================
+// ==============================
+// ERRORS
+// ==============================
 
 client.on("error", error => {
   console.error(
-    "❌ Discord client error:",
+    "❌ Discord error:",
     error
-  );
-});
-
-client.on("warn", warning => {
-  console.warn(
-    "⚠️ Discord warning:",
-    warning
   );
 });
 
@@ -695,9 +533,9 @@ process.on("uncaughtException", error => {
   );
 });
 
-// ==================================================
+// ==============================
 // LOGIN
-// ==================================================
+// ==============================
 
 console.log("🔑 Logging into Discord...");
 
