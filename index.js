@@ -12,8 +12,6 @@ const {
 } = require("discord.js");
 
 const express = require("express");
-const fs = require("fs");
-const path = require("path");
 
 // ====================
 // ENVIRONMENT
@@ -28,6 +26,7 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error(
     "❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID."
   );
+
   process.exit(1);
 }
 
@@ -48,20 +47,10 @@ app.get("/health", (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Web server running on port ${PORT}`);
+  console.log(
+    `Web server running on port ${PORT}`
+  );
 });
-
-// ====================
-// FILE STORAGE
-// ====================
-
-const FILE_DIR = path.join(__dirname, "files");
-
-if (!fs.existsSync(FILE_DIR)) {
-  fs.mkdirSync(FILE_DIR, {
-    recursive: true
-  });
-}
 
 // ====================
 // DISCORD CLIENT
@@ -76,19 +65,10 @@ const client = new Client({
 });
 
 // ====================
-// DATA
+// GAME STORAGE
 // ====================
 
 const games = new Map();
-
-const whitelistedUsers = new Set();
-const whitelistedRoles = new Set();
-
-const fsChannels = new Set();
-
-const storedFiles = new Map();
-
-const fsSessions = new Map();
 
 // ====================
 // SLASH COMMANDS
@@ -96,95 +76,149 @@ const fsSessions = new Map();
 
 const commands = [
 
+  // ====================
   // /guessnumber
+  // ====================
+
   new SlashCommandBuilder()
     .setName("guessnumber")
-    .setDescription("Start a Guess Number Game")
+    .setDescription(
+      "Start a Guess Number Game"
+    )
     .addIntegerOption(option =>
       option
         .setName("answer")
-        .setDescription("Secret answer from 1 to 10000")
+        .setDescription(
+          "Secret answer from 1 to 10000"
+        )
         .setRequired(true)
         .setMinValue(1)
         .setMaxValue(10000)
     ),
 
-  // /whitelist
+  // ====================
+  // /embed
+  // ====================
+
   new SlashCommandBuilder()
-    .setName("whitelist")
-    .setDescription("Add or remove a user or role from the whitelist")
-    .addUserOption(option =>
-      option
-        .setName("user")
-        .setDescription("User to whitelist")
-        .setRequired(false)
+    .setName("embed")
+    .setDescription(
+      "Create a custom embed"
     )
-    .addRoleOption(option =>
-      option
-        .setName("role")
-        .setDescription("Role to whitelist")
-        .setRequired(false)
-    )
+
     .addStringOption(option =>
       option
-        .setName("mode")
-        .setDescription("Add or Remove")
-        .setRequired(true)
+        .setName("title")
+        .setDescription(
+          "Embed title"
+        )
+        .setRequired(false)
+    )
+
+    .addStringOption(option =>
+      option
+        .setName("description")
+        .setDescription(
+          "Embed description"
+        )
+        .setRequired(false)
+    )
+
+    .addStringOption(option =>
+      option
+        .setName("color")
+        .setDescription(
+          "Choose embed color"
+        )
+        .setRequired(false)
         .addChoices(
+
           {
-            name: "Add",
-            value: "add"
+            name: "Blue",
+            value: "blue"
           },
+
           {
-            name: "Remove",
-            value: "remove"
+            name: "Red",
+            value: "red"
+          },
+
+          {
+            name: "Green",
+            value: "green"
+          },
+
+          {
+            name: "Yellow",
+            value: "yellow"
+          },
+
+          {
+            name: "Orange",
+            value: "orange"
+          },
+
+          {
+            name: "Purple",
+            value: "purple"
+          },
+
+          {
+            name: "Pink",
+            value: "pink"
+          },
+
+          {
+            name: "Cyan",
+            value: "cyan"
+          },
+
+          {
+            name: "White",
+            value: "white"
+          },
+
+          {
+            name: "Black",
+            value: "black"
+          },
+
+          {
+            name: "Gray",
+            value: "gray"
+          },
+
+          {
+            name: "Gold",
+            value: "gold"
+          },
+
+          {
+            name: "Aqua",
+            value: "aqua"
           }
         )
-    ),
-
-  // /setchannel
-  new SlashCommandBuilder()
-    .setName("setchannel")
-    .setDescription("Set the channel where !fs can be used")
-    .addChannelOption(option =>
-      option
-        .setName("channel")
-        .setDescription("Channel for FS Finder")
-        .setRequired(true)
-    )
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.ManageChannels.toString()
-    ),
-
-  // /scanchannel
-  new SlashCommandBuilder()
-    .setName("scanchannel")
-    .setDescription("Scan a channel and save attached files")
-    .addChannelOption(option =>
-      option
-        .setName("channel")
-        .setDescription("Channel to scan")
-        .setRequired(true)
-    )
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.ManageChannels.toString()
     )
 
-].map(command => command.toJSON());
+].map(command =>
+  command.toJSON()
+);
 
 // ====================
-// INSTANT GUILD COMMAND REGISTRATION
+// REGISTER COMMANDS
 // ====================
 
-const rest = new REST({
-  version: "10"
-}).setToken(TOKEN);
+const rest =
+  new REST({
+    version: "10"
+  }).setToken(TOKEN);
 
 async function registerCommands() {
+
   try {
 
     console.log(
-      "Registering guild slash commands..."
+      "Registering guild commands..."
     );
 
     await rest.put(
@@ -198,7 +232,7 @@ async function registerCommands() {
     );
 
     console.log(
-      "✅ Slash commands registered instantly!"
+      "✅ Slash commands registered!"
     );
 
   } catch (error) {
@@ -211,388 +245,75 @@ async function registerCommands() {
 }
 
 // ====================
-// SAVE FILE
+// COLOR SYSTEM
 // ====================
 
-async function saveAttachment(
-  attachment,
-  message
-) {
+function getColor(color) {
 
-  try {
+  switch (color) {
 
-    const originalName =
-      path.basename(
-        attachment.name || "unknown_file"
-      );
+    case "blue":
+      return 0x3498db;
 
-    const safeName =
-      originalName.replace(
-        /[^a-zA-Z0-9._ -]/g,
-        "_"
-      );
+    case "red":
+      return 0xe74c3c;
 
-    const uniqueName =
-      `${Date.now()}_${message.id}_${safeName}`;
+    case "green":
+      return 0x2ecc71;
 
-    const filePath =
-      path.join(
-        FILE_DIR,
-        uniqueName
-      );
+    case "yellow":
+      return 0xf1c40f;
 
-    // 25 MB limit
-    if (
-      attachment.size >
-      25 * 1024 * 1024
-    ) {
+    case "orange":
+      return 0xe67e22;
 
-      console.log(
-        `Skipped large file: ${originalName}`
-      );
+    case "purple":
+      return 0x9b59b6;
 
-      return null;
-    }
+    case "pink":
+      return 0xff69b4;
 
-    const response =
-      await fetch(
-        attachment.url
-      );
+    case "cyan":
+      return 0x00ffff;
 
-    if (!response.ok) {
-      return null;
-    }
+    case "white":
+      return 0xffffff;
 
-    const buffer =
-      Buffer.from(
-        await response.arrayBuffer()
-      );
+    case "black":
+      return 0x000000;
 
-    fs.writeFileSync(
-      filePath,
-      buffer
-    );
+    case "gray":
+      return 0x808080;
 
-    const fileData = {
+    case "gold":
+      return 0xffd700;
 
-      id:
-        `${message.id}_${attachment.id}`,
+    case "aqua":
+      return 0x1abc9c;
 
-      originalName,
-
-      storedName:
-        uniqueName,
-
-      path:
-        filePath,
-
-      size:
-        buffer.length,
-
-      messageId:
-        message.id,
-
-      channelId:
-        message.channel.id,
-
-      guildId:
-        message.guild.id,
-
-      uploadedBy:
-        message.author.id,
-
-      createdAt:
-        new Date().toISOString(),
-
-      url:
-        attachment.url
-    };
-
-    storedFiles.set(
-      fileData.id,
-      fileData
-    );
-
-    return fileData;
-
-  } catch (error) {
-
-    console.error(
-      "File save error:",
-      error
-    );
-
-    return null;
+    default:
+      return 0x808080;
   }
 }
 
 // ====================
-// SCAN CHANNEL
+// TIME
 // ====================
 
-async function scanChannel(channel) {
-
-  let before = undefined;
-
-  let totalMessages = 0;
-  let totalFiles = 0;
-
-  while (true) {
-
-    const options = {
-      limit: 100
-    };
-
-    if (before) {
-      options.before = before;
-    }
-
-    const messages =
-      await channel.messages.fetch(
-        options
-      );
-
-    if (messages.size === 0) {
-      break;
-    }
-
-    totalMessages +=
-      messages.size;
-
-    for (
-      const message
-      of messages.values()
-    ) {
-
-      if (
-        message.attachments.size === 0
-      ) {
-        continue;
-      }
-
-      for (
-        const attachment
-        of message.attachments.values()
-      ) {
-
-        const result =
-          await saveAttachment(
-            attachment,
-            message
-          );
-
-        if (result) {
-          totalFiles++;
-        }
-      }
-    }
-
-    before =
-      messages.last().id;
-
-    if (messages.size < 100) {
-      break;
-    }
-  }
-
-  return {
-    messages:
-      totalMessages,
-
-    files:
-      totalFiles
-  };
-}
-
-// ====================
-// SEARCH FILES
-// ====================
-
-function searchFiles(query) {
-
-  const words =
-    query
-      .toLowerCase()
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean);
-
-  if (!words.length) {
-    return [];
-  }
-
-  const results = [];
-
-  for (
-    const file
-    of storedFiles.values()
-  ) {
-
-    const filename =
-      file.originalName.toLowerCase();
-
-    const matches =
-      words.every(word =>
-        filename.includes(word)
-      );
-
-    if (matches) {
-      results.push(file);
-    }
-  }
-
-  return results;
-}
-
-// ====================
-// FS RESULT
-// ====================
-
-async function sendFSResult(
-  interaction,
-  results,
-  index,
-  sessionId,
-  update = false
-) {
-
-  if (!results.length) {
-
-    const embed =
-      new EmbedBuilder()
-        .setColor(0x808080)
-        .setTitle(
-          "FS Bot Finder"
-        )
-        .setDescription(
-          "> ❌ **No matching files found.**"
-        );
-
-    if (update) {
-
-      return interaction.update({
-        embeds: [embed],
-        components: []
-      });
-
-    } else {
-
-      return interaction.reply({
-        embeds: [embed]
-      });
-    }
-  }
-
-  if (index < 0) {
-    index =
-      results.length - 1;
-  }
-
-  if (
-    index >=
-    results.length
-  ) {
-    index = 0;
-  }
-
-  const file =
-    results[index];
+function getCurrentTime() {
 
   const now =
     new Date();
 
-  const time =
-    now.toLocaleTimeString(
-      "en-US",
-      {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false
-      }
-    );
-
-  // ====================
-  // GRAY FS EMBED
-  // ====================
-
-  const embed =
-    new EmbedBuilder()
-      .setColor(0x808080)
-      .setTitle(
-        "FS Bot Finder"
-      )
-      .setDescription(
-        `> Here is the file twin!\n\n` +
-        `📁 **${file.originalName}**\n` +
-        `Today at ${time}`
-      );
-
-  // ====================
-  // GRAY BUTTONS
-  // ====================
-
-  const row =
-    new ActionRowBuilder()
-      .addComponents(
-
-        // BACK
-        new ButtonBuilder()
-          .setCustomId(
-            `fs_prev:${sessionId}`
-          )
-          .setEmoji("⬅️")
-          .setStyle(
-            ButtonStyle.Secondary
-          ),
-
-        // PAGE
-        new ButtonBuilder()
-          .setCustomId(
-            `fs_page:${sessionId}`
-          )
-          .setLabel(
-            `${index + 1}/${results.length}`
-          )
-          .setStyle(
-            ButtonStyle.Secondary
-          )
-          .setDisabled(true),
-
-        // NEXT
-        new ButtonBuilder()
-          .setCustomId(
-            `fs_next:${sessionId}`
-          )
-          .setEmoji("➡️")
-          .setStyle(
-            ButtonStyle.Secondary
-          )
-      );
-
-  const fileAttachment = {
-    attachment:
-      file.path,
-
-    name:
-      file.originalName
-  };
-
-  if (update) {
-
-    await interaction.update({
-      embeds: [embed],
-      components: [row],
-      files: [fileAttachment]
-    });
-
-  } else {
-
-    await interaction.reply({
-      embeds: [embed],
-      components: [row],
-      files: [fileAttachment]
-    });
-  }
+  return now.toLocaleTimeString(
+    "en-US",
+    {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "Asia/Manila"
+    }
+  );
 }
 
 // ====================
@@ -620,7 +341,7 @@ client.on(
   async interaction => {
 
     // ====================
-    // GUESS NUMBER
+    // /guessnumber
     // ====================
 
     if (
@@ -634,10 +355,25 @@ client.on(
           "answer"
         );
 
-      // FIX NULL
+      // IMPORTANT:
+      // Do not use "number" here.
+      // The option is called "answer".
+
       if (
         answer === null ||
         answer === undefined
+      ) {
+
+        return interaction.reply({
+          content:
+            "❌ Please provide an answer from 1 to 10000.",
+          ephemeral: true
+        });
+      }
+
+      if (
+        answer < 1 ||
+        answer > 10000
       ) {
 
         return interaction.reply({
@@ -653,6 +389,7 @@ client.on(
       const gameId =
         `${interaction.guildId}-${interaction.channelId}`;
 
+      // Prevent two games in one channel
       if (games.has(gameId)) {
 
         return interaction.reply({
@@ -661,6 +398,10 @@ client.on(
           ephemeral: true
         });
       }
+
+      // ====================
+      // SAVE GAME
+      // ====================
 
       games.set(
         gameId,
@@ -682,29 +423,32 @@ client.on(
 
       try {
 
+        const dmEmbed =
+          new EmbedBuilder()
+            .setColor(0x808080)
+            .setTitle(
+              "🔐 GUESS NUMBER ANSWER"
+            )
+            .setDescription(
+              `> 🔢 **Answer:** \`${answer}\`\n` +
+              `> 📌 **Range:** \`1 - 10000\``
+            );
+
         await host.send({
           embeds: [
-            new EmbedBuilder()
-              .setColor(0x808080)
-              .setTitle(
-                "🔐 GUESS NUMBER ANSWER"
-              )
-              .setDescription(
-                `> 🔢 **Answer:** \`${answer}\`\n` +
-                `> 📌 **Range:** \`1 - 10000\``
-              )
+            dmEmbed
           ]
         });
 
       } catch (error) {
 
         console.log(
-          "⚠️ Could not DM host."
+          `⚠️ Could not DM ${host.tag}`
         );
       }
 
       // ====================
-      // PUBLIC EVENT
+      // GAME EVENT EMBED
       // ====================
 
       const embed =
@@ -735,232 +479,128 @@ client.on(
 
           );
 
+      // ====================
+      // HIDE SLASH RESPONSE
+      // ====================
+
       await interaction.reply({
-        content: "",
+        content: " ",
         ephemeral: true
       });
 
       await interaction.deleteReply();
 
+      // ====================
+      // SEND PUBLIC EVENT
+      // ====================
+
       await interaction.channel.send({
-        embeds: [embed],
-        components: [row]
+        embeds: [
+          embed
+        ],
+        components: [
+          row
+        ]
       });
 
       return;
     }
 
     // ====================
-    // WHITELIST
+    // /embed
     // ====================
 
     if (
       interaction.isChatInputCommand() &&
       interaction.commandName ===
-        "whitelist"
+        "embed"
     ) {
 
-      const user =
-        interaction.options.getUser(
-          "user"
-        );
-
-      const role =
-        interaction.options.getRole(
-          "role"
-        );
-
-      const mode =
+      const title =
         interaction.options.getString(
-          "mode"
+          "title"
         );
 
-      if (!user && !role) {
-
-        return interaction.reply({
-          content:
-            "❌ You must provide a **user** or **role**.",
-          ephemeral: true
-        });
-      }
-
-      if (user) {
-
-        if (mode === "add") {
-          whitelistedUsers.add(
-            user.id
-          );
-        } else {
-          whitelistedUsers.delete(
-            user.id
-          );
-        }
-      }
-
-      if (role) {
-
-        if (mode === "add") {
-          whitelistedRoles.add(
-            role.id
-          );
-        } else {
-          whitelistedRoles.delete(
-            role.id
-          );
-        }
-      }
-
-      const targets = [];
-
-      if (user) {
-        targets.push(
-          `<@${user.id}>`
+      const description =
+        interaction.options.getString(
+          "description"
         );
-      }
 
-      if (role) {
-        targets.push(
-          `<@&${role.id}>`
-        );
-      }
-
-      const action =
-        mode === "add"
-          ? "added to"
-          : "removed from";
+      const color =
+        interaction.options.getString(
+          "color"
+        ) || "gray";
 
       const embed =
         new EmbedBuilder()
-          .setColor(0x808080)
-          .setTitle(
-            "WHITELIST"
+          .setColor(
+            getColor(color)
           )
-          .setDescription(
-            `> ✅ ${targets.join(
-              " and "
-            )} **${action} the whitelist.**`
-          );
+          .setTimestamp();
 
-      return interaction.reply({
-        embeds: [embed],
-        ephemeral: true
-      });
-    }
-
-    // ====================
-    // SET CHANNEL
-    // ====================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName ===
-        "setchannel"
-    ) {
-
-      const channel =
-        interaction.options.getChannel(
-          "channel"
-        );
+      // ====================
+      // TITLE
+      // ====================
 
       if (
-        !channel ||
-        !channel.isTextBased()
+        title &&
+        title.trim().length > 0
       ) {
 
-        return interaction.reply({
-          content:
-            "❌ Please select a text channel.",
-          ephemeral: true
-        });
+        embed.setTitle(
+          title
+        );
       }
 
-      fsChannels.add(
-        `${interaction.guildId}:${channel.id}`
-      );
-
-      const embed =
-        new EmbedBuilder()
-          .setColor(0x808080)
-          .setTitle(
-            "FS CHANNEL"
-          )
-          .setDescription(
-            `> ✅ **FS Finder enabled!**\n` +
-            `> 📁 Channel: ${channel}\n` +
-            `> 🔎 Use \`!fs <filename>\` here.`
-          );
-
-      return interaction.reply({
-        embeds: [embed]
-      });
-    }
-
-    // ====================
-    // SCAN CHANNEL
-    // ====================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName ===
-        "scanchannel"
-    ) {
-
-      const channel =
-        interaction.options.getChannel(
-          "channel"
-        );
+      // ====================
+      // DESCRIPTION
+      // ====================
 
       if (
-        !channel ||
-        !channel.isTextBased()
+        description &&
+        description.trim().length > 0
       ) {
 
-        return interaction.reply({
-          content:
-            "❌ Please select a text channel.",
-          ephemeral: true
-        });
+        embed.setDescription(
+          description
+        );
       }
+
+      // ====================
+      // TODAY AT TIME
+      // ====================
+
+      embed.setFooter({
+        text:
+          `Today at ${getCurrentTime()}`
+      });
+
+      // ====================
+      // HIDE COMMAND RESPONSE
+      // ====================
 
       await interaction.reply({
-        content:
-          "🔍 **Scanning channel...**",
+        content: " ",
         ephemeral: true
       });
 
-      try {
+      await interaction.deleteReply();
 
-        const result =
-          await scanChannel(
-            channel
-          );
+      // ====================
+      // SEND EMBED
+      // ====================
 
-        await interaction.editReply({
-          content:
-            `✅ **Scan complete!**\n\n` +
-            `📨 Messages scanned: **${result.messages}**\n` +
-            `📁 Files saved: **${result.files}**\n` +
-            `💾 Total files: **${storedFiles.size}**`
-        });
-
-      } catch (error) {
-
-        console.error(
-          "Scan error:",
-          error
-        );
-
-        await interaction.editReply({
-          content:
-            "❌ Scan failed. Make sure the bot can **View Channel** and **Read Message History**."
-        });
-      }
+      await interaction.channel.send({
+        embeds: [
+          embed
+        ]
+      });
 
       return;
     }
 
     // ====================
-    // START GAME
+    // START BUTTON
     // ====================
 
     if (
@@ -987,9 +627,17 @@ client.on(
         });
       }
 
+      // ====================
+      // HOST CHECK
+      // ====================
+
       const isHost =
         interaction.user.id ===
         game.hostId;
+
+      // ====================
+      // MANAGE MESSAGES CHECK
+      // ====================
 
       const canManageMessages =
         interaction.memberPermissions?.has(
@@ -1008,6 +656,10 @@ client.on(
         });
       }
 
+      // ====================
+      // ALREADY STARTED
+      // ====================
+
       if (game.started) {
 
         return interaction.reply({
@@ -1019,6 +671,10 @@ client.on(
 
       game.started = true;
 
+      // ====================
+      // STARTED EMBED
+      // ====================
+
       const embed =
         new EmbedBuilder()
           .setColor(0x808080)
@@ -1029,90 +685,11 @@ client.on(
           );
 
       await interaction.update({
-        embeds: [embed],
+        embeds: [
+          embed
+        ],
         components: []
       });
-
-      return;
-    }
-
-    // ====================
-    // FS BACK / NEXT
-    // ====================
-
-    if (
-      interaction.isButton() &&
-      (
-        interaction.customId.startsWith(
-          "fs_prev:"
-        ) ||
-        interaction.customId.startsWith(
-          "fs_next:"
-        )
-      )
-    ) {
-
-      const [
-        action,
-        sessionId
-      ] =
-        interaction.customId.split(
-          ":"
-        );
-
-      const session =
-        fsSessions.get(
-          sessionId
-        );
-
-      if (!session) {
-
-        return interaction.reply({
-          content:
-            "❌ This FS search has expired.",
-          ephemeral: true
-        });
-      }
-
-      let index =
-        session.index;
-
-      if (
-        action === "fs_next"
-      ) {
-        index++;
-      }
-
-      if (
-        action === "fs_prev"
-      ) {
-        index--;
-      }
-
-      if (
-        index < 0
-      ) {
-        index =
-          session.results.length - 1;
-      }
-
-      if (
-        index >=
-        session.results.length
-      ) {
-        index = 0;
-      }
-
-      session.index =
-        index;
-
-      await sendFSResult(
-        interaction,
-        session.results,
-        index,
-        sessionId,
-        true
-      );
 
       return;
     }
@@ -1120,103 +697,24 @@ client.on(
 );
 
 // ====================
-// MESSAGE CREATE
+// NUMBER GUESSING
 // ====================
 
 client.on(
   "messageCreate",
   async message => {
 
-    if (message.author.bot) {
+    if (
+      message.author.bot
+    ) {
       return;
     }
-
-    if (!message.guild) {
-      return;
-    }
-
-    // ====================
-    // !FS
-    // ====================
 
     if (
-      message.content
-        .toLowerCase()
-        .startsWith("!fs")
+      !message.guild
     ) {
-
-      const key =
-        `${message.guild.id}:${message.channel.id}`;
-
-      if (!fsChannels.has(key)) {
-        return;
-      }
-
-      const query =
-        message.content
-          .slice(3)
-          .trim();
-
-      if (!query) {
-
-        return message.reply(
-          "❌ Usage: `!fs <filename>`"
-        );
-      }
-
-      const results =
-        searchFiles(query);
-
-      if (!results.length) {
-
-        return message.reply({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(0x808080)
-              .setTitle(
-                "FS Bot Finder"
-              )
-              .setDescription(
-                `> ❌ **No file found for:** \`${query}\``
-              )
-          ]
-        });
-      }
-
-      const sessionId =
-        `${message.id}_${Date.now()}`;
-
-      fsSessions.set(
-        sessionId,
-        {
-          results,
-          index: 0
-        }
-      );
-
-      setTimeout(
-        () => {
-          fsSessions.delete(
-            sessionId
-          );
-        },
-        30 * 60 * 1000
-      );
-
-      await sendFSResult(
-        message,
-        results,
-        0,
-        sessionId,
-        false
-      );
-
       return;
     }
-
-    // ====================
-    // GUESS NUMBER
-    // ====================
 
     const gameId =
       `${message.guild.id}-${message.channel.id}`;
@@ -1234,12 +732,19 @@ client.on(
     const content =
       message.content.trim();
 
-    if (!/^\d+$/.test(content)) {
+    // Only numbers
+    if (
+      !/^\d+$/.test(content)
+    ) {
       return;
     }
 
     const guess =
       Number(content);
+
+    // ====================
+    // VALID RANGE
+    // ====================
 
     if (
       guess < 1 ||
@@ -1249,7 +754,7 @@ client.on(
     }
 
     // ====================
-    // WINNER
+    // CORRECT ANSWER
     // ====================
 
     if (
@@ -1266,7 +771,9 @@ client.on(
           );
 
       await message.channel.send({
-        embeds: [embed]
+        embeds: [
+          embed
+        ]
       });
 
       games.delete(
@@ -1277,24 +784,22 @@ client.on(
     }
 
     // ====================
-    // CLOSE MESSAGE
+    // CLOSE CHECK
     // ====================
 
-    const difference =
-      Math.abs(
-        game.answer - guess
-      );
-
     /*
-     * 10% of the answer.
-     *
-     * Example:
-     * Answer 900
-     * 10% = 90
-     *
-     * Answer 10000
-     * 10% = 1000
-     */
+      10% close range.
+
+      Example:
+      Answer = 900
+      Close range = 90
+
+      Answer = 1000
+      Close range = 100
+
+      Answer = 10000
+      Close range = 1000
+    */
 
     const closeRange =
       Math.max(
@@ -1304,17 +809,26 @@ client.on(
         )
       );
 
+    const difference =
+      Math.abs(
+        game.answer - guess
+      );
+
     if (
-      difference <= closeRange
+      difference <=
+      closeRange
     ) {
+
+      const closeEmbed =
+        new EmbedBuilder()
+          .setColor(0x808080)
+          .setDescription(
+            "> 😱 **YOU’RE SO CLOSE BRO!**"
+          );
 
       await message.reply({
         embeds: [
-          new EmbedBuilder()
-            .setColor(0x808080)
-            .setDescription(
-              "> 😱 **YOU’RE SO CLOSE BRO!**"
-            )
+          closeEmbed
         ]
       });
     }
@@ -1328,6 +842,7 @@ client.on(
 client.on(
   "error",
   error => {
+
     console.error(
       "Discord client error:",
       error
@@ -1338,6 +853,7 @@ client.on(
 process.on(
   "unhandledRejection",
   error => {
+
     console.error(
       "Unhandled rejection:",
       error
