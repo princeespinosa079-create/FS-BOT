@@ -13,12 +13,12 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
 if (!TOKEN || !CLIENT_ID) {
-  console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID environment variable.");
+  console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID.");
   process.exit(1);
 }
 
 // =========================
-// Web server for hosting
+// Web Server
 // =========================
 
 const app = express();
@@ -31,7 +31,7 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "online",
-    bot: client.user ? client.user.tag : "connecting"
+    bot: client?.user?.tag || "connecting"
   });
 });
 
@@ -40,17 +40,15 @@ app.listen(PORT, "0.0.0.0", () => {
 });
 
 // =========================
-// Discord client
+// Discord Client
 // =========================
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds
-  ]
+  intents: [GatewayIntentBits.Guilds]
 });
 
 // =========================
-// Slash commands
+// Slash Commands
 // =========================
 
 const commands = [
@@ -64,30 +62,32 @@ const commands = [
 ].map(command => command.toJSON());
 
 // =========================
-// Register commands globally
-// No GUILD_ID required
+// Register GLOBAL Commands
+// No GUILD_ID needed
 // =========================
 
 async function registerCommands() {
-  try {
-    const rest = new REST({ version: "10" }).setToken(TOKEN);
+  const rest = new REST({ version: "10" }).setToken(TOKEN);
 
+  try {
     console.log("🔄 Registering global slash commands...");
 
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
-      { body: commands }
+      {
+        body: commands
+      }
     );
 
     console.log("✅ Global slash commands registered.");
   } catch (error) {
-    console.error("❌ Failed to register commands:");
+    console.error("❌ Command registration failed:");
     console.error(error);
   }
 }
 
 // =========================
-// Ready
+// Bot Ready
 // =========================
 
 client.once("ready", async () => {
@@ -98,64 +98,58 @@ client.once("ready", async () => {
 });
 
 // =========================
-// Interaction handler
+// Commands
 // =========================
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  console.log(`📥 Interaction received: /${interaction.commandName}`);
+  console.log(`📥 Received /${interaction.commandName}`);
 
-  try {
-    // IMPORTANT:
-    // Discord requires an interaction response
-    // within a few seconds.
+  // GUESS NUMBER
+  if (interaction.commandName === "guessnumber") {
+    try {
+      // Acknowledge immediately.
+      await interaction.deferReply();
 
-    if (interaction.commandName === "guessnumber") {
       const answer = Math.floor(Math.random() * 100) + 1;
 
-      await interaction.reply({
-        content: `🎯 Guess a number between **1 and 100**!\n\nThe answer is **${answer}**.`,
-        ephemeral: false
-      });
+      await interaction.editReply(
+        `🎯 Guess a number between **1 and 100**!\n\n` +
+        `🔢 The answer is **${answer}**.`
+      );
 
-      console.log(`🎯 Answer generated: ${answer}`);
-      return;
+      console.log(`🎯 Generated answer: ${answer}`);
+    } catch (error) {
+      console.error("❌ /guessnumber error:", error);
     }
 
-    if (interaction.commandName === "embed") {
+    return;
+  }
+
+  // EMBED
+  if (interaction.commandName === "embed") {
+    try {
+      await interaction.deferReply();
+
       const embed = new EmbedBuilder()
         .setTitle("FS Bot")
         .setDescription("✅ The bot is working correctly!")
         .setTimestamp();
 
-      await interaction.reply({
+      await interaction.editReply({
         embeds: [embed]
       });
-
-      return;
+    } catch (error) {
+      console.error("❌ /embed error:", error);
     }
 
-  } catch (error) {
-    console.error("❌ Interaction error:", error);
-
-    // Don't attempt another initial reply if
-    // Discord already received one.
-    if (!interaction.replied && !interaction.deferred) {
-      try {
-        await interaction.reply({
-          content: "❌ An error occurred while processing the command.",
-          ephemeral: true
-        });
-      } catch (replyError) {
-        console.error("❌ Could not send error reply:", replyError);
-      }
-    }
+    return;
   }
 });
 
 // =========================
-// Discord errors
+// Discord Events
 // =========================
 
 client.on("error", error => {
@@ -167,7 +161,7 @@ client.on("warn", warning => {
 });
 
 process.on("unhandledRejection", error => {
-  console.error("❌ Unhandled promise rejection:", error);
+  console.error("❌ Unhandled rejection:", error);
 });
 
 process.on("uncaughtException", error => {
