@@ -9,20 +9,19 @@ const {
   ButtonBuilder,
   ButtonStyle,
   PermissionFlagsBits,
-  MessageFlags,
-  ActivityType
+  MessageFlags
 } = require("discord.js");
 
 const express = require("express");
 
 // ==================================================
-// CONFIG
+// ENVIRONMENT
 // ==================================================
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 if (!TOKEN) {
   console.error("❌ DISCORD_TOKEN is missing.");
@@ -80,7 +79,7 @@ const client = new Client({
 const games = new Map();
 
 // ==================================================
-// COLORS
+// EMBED COLORS
 // ==================================================
 
 const COLORS = {
@@ -103,56 +102,54 @@ const COLORS = {
 // SLASH COMMANDS
 // ==================================================
 
-const guessNumberCommand =
-  new SlashCommandBuilder()
-    .setName("guessnumber")
-    .setDescription("Start a Guess Number Game")
-    .addIntegerOption(option =>
-      option
-        .setName("answer")
-        .setDescription("Secret answer from 1 to 10000")
-        .setRequired(true)
-        .setMinValue(1)
-        .setMaxValue(10000)
-    );
+const guessNumberCommand = new SlashCommandBuilder()
+  .setName("guessnumber")
+  .setDescription("Start a Guess Number Game")
+  .addIntegerOption(option =>
+    option
+      .setName("answer")
+      .setDescription("Secret answer from 1 to 10000")
+      .setRequired(true)
+      .setMinValue(1)
+      .setMaxValue(10000)
+  );
 
-const embedCommand =
-  new SlashCommandBuilder()
-    .setName("embed")
-    .setDescription("Create a custom embed")
-    .addStringOption(option =>
-      option
-        .setName("title")
-        .setDescription("Embed title")
-        .setRequired(false)
-    )
-    .addStringOption(option =>
-      option
-        .setName("description")
-        .setDescription("Embed description")
-        .setRequired(false)
-    )
-    .addStringOption(option =>
-      option
-        .setName("color")
-        .setDescription("Embed color")
-        .setRequired(false)
-        .addChoices(
-          { name: "Blue", value: "blue" },
-          { name: "Red", value: "red" },
-          { name: "Green", value: "green" },
-          { name: "Yellow", value: "yellow" },
-          { name: "Orange", value: "orange" },
-          { name: "Purple", value: "purple" },
-          { name: "Pink", value: "pink" },
-          { name: "Cyan", value: "cyan" },
-          { name: "Aqua", value: "aqua" },
-          { name: "Gold", value: "gold" },
-          { name: "White", value: "white" },
-          { name: "Gray", value: "gray" },
-          { name: "Black", value: "black" }
-        )
-    );
+const embedCommand = new SlashCommandBuilder()
+  .setName("embed")
+  .setDescription("Create a custom embed")
+  .addStringOption(option =>
+    option
+      .setName("title")
+      .setDescription("Embed title")
+      .setRequired(false)
+  )
+  .addStringOption(option =>
+    option
+      .setName("description")
+      .setDescription("Embed description")
+      .setRequired(false)
+  )
+  .addStringOption(option =>
+    option
+      .setName("color")
+      .setDescription("Embed color")
+      .setRequired(false)
+      .addChoices(
+        { name: "Blue", value: "blue" },
+        { name: "Red", value: "red" },
+        { name: "Green", value: "green" },
+        { name: "Yellow", value: "yellow" },
+        { name: "Orange", value: "orange" },
+        { name: "Purple", value: "purple" },
+        { name: "Pink", value: "pink" },
+        { name: "Cyan", value: "cyan" },
+        { name: "Aqua", value: "aqua" },
+        { name: "Gold", value: "gold" },
+        { name: "White", value: "white" },
+        { name: "Gray", value: "gray" },
+        { name: "Black", value: "black" }
+      )
+  );
 
 const commands = [
   guessNumberCommand.toJSON(),
@@ -160,12 +157,12 @@ const commands = [
 ];
 
 // ==================================================
-// REGISTER COMMANDS
+// REGISTER GUILD COMMANDS
 // ==================================================
 
 async function registerCommands() {
   try {
-    console.log("🔄 Registering guild commands...");
+    console.log("🔄 Registering guild slash commands...");
 
     const rest = new REST({
       version: "10"
@@ -181,9 +178,9 @@ async function registerCommands() {
       }
     );
 
-    console.log("✅ Guild commands registered.");
+    console.log("✅ Guild slash commands registered successfully.");
   } catch (error) {
-    console.error("❌ Command registration failed:");
+    console.error("❌ Slash command registration failed:");
     console.error(error);
   }
 }
@@ -201,17 +198,13 @@ client.on("warn", message => {
 });
 
 client.on("error", error => {
-  console.error("❌ Discord error:");
+  console.error("❌ Discord client error:");
   console.error(error);
 });
 
 client.on("shardError", error => {
   console.error("❌ Discord shard error:");
   console.error(error);
-});
-
-client.on("shardReady", shardId => {
-  console.log(`✅ Shard ${shardId} ready.`);
 });
 
 // ==================================================
@@ -225,32 +218,14 @@ client.once("ready", async () => {
     `🏠 Connected to ${client.guilds.cache.size} server(s).`
   );
 
-  // Watching status
-  client.user.setActivity(
-    "Free Source (FS)",
-    {
-      type: ActivityType.Watching
-    }
-  );
-
   await registerCommands();
 });
 
 // ==================================================
-// INTERACTIONS
+// INTERACTION HANDLER
 // ==================================================
 
 client.on("interactionCreate", async interaction => {
-
-  console.log(
-    `📥 Interaction: ${
-      interaction.isChatInputCommand()
-        ? interaction.commandName
-        : interaction.isButton()
-          ? interaction.customId
-          : "unknown"
-    }`
-  );
 
   // ==================================================
   // /GUESSNUMBER
@@ -260,52 +235,67 @@ client.on("interactionCreate", async interaction => {
     interaction.isChatInputCommand() &&
     interaction.commandName === "guessnumber"
   ) {
-
     try {
 
-      // Get answer immediately
+      // ------------------------------------------------
+      // ACKNOWLEDGE IMMEDIATELY
+      // ------------------------------------------------
+
+      await interaction.deferReply({
+        flags: MessageFlags.Ephemeral
+      });
+
+      console.log(
+        `📥 /guessnumber from ${interaction.user.tag}`
+      );
+
+      // ------------------------------------------------
+      // GET ANSWER
+      // ------------------------------------------------
+
       const answer =
         interaction.options.getInteger("answer");
 
       console.log(
-        `🎯 Received answer: ${answer}`
+        `🎯 Answer received: ${answer}`
       );
 
-      // Check answer
       if (
         answer === null ||
         answer < 1 ||
         answer > 10000
       ) {
-
-        await interaction.reply({
+        await interaction.editReply({
           content:
-            "❌ Please provide an answer from 1 to 10000.",
-          flags: MessageFlags.Ephemeral
+            "❌ Please provide an answer from 1 to 10000."
         });
 
         return;
       }
 
-      // Game ID
+      // ------------------------------------------------
+      // GAME ID
+      // ------------------------------------------------
+
       const gameId =
         `${interaction.guildId}-${interaction.channelId}`;
 
-      // Check existing game
-      if (games.has(gameId)) {
+      // ------------------------------------------------
+      // CHECK EXISTING GAME
+      // ------------------------------------------------
 
-        await interaction.reply({
+      if (games.has(gameId)) {
+        await interaction.editReply({
           content:
-            "❌ There is already a game in this channel.",
-          flags: MessageFlags.Ephemeral
+            "❌ There is already a Guess Number game in this channel."
         });
 
         return;
       }
 
-      // ==================================================
-      // SAVE GAME
-      // ==================================================
+      // ------------------------------------------------
+      // CREATE GAME
+      // ------------------------------------------------
 
       games.set(gameId, {
         hostId: interaction.user.id,
@@ -314,99 +304,72 @@ client.on("interactionCreate", async interaction => {
       });
 
       console.log(
-        `💾 Game created. Answer = ${answer}`
+        `💾 Game created: ${gameId}`
       );
 
-      // ==================================================
-      // ACKNOWLEDGE IMMEDIATELY
-      // ==================================================
+      // ------------------------------------------------
+      // RESPOND TO COMMAND
+      // ------------------------------------------------
 
-      await interaction.reply({
-        content: "✅ Game created!",
-        flags: MessageFlags.Ephemeral
+      await interaction.editReply({
+        content: "✅ Game created!"
       });
 
-      console.log(
-        "✅ Interaction acknowledged."
-      );
+      // ------------------------------------------------
+      // DM ANSWER TO HOST
+      // ------------------------------------------------
 
-      // ==================================================
-      // DM ANSWER
-      // ==================================================
-
-      const dmEmbed =
-        new EmbedBuilder()
-          .setColor(0x808080)
-          .setDescription(
-            `> 🔢 **Answer:** \`${answer}\`\n` +
-            `> 📌 **Range:** \`1 - 10000\``
-          );
+      const dmEmbed = new EmbedBuilder()
+        .setColor(0x808080)
+        .setDescription(
+          `> 🔢 **Answer:** \`${answer}\`\n` +
+          `> 📌 **Range:** \`1 - 10000\``
+        );
 
       try {
-
         await interaction.user.send({
           embeds: [dmEmbed]
         });
 
         console.log(
-          "📩 Answer sent to host."
+          "📩 Answer sent to host DM."
         );
-
       } catch (error) {
-
         console.log(
-          "⚠️ Host DMs are closed."
+          "⚠️ Could not send DM to host."
         );
       }
 
-      // ==================================================
-      // PUBLIC GAME MESSAGE
-      // ==================================================
+      // ------------------------------------------------
+      // PUBLIC GAME EVENT
+      // ------------------------------------------------
 
-      const gameEmbed =
-        new EmbedBuilder()
-          .setColor(0x808080)
-          .setTitle("GAME EVENT 🧧")
-          .setDescription(
-            `> **Host by <@${interaction.user.id}>**\n` +
-            `> **Click \`Start Button\` below to start the Guess Number Game.**`
-          );
-
-      const button =
-        new ButtonBuilder()
-          .setCustomId(
-            `guess_start_${gameId}`
-          )
-          .setLabel("Start")
-          .setStyle(ButtonStyle.Primary);
-
-      const row =
-        new ActionRowBuilder()
-          .addComponents(button);
-
-      try {
-
-        await interaction.channel.send({
-          embeds: [gameEmbed],
-          components: [row]
-        });
-
-        console.log(
-          "🎮 Public game message sent."
+      const gameEmbed = new EmbedBuilder()
+        .setColor(0x808080)
+        .setTitle("GAME EVENT 🧧")
+        .setDescription(
+          `> **Host by <@${interaction.user.id}>**\n` +
+          `> **Click \`Start Button\` below to start the Guess Number Game.**`
         );
 
-      } catch (error) {
+      const startButton = new ButtonBuilder()
+        .setCustomId(
+          `guess_start_${gameId}`
+        )
+        .setLabel("Start")
+        .setStyle(ButtonStyle.Primary);
 
-        console.error(
-          "❌ Could not send public game message:"
-        );
+      const row = new ActionRowBuilder()
+        .addComponents(startButton);
 
-        console.error(error);
+      await interaction.channel.send({
+        embeds: [gameEmbed],
+        components: [row]
+      });
 
-        games.delete(gameId);
-      }
-
-      return;
+      console.log(
+        "🎮 Public game event sent."
+      );
 
     } catch (error) {
 
@@ -416,32 +379,36 @@ client.on("interactionCreate", async interaction => {
 
       console.error(error);
 
-      // Only reply if not already acknowledged
+      // 10062 means Discord interaction expired.
+      // DO NOT attempt another reply.
       if (
-        !interaction.replied &&
-        !interaction.deferred
+        error?.code === 10062 ||
+        error?.rawError?.code === 10062
       ) {
+        console.error(
+          "⚠️ Interaction expired / Unknown interaction."
+        );
 
-        try {
-
-          await interaction.reply({
-            content:
-              "❌ An error occurred while creating the game.",
-            flags: MessageFlags.Ephemeral
-          });
-
-        } catch (replyError) {
-
-          console.error(
-            "❌ Could not reply to interaction:"
-          );
-
-          console.error(replyError);
-        }
+        return;
       }
 
-      return;
+      // If already deferred, edit instead of reply.
+      if (interaction.deferred) {
+        try {
+          await interaction.editReply({
+            content:
+              "❌ An error occurred while creating the game."
+          });
+        } catch (editError) {
+          console.error(
+            "❌ Could not edit interaction:"
+          );
+          console.error(editError);
+        }
+      }
     }
+
+    return;
   }
 
   // ==================================================
@@ -452,12 +419,10 @@ client.on("interactionCreate", async interaction => {
     interaction.isChatInputCommand() &&
     interaction.commandName === "embed"
   ) {
-
     try {
 
-      // Acknowledge immediately
-      await interaction.reply({
-        content: " ",
+      // Immediate acknowledgement
+      await interaction.deferReply({
         flags: MessageFlags.Ephemeral
       });
 
@@ -471,29 +436,26 @@ client.on("interactionCreate", async interaction => {
         interaction.options.getString("color") ||
         "gray";
 
+      // Current Philippines time
       const now =
         new Date().toLocaleTimeString(
           "en-PH",
           {
             hour: "2-digit",
             minute: "2-digit",
-            hour12: false
+            hour12: true
           }
         );
 
-      const embed =
-        new EmbedBuilder()
-          .setColor(
-            COLORS[color] ?? COLORS.gray
-          )
-          .setFooter({
-            text: `Today at ${now}`
-          });
+      const embed = new EmbedBuilder()
+        .setColor(
+          COLORS[color] ?? COLORS.gray
+        )
+        .setFooter({
+          text: `Today at ${now}`
+        });
 
-      if (
-        title &&
-        title.trim()
-      ) {
+      if (title && title.trim()) {
         embed.setTitle(title);
       }
 
@@ -511,7 +473,7 @@ client.on("interactionCreate", async interaction => {
       });
 
       await interaction.editReply({
-        content: " "
+        content: "✅ Embed sent!"
       });
 
       console.log(
@@ -525,6 +487,24 @@ client.on("interactionCreate", async interaction => {
       );
 
       console.error(error);
+
+      if (
+        error?.code === 10062 ||
+        error?.rawError?.code === 10062
+      ) {
+        return;
+      }
+
+      if (interaction.deferred) {
+        try {
+          await interaction.editReply({
+            content:
+              "❌ Could not create the embed."
+          });
+        } catch (editError) {
+          console.error(editError);
+        }
+      }
     }
 
     return;
@@ -540,7 +520,6 @@ client.on("interactionCreate", async interaction => {
       "guess_start_"
     )
   ) {
-
     try {
 
       const gameId =
@@ -553,7 +532,6 @@ client.on("interactionCreate", async interaction => {
         games.get(gameId);
 
       if (!game) {
-
         await interaction.reply({
           content:
             "❌ This game no longer exists.",
@@ -563,12 +541,18 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      // Host
+      // ------------------------------------------------
+      // HOST CHECK
+      // ------------------------------------------------
+
       const isHost =
         interaction.user.id ===
         game.hostId;
 
-      // Manage Messages
+      // ------------------------------------------------
+      // MANAGE MESSAGES CHECK
+      // ------------------------------------------------
+
       const canManageMessages =
         interaction.memberPermissions?.has(
           PermissionFlagsBits.ManageMessages
@@ -578,18 +562,20 @@ client.on("interactionCreate", async interaction => {
         !isHost &&
         !canManageMessages
       ) {
-
         await interaction.reply({
           content:
-            "❌ Only the **host** or members with **Manage Messages** can start this game.",
+            "❌ Only the **host** or members with **Manage Messages** permission can start this game.",
           flags: MessageFlags.Ephemeral
         });
 
         return;
       }
 
-      if (game.started) {
+      // ------------------------------------------------
+      // ALREADY STARTED
+      // ------------------------------------------------
 
+      if (game.started) {
         await interaction.reply({
           content:
             "❌ The game has already started!",
@@ -599,10 +585,17 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      // Acknowledge button
+      // ------------------------------------------------
+      // ACKNOWLEDGE BUTTON IMMEDIATELY
+      // ------------------------------------------------
+
       await interaction.deferUpdate();
 
       game.started = true;
+
+      // ------------------------------------------------
+      // START EMBED
+      // ------------------------------------------------
 
       const startEmbed =
         new EmbedBuilder()
@@ -629,6 +622,13 @@ client.on("interactionCreate", async interaction => {
       );
 
       console.error(error);
+
+      if (
+        error?.code === 10062 ||
+        error?.rawError?.code === 10062
+      ) {
+        return;
+      }
     }
 
     return;
@@ -656,7 +656,7 @@ client.on("messageCreate", async message => {
   const content =
     message.content.trim();
 
-  // Numbers only
+  // Only numbers
   if (!/^\d+$/.test(content)) {
     return;
   }
@@ -664,6 +664,7 @@ client.on("messageCreate", async message => {
   const guess =
     Number(content);
 
+  // Only 1 - 10000
   if (
     guess < 1 ||
     guess > 10000
@@ -674,12 +675,10 @@ client.on("messageCreate", async message => {
   try {
 
     // ==================================================
-    // WIN
+    // WINNER
     // ==================================================
 
-    if (
-      guess === game.answer
-    ) {
+    if (guess === game.answer) {
 
       const winEmbed =
         new EmbedBuilder()
@@ -695,7 +694,7 @@ client.on("messageCreate", async message => {
       });
 
       console.log(
-        `🏆 ${message.author.tag} won.`
+        `🏆 ${message.author.tag} WON with ${guess}.`
       );
 
       games.delete(gameId);
@@ -704,12 +703,19 @@ client.on("messageCreate", async message => {
     }
 
     // ==================================================
-    // CLOSE
+    // YOU'RE SO CLOSE
     // ==================================================
 
-    const closeRange =
+    // 10% of the answer, minimum 10.
+    // Example:
+    // Answer 100  -> 10
+    // Answer 500  -> 50
+    // Answer 1000 -> 100
+    // Answer 10000 -> 1000
+
+    const closeDistance =
       Math.max(
-        1,
+        10,
         Math.floor(game.answer * 0.10)
       );
 
@@ -719,7 +725,7 @@ client.on("messageCreate", async message => {
       );
 
     if (
-      difference <= closeRange
+      difference <= closeDistance
     ) {
 
       const closeEmbed =
@@ -761,11 +767,12 @@ client.login(TOKEN)
     console.error(
       "❌ Discord login failed:"
     );
+
     console.error(error);
   });
 
 // ==================================================
-// PROCESS ERROR HANDLERS
+// ERROR HANDLERS
 // ==================================================
 
 process.on(
@@ -774,6 +781,7 @@ process.on(
     console.error(
       "❌ Unhandled rejection:"
     );
+
     console.error(error);
   }
 );
@@ -784,6 +792,7 @@ process.on(
     console.error(
       "❌ Uncaught exception:"
     );
+
     console.error(error);
   }
 );
