@@ -16,7 +16,7 @@ const {
 const express = require("express");
 
 // ==================================================
-// ENVIRONMENT
+// CONFIG
 // ==================================================
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -83,31 +83,27 @@ const games = new Map();
 // COLORS
 // ==================================================
 
-function getColor(color) {
-  const colors = {
-    blue: 0x3498db,
-    red: 0xe74c3c,
-    green: 0x2ecc71,
-    yellow: 0xf1c40f,
-    orange: 0xe67e22,
-    purple: 0x9b59b6,
-    pink: 0xff69b4,
-    cyan: 0x00ffff,
-    aqua: 0x1abc9c,
-    gold: 0xffd700,
-    white: 0xffffff,
-    gray: 0x808080,
-    black: 0x000000
-  };
-
-  return colors[color] ?? colors.gray;
-}
+const COLORS = {
+  blue: 0x3498db,
+  red: 0xe74c3c,
+  green: 0x2ecc71,
+  yellow: 0xf1c40f,
+  orange: 0xe67e22,
+  purple: 0x9b59b6,
+  pink: 0xff69b4,
+  cyan: 0x00ffff,
+  aqua: 0x1abc9c,
+  gold: 0xffd700,
+  white: 0xffffff,
+  gray: 0x808080,
+  black: 0x000000
+};
 
 // ==================================================
 // SLASH COMMANDS
 // ==================================================
 
-const commandData = [
+const guessNumberCommand =
   new SlashCommandBuilder()
     .setName("guessnumber")
     .setDescription("Start a Guess Number Game")
@@ -118,8 +114,9 @@ const commandData = [
         .setRequired(true)
         .setMinValue(1)
         .setMaxValue(10000)
-    ),
+    );
 
+const embedCommand =
   new SlashCommandBuilder()
     .setName("embed")
     .setDescription("Create a custom embed")
@@ -155,20 +152,20 @@ const commandData = [
           { name: "Gray", value: "gray" },
           { name: "Black", value: "black" }
         )
-    )
+    );
+
+const commands = [
+  guessNumberCommand.toJSON(),
+  embedCommand.toJSON()
 ];
 
-const commands = commandData.map(command =>
-  command.toJSON()
-);
-
 // ==================================================
-// REGISTER GUILD COMMANDS
+// REGISTER COMMANDS
 // ==================================================
 
 async function registerCommands() {
   try {
-    console.log("🔄 Registering slash commands...");
+    console.log("🔄 Registering guild commands...");
 
     const rest = new REST({
       version: "10"
@@ -184,13 +181,9 @@ async function registerCommands() {
       }
     );
 
-    console.log(
-      "✅ Slash commands registered successfully."
-    );
+    console.log("✅ Guild commands registered.");
   } catch (error) {
-    console.error(
-      "❌ Slash command registration failed:"
-    );
+    console.error("❌ Command registration failed:");
     console.error(error);
   }
 }
@@ -199,40 +192,26 @@ async function registerCommands() {
 // DISCORD DEBUG
 // ==================================================
 
-client.on("debug", info => {
-  console.log(`[Discord Debug] ${info}`);
+client.on("debug", message => {
+  console.log(`[Discord] ${message}`);
 });
 
-client.on("warn", warning => {
-  console.warn(`[Discord Warning] ${warning}`);
+client.on("warn", message => {
+  console.warn(`[Discord Warning] ${message}`);
 });
 
 client.on("error", error => {
-  console.error("❌ Discord Client Error:");
+  console.error("❌ Discord error:");
   console.error(error);
 });
 
 client.on("shardError", error => {
-  console.error("❌ Discord Shard Error:");
+  console.error("❌ Discord shard error:");
   console.error(error);
 });
 
-client.on("shardDisconnect", (event, shardId) => {
-  console.log(
-    `⚠️ Discord shard ${shardId} disconnected.`
-  );
-});
-
-client.on("shardReconnecting", shardId => {
-  console.log(
-    `🔄 Discord shard ${shardId} reconnecting...`
-  );
-});
-
 client.on("shardReady", shardId => {
-  console.log(
-    `✅ Discord shard ${shardId} ready.`
-  );
+  console.log(`✅ Shard ${shardId} ready.`);
 });
 
 // ==================================================
@@ -240,14 +219,13 @@ client.on("shardReady", shardId => {
 // ==================================================
 
 client.once("ready", async () => {
-  console.log(
-    `✅ Logged in as ${client.user.tag}`
-  );
+  console.log(`✅ Logged in as ${client.user.tag}`);
 
   console.log(
     `🏠 Connected to ${client.guilds.cache.size} server(s).`
   );
 
+  // Watching status
   client.user.setActivity(
     "Free Source (FS)",
     {
@@ -265,65 +243,61 @@ client.once("ready", async () => {
 client.on("interactionCreate", async interaction => {
 
   console.log(
-    `📥 Interaction received: ${
+    `📥 Interaction: ${
       interaction.isChatInputCommand()
         ? interaction.commandName
         : interaction.isButton()
           ? interaction.customId
-          : "other"
+          : "unknown"
     }`
   );
 
-  try {
+  // ==================================================
+  // /GUESSNUMBER
+  // ==================================================
 
-    // ==================================================
-    // /GUESSNUMBER
-    // ==================================================
+  if (
+    interaction.isChatInputCommand() &&
+    interaction.commandName === "guessnumber"
+  ) {
 
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "guessnumber"
-    ) {
+    try {
 
+      // Get answer immediately
       const answer =
         interaction.options.getInteger("answer");
 
       console.log(
-        `🎯 Answer received: ${answer}`
+        `🎯 Received answer: ${answer}`
       );
 
-      // Respond immediately
-      await interaction.reply({
-        content: " ",
-        flags: MessageFlags.Ephemeral
-      });
-
-      console.log(
-        "✅ /guessnumber interaction acknowledged."
-      );
-
-      const gameId =
-        `${interaction.guildId}-${interaction.channelId}`;
-
-      if (games.has(gameId)) {
-
-        await interaction.editReply({
-          content:
-            "❌ There is already a Guess Number game in this channel."
-        });
-
-        return;
-      }
-
+      // Check answer
       if (
         answer === null ||
         answer < 1 ||
         answer > 10000
       ) {
 
-        await interaction.editReply({
+        await interaction.reply({
           content:
-            "❌ Please provide an answer from 1 to 10000."
+            "❌ Please provide an answer from 1 to 10000.",
+          flags: MessageFlags.Ephemeral
+        });
+
+        return;
+      }
+
+      // Game ID
+      const gameId =
+        `${interaction.guildId}-${interaction.channelId}`;
+
+      // Check existing game
+      if (games.has(gameId)) {
+
+        await interaction.reply({
+          content:
+            "❌ There is already a game in this channel.",
+          flags: MessageFlags.Ephemeral
         });
 
         return;
@@ -340,40 +314,53 @@ client.on("interactionCreate", async interaction => {
       });
 
       console.log(
-        `💾 Game saved. Answer: ${answer}`
+        `💾 Game created. Answer = ${answer}`
       );
 
       // ==================================================
-      // DM HOST
+      // ACKNOWLEDGE IMMEDIATELY
       // ==================================================
 
-      try {
+      await interaction.reply({
+        content: "✅ Game created!",
+        flags: MessageFlags.Ephemeral
+      });
 
-        const dmEmbed =
-          new EmbedBuilder()
-            .setColor(0x808080)
-            .setDescription(
-              `> 🔢 **Answer:** \`${answer}\`\n` +
-              `> 📌 **Range:** \`1 - 10000\``
-            );
+      console.log(
+        "✅ Interaction acknowledged."
+      );
+
+      // ==================================================
+      // DM ANSWER
+      // ==================================================
+
+      const dmEmbed =
+        new EmbedBuilder()
+          .setColor(0x808080)
+          .setDescription(
+            `> 🔢 **Answer:** \`${answer}\`\n` +
+            `> 📌 **Range:** \`1 - 10000\``
+          );
+
+      try {
 
         await interaction.user.send({
           embeds: [dmEmbed]
         });
 
         console.log(
-          "📩 Answer sent to host DM."
+          "📩 Answer sent to host."
         );
 
       } catch (error) {
 
-        console.error(
-          "⚠️ Could not send DM to host."
+        console.log(
+          "⚠️ Host DMs are closed."
         );
       }
 
       // ==================================================
-      // PUBLIC GAME EVENT
+      // PUBLIC GAME MESSAGE
       // ==================================================
 
       const gameEmbed =
@@ -385,16 +372,17 @@ client.on("interactionCreate", async interaction => {
             `> **Click \`Start Button\` below to start the Guess Number Game.**`
           );
 
+      const button =
+        new ButtonBuilder()
+          .setCustomId(
+            `guess_start_${gameId}`
+          )
+          .setLabel("Start")
+          .setStyle(ButtonStyle.Primary);
+
       const row =
         new ActionRowBuilder()
-          .addComponents(
-            new ButtonBuilder()
-              .setCustomId(
-                `guess_start_${gameId}`
-              )
-              .setLabel("Start")
-              .setStyle(ButtonStyle.Primary)
-          );
+          .addComponents(button);
 
       try {
 
@@ -404,44 +392,74 @@ client.on("interactionCreate", async interaction => {
         });
 
         console.log(
-          "🎮 Public game event sent."
+          "🎮 Public game message sent."
         );
 
       } catch (error) {
 
         console.error(
-          "❌ Could not send public game event:"
+          "❌ Could not send public game message:"
         );
 
         console.error(error);
 
         games.delete(gameId);
-
-        await interaction.editReply({
-          content:
-            "❌ I couldn't send the game message in this channel. Check my channel permissions."
-        });
-
-        return;
       }
 
-      await interaction.editReply({
-        content: " "
-      });
+      return;
+
+    } catch (error) {
+
+      console.error(
+        "❌ /guessnumber error:"
+      );
+
+      console.error(error);
+
+      // Only reply if not already acknowledged
+      if (
+        !interaction.replied &&
+        !interaction.deferred
+      ) {
+
+        try {
+
+          await interaction.reply({
+            content:
+              "❌ An error occurred while creating the game.",
+            flags: MessageFlags.Ephemeral
+          });
+
+        } catch (replyError) {
+
+          console.error(
+            "❌ Could not reply to interaction:"
+          );
+
+          console.error(replyError);
+        }
+      }
 
       return;
     }
+  }
 
-    // ==================================================
-    // /EMBED
-    // ==================================================
+  // ==================================================
+  // /EMBED
+  // ==================================================
 
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "embed"
-    ) {
+  if (
+    interaction.isChatInputCommand() &&
+    interaction.commandName === "embed"
+  ) {
 
-      await interaction.deferReply();
+    try {
+
+      // Acknowledge immediately
+      await interaction.reply({
+        content: " ",
+        flags: MessageFlags.Ephemeral
+      });
 
       const title =
         interaction.options.getString("title");
@@ -465,48 +483,65 @@ client.on("interactionCreate", async interaction => {
 
       const embed =
         new EmbedBuilder()
-          .setColor(getColor(color))
+          .setColor(
+            COLORS[color] ?? COLORS.gray
+          )
           .setFooter({
             text: `Today at ${now}`
           });
 
       if (
         title &&
-        title.trim().length > 0
+        title.trim()
       ) {
         embed.setTitle(title);
       }
 
       if (
         description &&
-        description.trim().length > 0
+        description.trim()
       ) {
         embed.setDescription(
           description
         );
       }
 
-      await interaction.editReply({
+      await interaction.channel.send({
         embeds: [embed]
       });
 
+      await interaction.editReply({
+        content: " "
+      });
+
       console.log(
-        "✅ /embed responded."
+        "✅ /embed completed."
       );
 
-      return;
+    } catch (error) {
+
+      console.error(
+        "❌ /embed error:"
+      );
+
+      console.error(error);
     }
 
-    // ==================================================
-    // START BUTTON
-    // ==================================================
+    return;
+  }
 
-    if (
-      interaction.isButton() &&
-      interaction.customId.startsWith(
-        "guess_start_"
-      )
-    ) {
+  // ==================================================
+  // START BUTTON
+  // ==================================================
+
+  if (
+    interaction.isButton() &&
+    interaction.customId.startsWith(
+      "guess_start_"
+    )
+  ) {
+
+    try {
 
       const gameId =
         interaction.customId.replace(
@@ -528,10 +563,12 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
+      // Host
       const isHost =
         interaction.user.id ===
         game.hostId;
 
+      // Manage Messages
       const canManageMessages =
         interaction.memberPermissions?.has(
           PermissionFlagsBits.ManageMessages
@@ -562,7 +599,7 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      // Acknowledge button immediately
+      // Acknowledge button
       await interaction.deferUpdate();
 
       game.started = true;
@@ -585,51 +622,16 @@ client.on("interactionCreate", async interaction => {
         `🎮 Game started by ${interaction.user.tag}`
       );
 
-      return;
-    }
-
-  } catch (error) {
-
-    console.error(
-      "❌ Interaction handler error:"
-    );
-
-    console.error(error);
-
-    try {
-
-      if (
-        interaction.isRepliable() &&
-        !interaction.replied &&
-        !interaction.deferred
-      ) {
-
-        await interaction.reply({
-          content:
-            "❌ An error occurred while processing this interaction.",
-          flags: MessageFlags.Ephemeral
-        });
-
-      } else if (
-        interaction.isRepliable() &&
-        interaction.deferred &&
-        !interaction.replied
-      ) {
-
-        await interaction.editReply({
-          content:
-            "❌ An error occurred while processing this interaction."
-        });
-      }
-
-    } catch (replyError) {
+    } catch (error) {
 
       console.error(
-        "❌ Could not send interaction error:"
+        "❌ Start button error:"
       );
 
-      console.error(replyError);
+      console.error(error);
     }
+
+    return;
   }
 });
 
@@ -639,43 +641,40 @@ client.on("interactionCreate", async interaction => {
 
 client.on("messageCreate", async message => {
 
+  if (message.author.bot) return;
+  if (!message.guild) return;
+
+  const gameId =
+    `${message.guild.id}-${message.channel.id}`;
+
+  const game =
+    games.get(gameId);
+
+  if (!game) return;
+  if (!game.started) return;
+
+  const content =
+    message.content.trim();
+
+  // Numbers only
+  if (!/^\d+$/.test(content)) {
+    return;
+  }
+
+  const guess =
+    Number(content);
+
+  if (
+    guess < 1 ||
+    guess > 10000
+  ) {
+    return;
+  }
+
   try {
 
-    if (message.author.bot) return;
-    if (!message.guild) return;
-
-    const gameId =
-      `${message.guild.id}-${message.channel.id}`;
-
-    const game =
-      games.get(gameId);
-
-    if (
-      !game ||
-      !game.started
-    ) {
-      return;
-    }
-
-    const content =
-      message.content.trim();
-
-    if (!/^\d+$/.test(content)) {
-      return;
-    }
-
-    const guess =
-      Number(content);
-
-    if (
-      guess < 1 ||
-      guess > 10000
-    ) {
-      return;
-    }
-
     // ==================================================
-    // WINNER
+    // WIN
     // ==================================================
 
     if (
@@ -696,7 +695,7 @@ client.on("messageCreate", async message => {
       });
 
       console.log(
-        `🏆 ${message.author.tag} won with ${guess}.`
+        `🏆 ${message.author.tag} won.`
       );
 
       games.delete(gameId);
@@ -705,7 +704,7 @@ client.on("messageCreate", async message => {
     }
 
     // ==================================================
-    // CLOSE ANSWER
+    // CLOSE
     // ==================================================
 
     const closeRange =
@@ -734,44 +733,17 @@ client.on("messageCreate", async message => {
         embeds: [closeEmbed]
       });
 
-      console.log(
-        `😱 Close guess: ${guess}; difference: ${difference}`
-      );
     }
 
   } catch (error) {
 
     console.error(
-      "❌ Guessing error:"
+      "❌ Guess processing error:"
     );
 
     console.error(error);
   }
 });
-
-// ==================================================
-// PROCESS ERRORS
-// ==================================================
-
-process.on(
-  "unhandledRejection",
-  error => {
-    console.error(
-      "❌ Unhandled Rejection:"
-    );
-    console.error(error);
-  }
-);
-
-process.on(
-  "uncaughtException",
-  error => {
-    console.error(
-      "❌ Uncaught Exception:"
-    );
-    console.error(error);
-  }
-);
 
 // ==================================================
 // LOGIN
@@ -781,17 +753,37 @@ console.log("🔑 Logging into Discord...");
 
 client.login(TOKEN)
   .then(() => {
-
     console.log(
       "🔐 Discord login request completed."
     );
-
   })
   .catch(error => {
-
     console.error(
-      "❌ DISCORD LOGIN FAILED:"
+      "❌ Discord login failed:"
     );
-
     console.error(error);
   });
+
+// ==================================================
+// PROCESS ERROR HANDLERS
+// ==================================================
+
+process.on(
+  "unhandledRejection",
+  error => {
+    console.error(
+      "❌ Unhandled rejection:"
+    );
+    console.error(error);
+  }
+);
+
+process.on(
+  "uncaughtException",
+  error => {
+    console.error(
+      "❌ Uncaught exception:"
+    );
+    console.error(error);
+  }
+);
