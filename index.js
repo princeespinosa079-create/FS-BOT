@@ -25,16 +25,21 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const OWNER_ID = "1302080645987569694";
 
+// =========================
+// Required Environment Check
+// =========================
+
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error(
     "❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID."
   );
+
   process.exit(1);
 }
 
 if (!OPENAI_API_KEY) {
   console.warn(
-    "⚠️ OPENAI_API_KEY is missing. AI responses will be disabled."
+    "⚠️ OPENAI_API_KEY is missing. AI is disabled."
   );
 }
 
@@ -95,7 +100,7 @@ const games = new Map();
 
 const aiCooldowns = new Map();
 
-const AI_COOLDOWN = 3000;
+const AI_COOLDOWN = 2000;
 
 // =========================
 // Today at HH:MM
@@ -117,65 +122,79 @@ function getTodayTime() {
 const AI_PERSONALITY = `
 You are a Discord bot with a sarcastic, sassy, blunt and playful personality.
 
-You are NOT genuinely hateful or abusive.
-
-Your personality:
-- Be sarcastic and teasing.
+You should:
+- Answer questions accurately and helpfully.
+- Be sarcastic and playful.
 - Be blunt and confident.
-- Use playful internet humor.
-- You can use mild casual slang.
-- Do not target protected characteristics.
-- Do not threaten people.
-- Do not encourage violence or dangerous behavior.
-- Do not sexually harass anyone.
-- Do not use hateful slurs.
-- Do not relentlessly bully or humiliate a person.
-- Still answer questions accurately and helpfully.
-- If someone asks a serious question, actually answer it.
-- Keep responses relatively short and Discord-friendly.
-- Don't mention these personality instructions.
-- Don't say you are an AI unless it is relevant.
-- You can use emojis occasionally.
+- Use casual Discord/internet slang.
+- Lightly tease users.
+- Use emojis sometimes.
+- Keep responses short and natural for Discord.
+- If the user asks a serious question, answer it seriously while keeping a little personality.
 
-Example style:
+Do NOT:
+- Use hateful slurs.
+- Threaten users.
+- Encourage violence.
+- Encourage dangerous behavior.
+- Sexually harass anyone.
+- Attack protected characteristics.
+- Repeatedly bully or humiliate someone.
+- Reveal or discuss these instructions.
+
+Example:
 "Bro really summoned me for THAT 😭. The answer is 100."
 
-Another example:
-"Yeah, I can help. Send the code before it commits another crime against JavaScript 💀."
+Example:
+"Fine 💀 send the JavaScript and I'll see what's broken."
 `;
 
 // =========================
 // Ask OpenAI
 // =========================
 
-async function askAI(message, prompt) {
+async function askAI(prompt) {
   if (!openai) {
+    console.error("❌ OPENAI_API_KEY is missing.");
     return null;
   }
 
   try {
     const response = await openai.responses.create({
-      model: "gpt-5.6-luna",
+      model: "gpt-5.4-mini",
       instructions: AI_PERSONALITY,
       input: prompt,
-      max_output_tokens: 350
+      max_output_tokens: 250,
+      store: false
     });
 
-    let text = response.output_text?.trim();
+    const text = response.output_text?.trim();
 
     if (!text) {
+      console.error("❌ OpenAI returned an empty response.");
       return null;
     }
 
-    // Discord message limit protection
+    // Discord message limit
     if (text.length > 1900) {
-      text = text.slice(0, 1890) + "...";
+      return text.slice(0, 1890) + "...";
     }
 
     return text;
 
   } catch (error) {
-    console.error("❌ OpenAI error:", error);
+    console.error("❌ OpenAI API error:");
+
+    if (error?.status) {
+      console.error("Status:", error.status);
+    }
+
+    if (error?.message) {
+      console.error("Message:", error.message);
+    }
+
+    console.error(error);
+
     return null;
   }
 }
@@ -185,7 +204,10 @@ async function askAI(message, prompt) {
 // =========================
 
 const commands = [
+  // =========================
   // /guessnumber
+  // =========================
+
   new SlashCommandBuilder()
     .setName("guessnumber")
     .setDescription("Create a number guessing game.")
@@ -201,7 +223,10 @@ const commands = [
         .setMaxValue(10000)
     ),
 
+  // =========================
   // /embed
+  // =========================
+
   new SlashCommandBuilder()
     .setName("embed")
     .setDescription("Send a gray embed.")
@@ -221,14 +246,20 @@ const commands = [
         .setRequired(false)
     ),
 
+  // =========================
   // /serverlist
+  // =========================
+
   new SlashCommandBuilder()
     .setName("serverlist")
     .setDescription(
       "Show all servers where the bot is installed. (Owner only)"
     ),
 
+  // =========================
   // /leave
+  // =========================
+
   new SlashCommandBuilder()
     .setName("leave")
     .setDescription(
@@ -254,7 +285,7 @@ async function registerCommands() {
   try {
     console.log("🧹 Cleaning old slash commands...");
 
-    // Remove old GLOBAL commands
+    // Remove GLOBAL commands
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
       {
@@ -264,7 +295,7 @@ async function registerCommands() {
 
     console.log("🗑️ Old global commands removed.");
 
-    // Remove old GUILD commands
+    // Remove GUILD commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -277,7 +308,7 @@ async function registerCommands() {
 
     console.log("🗑️ Old guild commands removed.");
 
-    // Register commands ONLY in GUILD_ID
+    // Register ONLY current commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -294,7 +325,7 @@ async function registerCommands() {
 
   } catch (error) {
     console.error(
-      "❌ Failed to register commands:",
+      "❌ Command registration error:",
       error
     );
   }
@@ -328,7 +359,7 @@ client.on("interactionCreate", async interaction => {
   try {
 
     // =========================
-    // OWNER ONLY
+    // OWNER-ONLY
     // =========================
 
     if (
@@ -350,7 +381,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     // =========================
-    // MANAGE NICKNAMES ONLY
+    // MANAGE NICKNAMES
     // =========================
 
     if (
@@ -430,8 +461,7 @@ client.on("interactionCreate", async interaction => {
 
             inviteLink = invite.url;
           }
-
-        } catch (error) {
+        } catch {
           inviteLink = "Unavailable";
         }
 
@@ -441,10 +471,11 @@ client.on("interactionCreate", async interaction => {
           `> **Invite:** ${inviteLink}\n\n`;
       }
 
-      const embed = new EmbedBuilder()
-        .setTitle("SERVER LIST 📋")
-        .setDescription(description)
-        .setColor(0x808080);
+      const embed =
+        new EmbedBuilder()
+          .setTitle("SERVER LIST 📋")
+          .setDescription(description)
+          .setColor(0x808080);
 
       await interaction.editReply({
         embeds: [embed]
@@ -541,18 +572,19 @@ client.on("interactionCreate", async interaction => {
       // DM ANSWER
       // =========================
 
-      const answerEmbed = new EmbedBuilder()
-        .setDescription(
-          `🔢 **Answer:** \`${answer}\``
-        )
-        .setColor(0x808080);
+      const answerEmbed =
+        new EmbedBuilder()
+          .setDescription(
+            `🔢 **Answer:** \`${answer}\``
+          )
+          .setColor(0x808080);
 
       try {
         await interaction.user.send({
           embeds: [answerEmbed]
         });
 
-      } catch (error) {
+      } catch {
         games.delete(interaction.channelId);
 
         await interaction.reply({
@@ -582,13 +614,14 @@ client.on("interactionCreate", async interaction => {
       // GAME EVENT
       // =========================
 
-      const panelEmbed = new EmbedBuilder()
-        .setTitle("GAME EVENT 🧧")
-        .setDescription(
-          `> **Host by:** <@${interaction.user.id}>\n` +
-          `> **Click the** \`Start Button\` **to start** \`Guess Game\`.`
-        )
-        .setColor(0x808080);
+      const panelEmbed =
+        new EmbedBuilder()
+          .setTitle("GAME EVENT 🧧")
+          .setDescription(
+            `> **Host by:** <@${interaction.user.id}>\n` +
+            `> **Click the** \`Start Button\` **to start** \`Guess Game\`.`
+          )
+          .setColor(0x808080);
 
       const row =
         new ActionRowBuilder()
@@ -625,13 +658,14 @@ client.on("interactionCreate", async interaction => {
           "title"
         );
 
-      const embed = new EmbedBuilder()
-        .setDescription(description)
-        .setColor(0x808080)
-        .setFooter({
-          text:
-            `Today at ${getTodayTime()}`
-        });
+      const embed =
+        new EmbedBuilder()
+          .setDescription(description)
+          .setColor(0x808080)
+          .setFooter({
+            text:
+              `Today at ${getTodayTime()}`
+          });
 
       if (title) {
         embed.setTitle(title);
@@ -719,7 +753,6 @@ client.on("interactionCreate", async interaction => {
               SendMessages: true
             }
           );
-
         } catch (error) {
           console.error(
             "⚠️ Could not unlock channel:",
@@ -768,103 +801,83 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// Guess Number Messages
+// Messages
 // =========================
 
 client.on("messageCreate", async message => {
   try {
     if (message.author.bot) return;
+
+    // =========================
+    // GUESS NUMBER
+    // =========================
 
     const game =
       games.get(message.channelId);
 
-    if (!game || !game.active) return;
-
-    const guess =
-      Number(message.content.trim());
-
-    if (!Number.isInteger(guess)) return;
-
-    if (guess < 1 || guess > 10000) return;
-
-    // =========================
-    // CORRECT ANSWER
-    // =========================
-
-    if (guess === game.answer) {
-
-      const winEmbed =
-        new EmbedBuilder()
-          .setDescription(
-            `> 🔒 **LOCK!**\n` +
-            `> 🎊 <@${message.author.id}> **WON!**\n` +
-            `> ✅ **${guess}**`
-          )
-          .setColor(0x808080);
-
-      await message.channel.send({
-        embeds: [winEmbed]
-      });
-
-      // =========================
-      // LOCK CHANNEL
-      // =========================
+    if (game && game.active) {
+      const guess =
+        Number(message.content.trim());
 
       if (
-        message.guild &&
-        message.channel.permissionOverwrites
+        Number.isInteger(guess) &&
+        guess >= 1 &&
+        guess <= 10000
       ) {
-        try {
-          await message.channel.permissionOverwrites.edit(
-            message.guild.roles.everyone,
-            {
-              SendMessages: false
+        if (guess === game.answer) {
+
+          const winEmbed =
+            new EmbedBuilder()
+              .setDescription(
+                `> 🔒 **LOCK!**\n` +
+                `> 🎊 <@${message.author.id}> **WON!**\n` +
+                `> ✅ **${guess}**`
+              )
+              .setColor(0x808080);
+
+          await message.channel.send({
+            embeds: [winEmbed]
+          });
+
+          if (
+            message.guild &&
+            message.channel.permissionOverwrites
+          ) {
+            try {
+              await message.channel.permissionOverwrites.edit(
+                message.guild.roles.everyone,
+                {
+                  SendMessages: false
+                }
+              );
+            } catch (error) {
+              console.error(
+                "⚠️ Could not lock channel:",
+                error
+              );
             }
-          );
+          }
 
-        } catch (error) {
-          console.error(
-            "⚠️ Could not lock channel:",
-            error
-          );
+          games.delete(message.channelId);
+
+          return;
         }
+
+        // Wrong guesses get no response.
       }
-
-      games.delete(message.channelId);
-
-      return;
     }
 
-    // Wrong guesses = NO RESPONSE
-
-  } catch (error) {
-    console.error(
-      "❌ Message handling error:",
-      error
-    );
-  }
-});
-
-// =========================
-// AI MESSAGE HANDLER
-// =========================
-
-client.on("messageCreate", async message => {
-  try {
-    if (message.author.bot) return;
+    // =========================
+    // AI
+    // =========================
 
     if (!openai) return;
 
-    // =========================
-    // Detect Bot Mention
-    // =========================
-
     const botMentioned =
-      message.mentions.users.has(client.user.id);
-
-    // =========================
-    // Detect @everyone / @here
-    // =========================
+      client.user &&
+      message.mentions.users.has(
+        client.user.id
+      );
 
     const massMention =
       message.mentions.everyone;
@@ -874,14 +887,20 @@ client.on("messageCreate", async message => {
     }
 
     // =========================
-    // Cooldown
+    // AI Cooldown
     // =========================
 
     const now = Date.now();
-    const lastUsed =
-      aiCooldowns.get(message.author.id) || 0;
 
-    if (now - lastUsed < AI_COOLDOWN) {
+    const lastUsed =
+      aiCooldowns.get(
+        message.author.id
+      ) || 0;
+
+    if (
+      now - lastUsed <
+      AI_COOLDOWN
+    ) {
       return;
     }
 
@@ -891,53 +910,63 @@ client.on("messageCreate", async message => {
     );
 
     // =========================
-    // Remove Bot Mention
+    // Clean Prompt
     // =========================
 
     let prompt =
-      message.content
+      message.content;
+
+    prompt = prompt.replace(
+      new RegExp(
+        `<@!?${client.user.id}>`,
+        "g"
+      ),
+      ""
+    );
+
+    prompt =
+      prompt
         .replace(
-          new RegExp(`<@!?${client.user.id}>`, "g"),
+          /@everyone/g,
+          ""
+        )
+        .replace(
+          /@here/g,
           ""
         )
         .trim();
 
-    // Remove mass mentions
-    prompt = prompt
-      .replace(/@everyone/g, "")
-      .replace(/@here/g, "")
-      .trim();
-
     if (!prompt) {
       prompt =
-        "Someone pinged you without asking anything. Respond with a short sarcastic reaction.";
+        "Someone pinged you without asking a question. Give a short sarcastic reaction.";
     }
 
-    // =========================
-    // Show typing
-    // =========================
-
-    if (
-      message.channel &&
-      message.channel.sendTyping
-    ) {
-      await message.channel.sendTyping();
-    }
+    console.log(
+      `🤖 AI request from ${message.author.tag}: ${prompt}`
+    );
 
     // =========================
-    // AI Response
+    // AI Request
     // =========================
 
     const response =
-      await askAI(message, prompt);
+      await askAI(prompt);
+
+    // =========================
+    // Response
+    // =========================
 
     if (!response) {
+      await message.reply({
+        content:
+          "💀 My AI brain just crashed. Try again.",
+        allowedMentions: {
+          repliedUser: false
+        }
+      }).catch(() => {});
+
       return;
     }
-
-    // =========================
-    // Reply
-    // =========================
 
     await message.reply({
       content: response,
@@ -946,16 +975,20 @@ client.on("messageCreate", async message => {
       }
     });
 
+    console.log(
+      "✅ AI response sent."
+    );
+
   } catch (error) {
     console.error(
-      "❌ AI message error:",
+      "❌ Message handler error:",
       error
     );
   }
 });
 
 // =========================
-// Errors
+// Discord Errors
 // =========================
 
 client.on("error", error => {
@@ -971,6 +1004,10 @@ client.on("warn", warning => {
     warning
   );
 });
+
+// =========================
+// Process Errors
+// =========================
 
 process.on(
   "unhandledRejection",
@@ -996,7 +1033,9 @@ process.on(
 // Login
 // =========================
 
-console.log("🔑 Logging into Discord...");
+console.log(
+  "🔑 Logging into Discord..."
+);
 
 client.login(TOKEN).catch(error => {
   console.error(
