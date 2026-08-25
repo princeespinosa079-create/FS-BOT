@@ -31,7 +31,7 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "online",
-    bot: client?.user?.tag || "connecting"
+    bot: client.user ? client.user.tag : "connecting"
   });
 });
 
@@ -48,30 +48,57 @@ const client = new Client({
 });
 
 // =========================
-// Slash Commands
+// Commands
 // =========================
 
 const commands = [
   new SlashCommandBuilder()
     .setName("guessnumber")
-    .setDescription("Start a number guessing game."),
+    .setDescription("Guess a number between 1 and 100.")
+    .addIntegerOption(option =>
+      option
+        .setName("number")
+        .setDescription("Your guess")
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(100)
+    ),
 
   new SlashCommandBuilder()
     .setName("embed")
-    .setDescription("Send a simple embed.")
+    .setDescription("Send a custom embed.")
+    .addStringOption(option =>
+      option
+        .setName("title")
+        .setDescription("Embed title")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("description")
+        .setDescription("Embed description")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("color")
+        .setDescription("Hex color, for example #00FF00")
+        .setRequired(false)
+    )
 ].map(command => command.toJSON());
 
 // =========================
 // Register GLOBAL Commands
-// No GUILD_ID needed
 // =========================
 
 async function registerCommands() {
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
-
   try {
-    console.log("🔄 Registering global slash commands...");
+    const rest = new REST({ version: "10" }).setToken(TOKEN);
 
+    console.log("🔄 Updating global slash commands...");
+
+    // PUT replaces the complete global command list.
+    // This removes old/duplicate versions.
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
       {
@@ -79,15 +106,14 @@ async function registerCommands() {
       }
     );
 
-    console.log("✅ Global slash commands registered.");
+    console.log("✅ Global commands updated.");
   } catch (error) {
-    console.error("❌ Command registration failed:");
-    console.error(error);
+    console.error("❌ Failed to register commands:", error);
   }
 }
 
 // =========================
-// Bot Ready
+// Ready
 // =========================
 
 client.once("ready", async () => {
@@ -98,50 +124,97 @@ client.once("ready", async () => {
 });
 
 // =========================
-// Commands
+// Interaction Handler
 // =========================
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  console.log(`📥 Received /${interaction.commandName}`);
+  console.log(`📥 /${interaction.commandName}`);
 
-  // GUESS NUMBER
+  // =========================
+  // /guessnumber
+  // =========================
+
   if (interaction.commandName === "guessnumber") {
     try {
-      // Acknowledge immediately.
-      await interaction.deferReply();
-
+      const guess = interaction.options.getInteger("number");
       const answer = Math.floor(Math.random() * 100) + 1;
 
-      await interaction.editReply(
-        `🎯 Guess a number between **1 and 100**!\n\n` +
-        `🔢 The answer is **${answer}**.`
-      );
+      let result;
 
-      console.log(`🎯 Generated answer: ${answer}`);
+      if (guess === answer) {
+        result = `🎉 **Correct!** You guessed the number!`;
+      } else if (guess < answer) {
+        result = `📈 **Too low!** Try a higher number.`;
+      } else {
+        result = `📉 **Too high!** Try a lower number.`;
+      }
+
+      await interaction.reply({
+        content:
+          `🎯 **Number Guessing Game**\n\n` +
+          `Your guess: **${guess}**\n` +
+          `${result}`,
+        ephemeral: false
+      });
+
+      console.log(
+        `🎯 Guess: ${guess} | Answer: ${answer}`
+      );
     } catch (error) {
       console.error("❌ /guessnumber error:", error);
+
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: "❌ Something went wrong.",
+          ephemeral: true
+        });
+      }
     }
 
     return;
   }
 
-  // EMBED
+  // =========================
+  // /embed
+  // =========================
+
   if (interaction.commandName === "embed") {
     try {
-      await interaction.deferReply();
+      const title = interaction.options.getString("title");
+      const description =
+        interaction.options.getString("description");
+
+      let color =
+        interaction.options.getString("color") || "#00FFFF";
+
+      // Remove # if provided
+      color = color.replace("#", "");
+
+      // Validate hex color
+      if (!/^[0-9A-Fa-f]{6}$/.test(color)) {
+        color = "00FFFF";
+      }
 
       const embed = new EmbedBuilder()
-        .setTitle("FS Bot")
-        .setDescription("✅ The bot is working correctly!")
+        .setTitle(title)
+        .setDescription(description)
+        .setColor(`#${color}`)
         .setTimestamp();
 
-      await interaction.editReply({
+      await interaction.reply({
         embeds: [embed]
       });
     } catch (error) {
       console.error("❌ /embed error:", error);
+
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: "❌ Something went wrong.",
+          ephemeral: true
+        });
+      }
     }
 
     return;
@@ -149,7 +222,7 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// Discord Events
+// Errors
 // =========================
 
 client.on("error", error => {
@@ -175,7 +248,6 @@ process.on("uncaughtException", error => {
 console.log("🔑 Logging into Discord...");
 
 client.login(TOKEN).catch(error => {
-  console.error("❌ Discord login failed:");
-  console.error(error);
+  console.error("❌ Discord login failed:", error);
   process.exit(1);
 });
