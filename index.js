@@ -14,14 +14,10 @@ const express = require("express");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-
-// Optional but HIGHLY recommended for testing.
-// Put your Discord server ID in REPLIT secret:
-// GUILD_ID=your_server_id
 const GUILD_ID = process.env.GUILD_ID;
 
-if (!TOKEN || !CLIENT_ID) {
-  console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID.");
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
   process.exit(1);
 }
 
@@ -66,20 +62,7 @@ const client = new Client({
 const games = new Map();
 
 // =========================
-// Today at HH:MM
-// =========================
-
-function getTodayTime() {
-  return new Date().toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Asia/Manila"
-  });
-}
-
-// =========================
-// ONLY 2 SLASH COMMANDS
+// Slash Commands
 // =========================
 
 const commands = [
@@ -113,7 +96,7 @@ const commands = [
 ].map(command => command.toJSON());
 
 // =========================
-// Clean + Register Commands
+// Register Commands
 // =========================
 
 async function registerCommands() {
@@ -122,10 +105,7 @@ async function registerCommands() {
   try {
     console.log("🧹 Cleaning old slash commands...");
 
-    // ---------------------------------
-    // Delete ALL global commands
-    // ---------------------------------
-
+    // Remove ALL global commands
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
       {
@@ -135,59 +115,39 @@ async function registerCommands() {
 
     console.log("🗑️ Old global commands removed.");
 
-    // ---------------------------------
-    // If GUILD_ID exists:
-    // Delete old guild commands
-    // ---------------------------------
+    // Remove ALL guild commands
+    await rest.put(
+      Routes.applicationGuildCommands(
+        CLIENT_ID,
+        GUILD_ID
+      ),
+      {
+        body: []
+      }
+    );
 
-    if (GUILD_ID) {
-      await rest.put(
-        Routes.applicationGuildCommands(
-          CLIENT_ID,
-          GUILD_ID
-        ),
-        {
-          body: []
-        }
-      );
+    console.log("🗑️ Old guild commands removed.");
 
-      console.log("🗑️ Old guild commands removed.");
+    // Register ONLY these 2 commands
+    await rest.put(
+      Routes.applicationGuildCommands(
+        CLIENT_ID,
+        GUILD_ID
+      ),
+      {
+        body: commands
+      }
+    );
 
-      // Register ONLY the two commands to the server
-      await rest.put(
-        Routes.applicationGuildCommands(
-          CLIENT_ID,
-          GUILD_ID
-        ),
-        {
-          body: commands
-        }
-      );
-
-      console.log(
-        "✅ Registered ONLY /guessnumber and /embed to the server."
-      );
-
-    } else {
-
-      // ---------------------------------
-      // No GUILD_ID = register globally
-      // ---------------------------------
-
-      await rest.put(
-        Routes.applicationCommands(CLIENT_ID),
-        {
-          body: commands
-        }
-      );
-
-      console.log(
-        "✅ Registered ONLY /guessnumber and /embed globally."
-      );
-    }
+    console.log(
+      "✅ Registered ONLY /guessnumber and /embed."
+    );
 
   } catch (error) {
-    console.error("❌ Command registration error:", error);
+    console.error(
+      "❌ Failed to register commands:",
+      error
+    );
   }
 }
 
@@ -197,7 +157,9 @@ async function registerCommands() {
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log(`🏠 Connected to ${client.guilds.cache.size} server(s).`);
+  console.log(
+    `🏠 Connected to ${client.guilds.cache.size} server(s).`
+  );
 
   await registerCommands();
 });
@@ -220,7 +182,7 @@ client.on("interactionCreate", async interaction => {
       const answer =
         interaction.options.getInteger("answer");
 
-      // Prevent duplicate games
+      // Prevent duplicate game in the same channel
       if (games.has(interaction.channelId)) {
         await interaction.reply({
           content:
@@ -228,7 +190,6 @@ client.on("interactionCreate", async interaction => {
           ephemeral: true
         });
 
-        // Delete the temporary reply
         setTimeout(() => {
           interaction.deleteReply().catch(() => {});
         }, 1500);
@@ -251,17 +212,13 @@ client.on("interactionCreate", async interaction => {
         .setDescription(
           `🔢 **Answer:** \`${answer}\``
         )
-        .setColor(0x808080)
-        .setFooter({
-          text: `Today at ${getTodayTime()}`
-        });
+        .setColor(0x808080);
 
       try {
         await interaction.user.send({
           embeds: [answerEmbed]
         });
       } catch (error) {
-
         games.delete(interaction.channelId);
 
         await interaction.reply({
@@ -278,7 +235,7 @@ client.on("interactionCreate", async interaction => {
       }
 
       // =========================
-      // SILENTLY ACKNOWLEDGE
+      // SILENT COMMAND
       // =========================
 
       await interaction.deferReply({
@@ -288,18 +245,16 @@ client.on("interactionCreate", async interaction => {
       await interaction.deleteReply();
 
       // =========================
-      // PUBLIC GAME PANEL
+      // GAME EVENT
       // =========================
 
       const panelEmbed = new EmbedBuilder()
         .setTitle("GAME EVENT 🧧")
         .setDescription(
-          "> **Click the** `Start Button` **to start** `Guess Game`."
+          `> **Host by:** <@${interaction.user.id}>\n` +
+          `> **Click the** \`Start Button\` **to start** \`Guess Game\`.`
         )
-        .setColor(0x808080)
-        .setFooter({
-          text: `Today at ${getTodayTime()}`
-        });
+        .setColor(0x808080);
 
       const row = new ActionRowBuilder()
         .addComponents(
@@ -309,7 +264,7 @@ client.on("interactionCreate", async interaction => {
             .setStyle(ButtonStyle.Success)
         );
 
-      // Send ONLY ONE public message
+      // ONLY ONE PUBLIC MESSAGE
       await interaction.channel.send({
         embeds: [panelEmbed],
         components: [row]
@@ -334,17 +289,14 @@ client.on("interactionCreate", async interaction => {
 
       const embed = new EmbedBuilder()
         .setDescription(description)
-        .setColor(0x808080)
-        .setFooter({
-          text: `Today at ${getTodayTime()}`
-        });
+        .setColor(0x808080);
 
       if (title) {
         embed.setTitle(title);
       }
 
       // =========================
-      // SILENTLY ACKNOWLEDGE
+      // SILENT COMMAND
       // =========================
 
       await interaction.deferReply({
@@ -353,10 +305,7 @@ client.on("interactionCreate", async interaction => {
 
       await interaction.deleteReply();
 
-      // =========================
-      // SEND ONLY ONE EMBED
-      // =========================
-
+      // ONLY ONE EMBED
       await interaction.channel.send({
         embeds: [embed]
       });
@@ -431,12 +380,9 @@ client.on("interactionCreate", async interaction => {
           "> 🔢 **1 - 10000**\n" +
           "> 💀 **TRY TO WIN**"
         )
-        .setColor(0x808080)
-        .setFooter({
-          text: `Today at ${getTodayTime()}`
-        });
+        .setColor(0x808080);
 
-      // Replace original panel
+      // Replace the original GAME EVENT embed
       await interaction.update({
         embeds: [gameEmbed],
         components: []
@@ -495,10 +441,7 @@ client.on("messageCreate", async message => {
           `> 🎊 <@${message.author.id}> **WON!**\n` +
           `> ✅ **${guess}**`
         )
-        .setColor(0x808080)
-        .setFooter({
-          text: `Today at ${getTodayTime()}`
-        });
+        .setColor(0x808080);
 
       await message.channel.send({
         embeds: [winEmbed]
