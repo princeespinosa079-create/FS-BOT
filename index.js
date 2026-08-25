@@ -7,7 +7,8 @@ const {
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  PermissionFlagsBits
 } = require("discord.js");
 
 const express = require("express");
@@ -69,6 +70,9 @@ const commands = [
   new SlashCommandBuilder()
     .setName("guessnumber")
     .setDescription("Create a number guessing game.")
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageNicknames.toString()
+    )
     .addIntegerOption(option =>
       option
         .setName("answer")
@@ -81,6 +85,9 @@ const commands = [
   new SlashCommandBuilder()
     .setName("embed")
     .setDescription("Send a gray embed.")
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageNicknames.toString()
+    )
     .addStringOption(option =>
       option
         .setName("description")
@@ -105,7 +112,7 @@ async function registerCommands() {
   try {
     console.log("🧹 Cleaning old slash commands...");
 
-    // Remove ALL global commands
+    // Remove all global commands
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
       {
@@ -115,7 +122,7 @@ async function registerCommands() {
 
     console.log("🗑️ Old global commands removed.");
 
-    // Remove ALL guild commands
+    // Remove all guild commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -128,7 +135,7 @@ async function registerCommands() {
 
     console.log("🗑️ Old guild commands removed.");
 
-    // Register ONLY these 2 commands
+    // Register only the 2 commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -140,7 +147,7 @@ async function registerCommands() {
     );
 
     console.log(
-      "✅ Registered ONLY /guessnumber and /embed."
+      "✅ Registered /guessnumber and /embed."
     );
 
   } catch (error) {
@@ -172,6 +179,31 @@ client.on("interactionCreate", async interaction => {
   try {
 
     // =========================
+    // Permission Check
+    // =========================
+
+    if (interaction.isChatInputCommand()) {
+      if (
+        !interaction.memberPermissions ||
+        !interaction.memberPermissions.has(
+          PermissionFlagsBits.ManageNicknames
+        )
+      ) {
+        await interaction.reply({
+          content:
+            "❌ You need the **Manage Nicknames** permission to use this command.",
+          ephemeral: true
+        });
+
+        setTimeout(() => {
+          interaction.deleteReply().catch(() => {});
+        }, 2000);
+
+        return;
+      }
+    }
+
+    // =========================
     // /guessnumber
     // =========================
 
@@ -182,7 +214,6 @@ client.on("interactionCreate", async interaction => {
       const answer =
         interaction.options.getInteger("answer");
 
-      // Prevent duplicate game in the same channel
       if (games.has(interaction.channelId)) {
         await interaction.reply({
           content:
@@ -197,7 +228,6 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      // Save game
       games.set(interaction.channelId, {
         answer,
         hostId: interaction.user.id,
@@ -264,7 +294,6 @@ client.on("interactionCreate", async interaction => {
             .setStyle(ButtonStyle.Success)
         );
 
-      // ONLY ONE PUBLIC MESSAGE
       await interaction.channel.send({
         embeds: [panelEmbed],
         components: [row]
@@ -295,17 +324,13 @@ client.on("interactionCreate", async interaction => {
         embed.setTitle(title);
       }
 
-      // =========================
-      // SILENT COMMAND
-      // =========================
-
+      // Silent command
       await interaction.deferReply({
         ephemeral: true
       });
 
       await interaction.deleteReply();
 
-      // ONLY ONE EMBED
       await interaction.channel.send({
         embeds: [embed]
       });
@@ -328,6 +353,29 @@ client.on("interactionCreate", async interaction => {
         await interaction.reply({
           content:
             "❌ There is no active guessing game.",
+          ephemeral: true
+        });
+
+        return;
+      }
+
+      // =========================
+      // HOST / MANAGE NICKNAMES
+      // =========================
+
+      const isHost =
+        interaction.user.id === game.hostId;
+
+      const canManageNicknames =
+        interaction.memberPermissions &&
+        interaction.memberPermissions.has(
+          PermissionFlagsBits.ManageNicknames
+        );
+
+      if (!isHost && !canManageNicknames) {
+        await interaction.reply({
+          content:
+            "❌ Only Host or Manage Nicknames can start this Guess Game.",
           ephemeral: true
         });
 
@@ -382,7 +430,6 @@ client.on("interactionCreate", async interaction => {
         )
         .setColor(0x808080);
 
-      // Replace the original GAME EVENT embed
       await interaction.update({
         embeds: [gameEmbed],
         components: []
