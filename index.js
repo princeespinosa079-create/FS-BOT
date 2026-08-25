@@ -18,14 +18,14 @@ if (!TOKEN || !CLIENT_ID) {
 }
 
 // =========================
-// Web Server
+// Web server for Render
 // =========================
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => {
-  res.send("FS Bot is online.");
+  res.status(200).send("FS Bot is online.");
 });
 
 app.get("/health", (req, res) => {
@@ -48,20 +48,20 @@ const client = new Client({
 });
 
 // =========================
-// Commands
+// Slash Commands
 // =========================
 
 const commands = [
   new SlashCommandBuilder()
     .setName("guessnumber")
-    .setDescription("Guess a number between 1 and 100.")
+    .setDescription("Start a number guessing game.")
     .addIntegerOption(option =>
       option
-        .setName("number")
-        .setDescription("Enter your guess")
-        .setRequired(true)
+        .setName("answer")
+        .setDescription("The number to guess.")
+        .setRequired(false)
         .setMinValue(1)
-        .setMaxValue(100)
+        .setMaxValue(10000)
     ),
 
   new SlashCommandBuilder()
@@ -69,57 +69,47 @@ const commands = [
     .setDescription("Create a custom embed.")
     .addStringOption(option =>
       option
-        .setName("title")
-        .setDescription("Enter the embed title")
+        .setName("description")
+        .setDescription("Embed description.")
         .setRequired(true)
     )
     .addStringOption(option =>
       option
-        .setName("description")
-        .setDescription("Enter the embed description")
-        .setRequired(true)
+        .setName("title")
+        .setDescription("Embed title.")
+        .setRequired(false)
     )
     .addStringOption(option =>
       option
         .setName("color")
-        .setDescription("Hex color, e.g. #00FFFF")
+        .setDescription("Embed color, e.g. #00FF00")
         .setRequired(false)
     )
 ].map(command => command.toJSON());
 
 // =========================
-// Register Global Commands
+// Register Commands
 // =========================
 
 async function registerCommands() {
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
-
   try {
-    console.log("🗑️ Removing old global commands...");
+    const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-    await rest.put(
-      Routes.applicationCommands(CLIENT_ID),
-      { body: [] }
-    );
-
-    console.log("✅ Old global commands removed.");
-
-    console.log("🔄 Registering new global commands...");
+    console.log("🔄 Registering slash commands...");
 
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
       { body: commands }
     );
 
-    console.log("✅ New global commands registered.");
+    console.log("✅ Slash commands registered.");
   } catch (error) {
-    console.error("❌ Command registration failed:");
-    console.error(error);
+    console.error("❌ Command registration failed:", error);
   }
 }
 
 // =========================
-// Ready
+// Bot Ready
 // =========================
 
 client.once("ready", async () => {
@@ -130,69 +120,77 @@ client.once("ready", async () => {
 });
 
 // =========================
-// Interaction Handler
+// Commands
 // =========================
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  console.log(`📥 Received /${interaction.commandName}`);
-
   try {
+
     // =========================
-    // GUESS NUMBER
+    // /guessnumber
     // =========================
 
     if (interaction.commandName === "guessnumber") {
-      const guess = interaction.options.getInteger("number");
+      const suppliedAnswer = interaction.options.getInteger("answer");
 
-      const answer = Math.floor(Math.random() * 100) + 1;
+      const answer =
+        suppliedAnswer ||
+        Math.floor(Math.random() * 10000) + 1;
 
-      let message;
+      await interaction.reply(
+`> 🔓 **UNLOCK!**
+> 🔢 **1 - 10000**
+> 💀 **TRY TO WIN**
 
-      if (guess === answer) {
-        message = "🎉 **Correct! You guessed the number!**";
-      } else if (guess < answer) {
-        message = "📈 **Too low!** Try a higher number.";
-      } else {
-        message = "📉 **Too high!** Try a lower number.";
-      }
+> 😱 **YOU'RE SO CLOSE BRO!**
 
-      await interaction.reply({
-        content:
-          `🎯 **Number Guessing Game**\n\n` +
-          `Your guess: **${guess}**\n` +
-          `${message}`
-      });
+> 🔢 **Answer:** \`${answer}\`
+> 📌 **Range:** \`1 - 10000\`
 
-      console.log(`🎯 Guess: ${guess} | Answer: ${answer}`);
+> 🔒 **LOCK!**
+> 🎊 <@${interaction.user.id}> **WON!**
+> ✅ **${answer}**`
+      );
+
+      console.log(
+        `🎯 ${interaction.user.tag} started guessnumber. Answer: ${answer}`
+      );
 
       return;
     }
 
     // =========================
-    // EMBED
+    // /embed
     // =========================
 
     if (interaction.commandName === "embed") {
-      const title = interaction.options.getString("title");
       const description =
         interaction.options.getString("description");
+
+      const title =
+        interaction.options.getString("title");
 
       let color =
         interaction.options.getString("color") || "#00FFFF";
 
-      color = color.replace("#", "");
+      if (!/^#?[0-9A-Fa-f]{6}$/.test(color)) {
+        color = "#00FFFF";
+      }
 
-      if (!/^[0-9A-Fa-f]{6}$/.test(color)) {
-        color = "00FFFF";
+      if (!color.startsWith("#")) {
+        color = `#${color}`;
       }
 
       const embed = new EmbedBuilder()
-        .setTitle(title)
         .setDescription(description)
-        .setColor(`#${color}`)
+        .setColor(color)
         .setTimestamp();
+
+      if (title) {
+        embed.setTitle(title);
+      }
 
       await interaction.reply({
         embeds: [embed]
@@ -208,7 +206,7 @@ client.on("interactionCreate", async interaction => {
       await interaction.reply({
         content: "❌ An error occurred.",
         ephemeral: true
-      });
+      }).catch(() => {});
     }
   }
 });
@@ -219,10 +217,6 @@ client.on("interactionCreate", async interaction => {
 
 client.on("error", error => {
   console.error("❌ Discord error:", error);
-});
-
-client.on("warn", warning => {
-  console.warn("⚠️ Discord warning:", warning);
 });
 
 process.on("unhandledRejection", error => {
