@@ -158,13 +158,27 @@ client.on("interactionCreate", async interaction => {
     ) {
       const answer = interaction.options.getInteger("answer");
 
+      // Prevent duplicate game in the same channel
+      if (games.has(interaction.channelId)) {
+        await interaction.reply({
+          content: "⚠️ There is already a Guess Game in this channel.",
+          ephemeral: true
+        });
+
+        return;
+      }
+
+      // Save game
       games.set(interaction.channelId, {
         answer,
         hostId: interaction.user.id,
         active: false
       });
 
-      // DM the answer to host
+      // =========================
+      // DM answer to host
+      // =========================
+
       const answerEmbed = new EmbedBuilder()
         .setDescription(`🔢 **Answer:** \`${answer}\``)
         .setColor(0x808080)
@@ -188,7 +202,20 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      // Public panel
+      // =========================
+      // Acknowledge command silently
+      // =========================
+
+      await interaction.deferReply({
+        ephemeral: true
+      });
+
+      await interaction.deleteReply();
+
+      // =========================
+      // ONLY ONE PUBLIC PANEL
+      // =========================
+
       const panelEmbed = new EmbedBuilder()
         .setTitle("GAME EVENT 🧧")
         .setDescription(
@@ -206,7 +233,7 @@ client.on("interactionCreate", async interaction => {
           .setStyle(ButtonStyle.Success)
       );
 
-      await interaction.reply({
+      await interaction.channel.send({
         embeds: [panelEmbed],
         components: [row]
       });
@@ -276,7 +303,10 @@ client.on("interactionCreate", async interaction => {
 
       game.active = true;
 
+      // =========================
       // Unlock channel
+      // =========================
+
       if (
         interaction.guild &&
         interaction.channel &&
@@ -293,6 +323,10 @@ client.on("interactionCreate", async interaction => {
           console.error("⚠️ Could not unlock channel:", error);
         }
       }
+
+      // =========================
+      // Game Embed
+      // =========================
 
       const gameEmbed = new EmbedBuilder()
         .setDescription(
@@ -364,7 +398,10 @@ client.on("messageCreate", async message => {
         embeds: [winEmbed]
       });
 
+      // =========================
       // Lock channel
+      // =========================
+
       if (
         message.guild &&
         message.channel.permissionOverwrites
