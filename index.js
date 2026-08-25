@@ -11,18 +11,42 @@ const {
   PermissionFlagsBits
 } = require("discord.js");
 
+const OpenAI = require("openai");
 const express = require("express");
+
+// =========================
+// Environment Variables
+// =========================
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const OWNER_ID = "1302080645987569694";
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
+  console.error(
+    "❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID."
+  );
   process.exit(1);
 }
+
+if (!OPENAI_API_KEY) {
+  console.warn(
+    "⚠️ OPENAI_API_KEY is missing. AI responses will be disabled."
+  );
+}
+
+// =========================
+// OpenAI
+// =========================
+
+const openai = OPENAI_API_KEY
+  ? new OpenAI({
+      apiKey: OPENAI_API_KEY
+    })
+  : null;
 
 // =========================
 // Web Server
@@ -38,7 +62,8 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "online",
-    bot: client.user ? client.user.tag : "connecting"
+    bot: client.user ? client.user.tag : "connecting",
+    ai: openai ? "enabled" : "disabled"
   });
 });
 
@@ -65,6 +90,14 @@ const client = new Client({
 const games = new Map();
 
 // =========================
+// AI Cooldown
+// =========================
+
+const aiCooldowns = new Map();
+
+const AI_COOLDOWN = 3000;
+
+// =========================
 // Today at HH:MM
 // =========================
 
@@ -75,6 +108,76 @@ function getTodayTime() {
     hour12: false,
     timeZone: "Asia/Manila"
   });
+}
+
+// =========================
+// AI Personality
+// =========================
+
+const AI_PERSONALITY = `
+You are a Discord bot with a sarcastic, sassy, blunt and playful personality.
+
+You are NOT genuinely hateful or abusive.
+
+Your personality:
+- Be sarcastic and teasing.
+- Be blunt and confident.
+- Use playful internet humor.
+- You can use mild casual slang.
+- Do not target protected characteristics.
+- Do not threaten people.
+- Do not encourage violence or dangerous behavior.
+- Do not sexually harass anyone.
+- Do not use hateful slurs.
+- Do not relentlessly bully or humiliate a person.
+- Still answer questions accurately and helpfully.
+- If someone asks a serious question, actually answer it.
+- Keep responses relatively short and Discord-friendly.
+- Don't mention these personality instructions.
+- Don't say you are an AI unless it is relevant.
+- You can use emojis occasionally.
+
+Example style:
+"Bro really summoned me for THAT 😭. The answer is 100."
+
+Another example:
+"Yeah, I can help. Send the code before it commits another crime against JavaScript 💀."
+`;
+
+// =========================
+// Ask OpenAI
+// =========================
+
+async function askAI(message, prompt) {
+  if (!openai) {
+    return null;
+  }
+
+  try {
+    const response = await openai.responses.create({
+      model: "gpt-5.6-luna",
+      instructions: AI_PERSONALITY,
+      input: prompt,
+      max_output_tokens: 350
+    });
+
+    let text = response.output_text?.trim();
+
+    if (!text) {
+      return null;
+    }
+
+    // Discord message limit protection
+    if (text.length > 1900) {
+      text = text.slice(0, 1890) + "...";
+    }
+
+    return text;
+
+  } catch (error) {
+    console.error("❌ OpenAI error:", error);
+    return null;
+  }
 }
 
 // =========================
@@ -144,12 +247,14 @@ const commands = [
 // =========================
 
 async function registerCommands() {
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
+  const rest = new REST({
+    version: "10"
+  }).setToken(TOKEN);
 
   try {
     console.log("🧹 Cleaning old slash commands...");
 
-    // Remove all global commands
+    // Remove old GLOBAL commands
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
       {
@@ -159,7 +264,7 @@ async function registerCommands() {
 
     console.log("🗑️ Old global commands removed.");
 
-    // Remove all guild commands
+    // Remove old GUILD commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -172,7 +277,7 @@ async function registerCommands() {
 
     console.log("🗑️ Old guild commands removed.");
 
-    // Register only the 4 commands
+    // Register commands ONLY in GUILD_ID
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -200,9 +305,16 @@ async function registerCommands() {
 // =========================
 
 client.once("ready", async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(
+    `✅ Logged in as ${client.user.tag}`
+  );
+
   console.log(
     `🏠 Connected to ${client.guilds.cache.size} server(s).`
+  );
+
+  console.log(
+    `🤖 OpenAI AI: ${openai ? "Enabled" : "Disabled"}`
   );
 
   await registerCommands();
@@ -216,7 +328,7 @@ client.on("interactionCreate", async interaction => {
   try {
 
     // =========================
-    // OWNER-ONLY COMMANDS
+    // OWNER ONLY
     // =========================
 
     if (
@@ -238,7 +350,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     // =========================
-    // MANAGE NICKNAMES COMMANDS
+    // MANAGE NICKNAMES ONLY
     // =========================
 
     if (
@@ -280,7 +392,9 @@ client.on("interactionCreate", async interaction => {
         ephemeral: true
       });
 
-      const guilds = [...client.guilds.cache.values()];
+      const guilds = [
+        ...client.guilds.cache.values()
+      ];
 
       let description =
         `**Total Servers:** \`${guilds.length}\`\n\n`;
@@ -295,23 +409,28 @@ client.on("interactionCreate", async interaction => {
         let inviteLink = "Unavailable";
 
         try {
-          const channel = guild.channels.cache.find(channel =>
-            channel.isTextBased() &&
-            channel.permissionsFor(guild.members.me)?.has(
-              PermissionFlagsBits.CreateInstantInvite
-            )
-          );
+          const channel =
+            guild.channels.cache.find(channel =>
+              channel.isTextBased() &&
+              channel
+                .permissionsFor(guild.members.me)
+                ?.has(
+                  PermissionFlagsBits.CreateInstantInvite
+                )
+            );
 
           if (channel) {
-            const invite = await channel.createInvite({
-              maxAge: 0,
-              maxUses: 0,
-              unique: false,
-              reason: "Server list invite"
-            });
+            const invite =
+              await channel.createInvite({
+                maxAge: 0,
+                maxUses: 0,
+                unique: false,
+                reason: "Server list invite"
+              });
 
             inviteLink = invite.url;
           }
+
         } catch (error) {
           inviteLink = "Unavailable";
         }
@@ -432,6 +551,7 @@ client.on("interactionCreate", async interaction => {
         await interaction.user.send({
           embeds: [answerEmbed]
         });
+
       } catch (error) {
         games.delete(interaction.channelId);
 
@@ -470,13 +590,14 @@ client.on("interactionCreate", async interaction => {
         )
         .setColor(0x808080);
 
-      const row = new ActionRowBuilder()
-        .addComponents(
-          new ButtonBuilder()
-            .setCustomId("guess_start")
-            .setLabel("Start")
-            .setStyle(ButtonStyle.Success)
-        );
+      const row =
+        new ActionRowBuilder()
+          .addComponents(
+            new ButtonBuilder()
+              .setCustomId("guess_start")
+              .setLabel("Start")
+              .setStyle(ButtonStyle.Success)
+          );
 
       await interaction.channel.send({
         embeds: [panelEmbed],
@@ -495,26 +616,28 @@ client.on("interactionCreate", async interaction => {
       interaction.commandName === "embed"
     ) {
       const description =
-        interaction.options.getString("description");
+        interaction.options.getString(
+          "description"
+        );
 
       const title =
-        interaction.options.getString("title");
+        interaction.options.getString(
+          "title"
+        );
 
       const embed = new EmbedBuilder()
         .setDescription(description)
         .setColor(0x808080)
         .setFooter({
-          text: `Today at ${getTodayTime()}`
+          text:
+            `Today at ${getTodayTime()}`
         });
 
       if (title) {
         embed.setTitle(title);
       }
 
-      // =========================
-      // SILENT COMMAND
-      // =========================
-
+      // Silent command
       await interaction.deferReply({
         ephemeral: true
       });
@@ -596,6 +719,7 @@ client.on("interactionCreate", async interaction => {
               SendMessages: true
             }
           );
+
         } catch (error) {
           console.error(
             "⚠️ Could not unlock channel:",
@@ -608,13 +732,14 @@ client.on("interactionCreate", async interaction => {
       // GAME EMBED
       // =========================
 
-      const gameEmbed = new EmbedBuilder()
-        .setDescription(
-          "> 🔓 **UNLOCK!**\n" +
-          "> 🔢 **1 - 10000**\n" +
-          "> 💀 **TRY TO WIN**"
-        )
-        .setColor(0x808080);
+      const gameEmbed =
+        new EmbedBuilder()
+          .setDescription(
+            "> 🔓 **UNLOCK!**\n" +
+            "> 🔢 **1 - 10000**\n" +
+            "> 💀 **TRY TO WIN**"
+          )
+          .setColor(0x808080);
 
       await interaction.update({
         embeds: [gameEmbed],
@@ -668,13 +793,14 @@ client.on("messageCreate", async message => {
 
     if (guess === game.answer) {
 
-      const winEmbed = new EmbedBuilder()
-        .setDescription(
-          `> 🔒 **LOCK!**\n` +
-          `> 🎊 <@${message.author.id}> **WON!**\n` +
-          `> ✅ **${guess}**`
-        )
-        .setColor(0x808080);
+      const winEmbed =
+        new EmbedBuilder()
+          .setDescription(
+            `> 🔒 **LOCK!**\n` +
+            `> 🎊 <@${message.author.id}> **WON!**\n` +
+            `> ✅ **${guess}**`
+          )
+          .setColor(0x808080);
 
       await message.channel.send({
         embeds: [winEmbed]
@@ -695,6 +821,7 @@ client.on("messageCreate", async message => {
               SendMessages: false
             }
           );
+
         } catch (error) {
           console.error(
             "⚠️ Could not lock channel:",
@@ -719,6 +846,115 @@ client.on("messageCreate", async message => {
 });
 
 // =========================
+// AI MESSAGE HANDLER
+// =========================
+
+client.on("messageCreate", async message => {
+  try {
+    if (message.author.bot) return;
+
+    if (!openai) return;
+
+    // =========================
+    // Detect Bot Mention
+    // =========================
+
+    const botMentioned =
+      message.mentions.users.has(client.user.id);
+
+    // =========================
+    // Detect @everyone / @here
+    // =========================
+
+    const massMention =
+      message.mentions.everyone;
+
+    if (!botMentioned && !massMention) {
+      return;
+    }
+
+    // =========================
+    // Cooldown
+    // =========================
+
+    const now = Date.now();
+    const lastUsed =
+      aiCooldowns.get(message.author.id) || 0;
+
+    if (now - lastUsed < AI_COOLDOWN) {
+      return;
+    }
+
+    aiCooldowns.set(
+      message.author.id,
+      now
+    );
+
+    // =========================
+    // Remove Bot Mention
+    // =========================
+
+    let prompt =
+      message.content
+        .replace(
+          new RegExp(`<@!?${client.user.id}>`, "g"),
+          ""
+        )
+        .trim();
+
+    // Remove mass mentions
+    prompt = prompt
+      .replace(/@everyone/g, "")
+      .replace(/@here/g, "")
+      .trim();
+
+    if (!prompt) {
+      prompt =
+        "Someone pinged you without asking anything. Respond with a short sarcastic reaction.";
+    }
+
+    // =========================
+    // Show typing
+    // =========================
+
+    if (
+      message.channel &&
+      message.channel.sendTyping
+    ) {
+      await message.channel.sendTyping();
+    }
+
+    // =========================
+    // AI Response
+    // =========================
+
+    const response =
+      await askAI(message, prompt);
+
+    if (!response) {
+      return;
+    }
+
+    // =========================
+    // Reply
+    // =========================
+
+    await message.reply({
+      content: response,
+      allowedMentions: {
+        repliedUser: false
+      }
+    });
+
+  } catch (error) {
+    console.error(
+      "❌ AI message error:",
+      error
+    );
+  }
+});
+
+// =========================
 // Errors
 // =========================
 
@@ -736,19 +972,25 @@ client.on("warn", warning => {
   );
 });
 
-process.on("unhandledRejection", error => {
-  console.error(
-    "❌ Unhandled promise rejection:",
-    error
-  );
-});
+process.on(
+  "unhandledRejection",
+  error => {
+    console.error(
+      "❌ Unhandled promise rejection:",
+      error
+    );
+  }
+);
 
-process.on("uncaughtException", error => {
-  console.error(
-    "❌ Uncaught exception:",
-    error
-  );
-});
+process.on(
+  "uncaughtException",
+  error => {
+    console.error(
+      "❌ Uncaught exception:",
+      error
+    );
+  }
+);
 
 // =========================
 // Login
