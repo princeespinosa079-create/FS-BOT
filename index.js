@@ -65,6 +65,19 @@ const client = new Client({
 const games = new Map();
 
 // =========================
+// Today at HH:MM
+// =========================
+
+function getTodayTime() {
+  return new Date().toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Manila"
+  });
+}
+
+// =========================
 // Slash Commands
 // =========================
 
@@ -108,12 +121,16 @@ const commands = [
   // /serverlist
   new SlashCommandBuilder()
     .setName("serverlist")
-    .setDescription("Show all servers where the bot is installed."),
+    .setDescription(
+      "Show all servers where the bot is installed. (Owner only)"
+    ),
 
   // /leave
   new SlashCommandBuilder()
     .setName("leave")
-    .setDescription("Make the bot leave a server.")
+    .setDescription(
+      "Make the bot leave a server. (Owner only)"
+    )
     .addStringOption(option =>
       option
         .setName("server-id")
@@ -211,7 +228,8 @@ client.on("interactionCreate", async interaction => {
     ) {
       if (interaction.user.id !== OWNER_ID) {
         await interaction.reply({
-          content: "❌ Only the bot owner can use this command.",
+          content:
+            "❌ Only the bot owner can use this command.",
           ephemeral: true
         });
 
@@ -325,9 +343,12 @@ client.on("interactionCreate", async interaction => {
       interaction.commandName === "leave"
     ) {
       const serverId =
-        interaction.options.getString("server-id").trim();
+        interaction.options
+          .getString("server-id")
+          .trim();
 
-      const guild = client.guilds.cache.get(serverId);
+      const guild =
+        client.guilds.cache.get(serverId);
 
       if (!guild) {
         await interaction.reply({
@@ -481,13 +502,19 @@ client.on("interactionCreate", async interaction => {
 
       const embed = new EmbedBuilder()
         .setDescription(description)
-        .setColor(0x808080);
+        .setColor(0x808080)
+        .setFooter({
+          text: `Today at ${getTodayTime()}`
+        });
 
       if (title) {
         embed.setTitle(title);
       }
 
-      // Silent command
+      // =========================
+      // SILENT COMMAND
+      // =========================
+
       await interaction.deferReply({
         ephemeral: true
       });
@@ -521,10 +548,6 @@ client.on("interactionCreate", async interaction => {
 
         return;
       }
-
-      // =========================
-      // HOST / MANAGE NICKNAMES
-      // =========================
 
       const isHost =
         interaction.user.id === game.hostId;
