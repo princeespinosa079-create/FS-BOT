@@ -25,11 +25,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => {
-  res.status(200).send("FS Bot is online.");
+  res.send("FS Bot is online.");
 });
 
 app.get("/health", (req, res) => {
-  res.status(200).json({
+  res.json({
     status: "online",
     bot: client.user ? client.user.tag : "connecting"
   });
@@ -58,7 +58,7 @@ const commands = [
     .addIntegerOption(option =>
       option
         .setName("number")
-        .setDescription("Your guess")
+        .setDescription("Enter your guess")
         .setRequired(true)
         .setMinValue(1)
         .setMaxValue(100)
@@ -66,49 +66,55 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("embed")
-    .setDescription("Send a custom embed.")
+    .setDescription("Create a custom embed.")
     .addStringOption(option =>
       option
         .setName("title")
-        .setDescription("Embed title")
+        .setDescription("Enter the embed title")
         .setRequired(true)
     )
     .addStringOption(option =>
       option
         .setName("description")
-        .setDescription("Embed description")
+        .setDescription("Enter the embed description")
         .setRequired(true)
     )
     .addStringOption(option =>
       option
         .setName("color")
-        .setDescription("Hex color, for example #00FF00")
+        .setDescription("Hex color, e.g. #00FFFF")
         .setRequired(false)
     )
 ].map(command => command.toJSON());
 
 // =========================
-// Register GLOBAL Commands
+// Register Global Commands
 // =========================
 
 async function registerCommands() {
+  const rest = new REST({ version: "10" }).setToken(TOKEN);
+
   try {
-    const rest = new REST({ version: "10" }).setToken(TOKEN);
+    console.log("🗑️ Removing old global commands...");
 
-    console.log("🔄 Updating global slash commands...");
-
-    // PUT replaces the complete global command list.
-    // This removes old/duplicate versions.
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
-      {
-        body: commands
-      }
+      { body: [] }
     );
 
-    console.log("✅ Global commands updated.");
+    console.log("✅ Old global commands removed.");
+
+    console.log("🔄 Registering new global commands...");
+
+    await rest.put(
+      Routes.applicationCommands(CLIENT_ID),
+      { body: commands }
+    );
+
+    console.log("✅ New global commands registered.");
   } catch (error) {
-    console.error("❌ Failed to register commands:", error);
+    console.error("❌ Command registration failed:");
+    console.error(error);
   }
 }
 
@@ -118,7 +124,7 @@ async function registerCommands() {
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log(`🏠 Connected to ${client.guilds.cache.size} server(s).`);
+  console.log(`🏠 Servers: ${client.guilds.cache.size}`);
 
   await registerCommands();
 });
@@ -130,58 +136,45 @@ client.once("ready", async () => {
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  console.log(`📥 /${interaction.commandName}`);
+  console.log(`📥 Received /${interaction.commandName}`);
 
-  // =========================
-  // /guessnumber
-  // =========================
+  try {
+    // =========================
+    // GUESS NUMBER
+    // =========================
 
-  if (interaction.commandName === "guessnumber") {
-    try {
+    if (interaction.commandName === "guessnumber") {
       const guess = interaction.options.getInteger("number");
+
       const answer = Math.floor(Math.random() * 100) + 1;
 
-      let result;
+      let message;
 
       if (guess === answer) {
-        result = `🎉 **Correct!** You guessed the number!`;
+        message = "🎉 **Correct! You guessed the number!**";
       } else if (guess < answer) {
-        result = `📈 **Too low!** Try a higher number.`;
+        message = "📈 **Too low!** Try a higher number.";
       } else {
-        result = `📉 **Too high!** Try a lower number.`;
+        message = "📉 **Too high!** Try a lower number.";
       }
 
       await interaction.reply({
         content:
           `🎯 **Number Guessing Game**\n\n` +
           `Your guess: **${guess}**\n` +
-          `${result}`,
-        ephemeral: false
+          `${message}`
       });
 
-      console.log(
-        `🎯 Guess: ${guess} | Answer: ${answer}`
-      );
-    } catch (error) {
-      console.error("❌ /guessnumber error:", error);
+      console.log(`🎯 Guess: ${guess} | Answer: ${answer}`);
 
-      if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply({
-          content: "❌ Something went wrong.",
-          ephemeral: true
-        });
-      }
+      return;
     }
 
-    return;
-  }
+    // =========================
+    // EMBED
+    // =========================
 
-  // =========================
-  // /embed
-  // =========================
-
-  if (interaction.commandName === "embed") {
-    try {
+    if (interaction.commandName === "embed") {
       const title = interaction.options.getString("title");
       const description =
         interaction.options.getString("description");
@@ -189,10 +182,8 @@ client.on("interactionCreate", async interaction => {
       let color =
         interaction.options.getString("color") || "#00FFFF";
 
-      // Remove # if provided
       color = color.replace("#", "");
 
-      // Validate hex color
       if (!/^[0-9A-Fa-f]{6}$/.test(color)) {
         color = "00FFFF";
       }
@@ -206,27 +197,28 @@ client.on("interactionCreate", async interaction => {
       await interaction.reply({
         embeds: [embed]
       });
-    } catch (error) {
-      console.error("❌ /embed error:", error);
 
-      if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply({
-          content: "❌ Something went wrong.",
-          ephemeral: true
-        });
-      }
+      return;
     }
 
-    return;
+  } catch (error) {
+    console.error("❌ Interaction error:", error);
+
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: "❌ An error occurred.",
+        ephemeral: true
+      });
+    }
   }
 });
 
 // =========================
-// Errors
+// Error Handling
 // =========================
 
 client.on("error", error => {
-  console.error("❌ Discord client error:", error);
+  console.error("❌ Discord error:", error);
 });
 
 client.on("warn", warning => {
@@ -248,6 +240,6 @@ process.on("uncaughtException", error => {
 console.log("🔑 Logging into Discord...");
 
 client.login(TOKEN).catch(error => {
-  console.error("❌ Discord login failed:", error);
+  console.error("❌ Login failed:", error);
   process.exit(1);
 });
