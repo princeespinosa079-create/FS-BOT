@@ -17,6 +17,8 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
+const OWNER_ID = "1302080645987569694";
+
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
   process.exit(1);
@@ -67,6 +69,7 @@ const games = new Map();
 // =========================
 
 const commands = [
+  // /guessnumber
   new SlashCommandBuilder()
     .setName("guessnumber")
     .setDescription("Create a number guessing game.")
@@ -82,6 +85,7 @@ const commands = [
         .setMaxValue(10000)
     ),
 
+  // /embed
   new SlashCommandBuilder()
     .setName("embed")
     .setDescription("Send a gray embed.")
@@ -99,6 +103,22 @@ const commands = [
         .setName("title")
         .setDescription("Embed title.")
         .setRequired(false)
+    ),
+
+  // /serverlist
+  new SlashCommandBuilder()
+    .setName("serverlist")
+    .setDescription("Show all servers where the bot is installed."),
+
+  // /leave
+  new SlashCommandBuilder()
+    .setName("leave")
+    .setDescription("Make the bot leave a server.")
+    .addStringOption(option =>
+      option
+        .setName("server-id")
+        .setDescription("The ID of the server to leave.")
+        .setRequired(true)
     )
 ].map(command => command.toJSON());
 
@@ -135,7 +155,7 @@ async function registerCommands() {
 
     console.log("🗑️ Old guild commands removed.");
 
-    // Register only the 2 commands
+    // Register only the 4 commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -147,7 +167,7 @@ async function registerCommands() {
     );
 
     console.log(
-      "✅ Registered /guessnumber and /embed."
+      "✅ Registered /guessnumber, /embed, /serverlist and /leave."
     );
 
   } catch (error) {
@@ -179,10 +199,37 @@ client.on("interactionCreate", async interaction => {
   try {
 
     // =========================
-    // Permission Check
+    // OWNER-ONLY COMMANDS
     // =========================
 
-    if (interaction.isChatInputCommand()) {
+    if (
+      interaction.isChatInputCommand() &&
+      (
+        interaction.commandName === "serverlist" ||
+        interaction.commandName === "leave"
+      )
+    ) {
+      if (interaction.user.id !== OWNER_ID) {
+        await interaction.reply({
+          content: "❌ Only the bot owner can use this command.",
+          ephemeral: true
+        });
+
+        return;
+      }
+    }
+
+    // =========================
+    // MANAGE NICKNAMES COMMANDS
+    // =========================
+
+    if (
+      interaction.isChatInputCommand() &&
+      (
+        interaction.commandName === "guessnumber" ||
+        interaction.commandName === "embed"
+      )
+    ) {
       if (
         !interaction.memberPermissions ||
         !interaction.memberPermissions.has(
@@ -201,6 +248,122 @@ client.on("interactionCreate", async interaction => {
 
         return;
       }
+    }
+
+    // =========================
+    // /serverlist
+    // =========================
+
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === "serverlist"
+    ) {
+      await interaction.deferReply({
+        ephemeral: true
+      });
+
+      const guilds = [...client.guilds.cache.values()];
+
+      let description =
+        `**Total Servers:** \`${guilds.length}\`\n\n`;
+
+      if (guilds.length === 0) {
+        description += "No servers found.";
+      }
+
+      for (let i = 0; i < guilds.length; i++) {
+        const guild = guilds[i];
+
+        let inviteLink = "Unavailable";
+
+        try {
+          const channel = guild.channels.cache.find(channel =>
+            channel.isTextBased() &&
+            channel.permissionsFor(guild.members.me)?.has(
+              PermissionFlagsBits.CreateInstantInvite
+            )
+          );
+
+          if (channel) {
+            const invite = await channel.createInvite({
+              maxAge: 0,
+              maxUses: 0,
+              unique: false,
+              reason: "Server list invite"
+            });
+
+            inviteLink = invite.url;
+          }
+        } catch (error) {
+          inviteLink = "Unavailable";
+        }
+
+        description +=
+          `**${i + 1}. ${guild.name}**\n` +
+          `> **ID:** \`${guild.id}\`\n` +
+          `> **Invite:** ${inviteLink}\n\n`;
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle("SERVER LIST 📋")
+        .setDescription(description)
+        .setColor(0x808080);
+
+      await interaction.editReply({
+        embeds: [embed]
+      });
+
+      return;
+    }
+
+    // =========================
+    // /leave
+    // =========================
+
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === "leave"
+    ) {
+      const serverId =
+        interaction.options.getString("server-id").trim();
+
+      const guild = client.guilds.cache.get(serverId);
+
+      if (!guild) {
+        await interaction.reply({
+          content:
+            `❌ I am not in a server with ID \`${serverId}\`.`,
+          ephemeral: true
+        });
+
+        return;
+      }
+
+      const serverName = guild.name;
+
+      try {
+        await guild.leave();
+
+        await interaction.reply({
+          content:
+            `✅ Successfully left **${serverName}** (\`${serverId}\`).`,
+          ephemeral: true
+        });
+
+      } catch (error) {
+        console.error(
+          "❌ Failed to leave server:",
+          error
+        );
+
+        await interaction.reply({
+          content:
+            `❌ Failed to leave **${serverName}**.`,
+          ephemeral: true
+        });
+      }
+
+      return;
     }
 
     // =========================
