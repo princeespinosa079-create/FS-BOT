@@ -15,13 +15,18 @@ const express = require("express");
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
+// Optional but HIGHLY recommended for testing.
+// Put your Discord server ID in REPLIT secret:
+// GUILD_ID=your_server_id
+const GUILD_ID = process.env.GUILD_ID;
+
 if (!TOKEN || !CLIENT_ID) {
   console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID.");
   process.exit(1);
 }
 
 // =========================
-// Web server
+// Web Server
 // =========================
 
 const app = express();
@@ -108,25 +113,81 @@ const commands = [
 ].map(command => command.toJSON());
 
 // =========================
-// Register Commands
+// Clean + Register Commands
 // =========================
 
 async function registerCommands() {
-  try {
-    const rest = new REST({ version: "10" }).setToken(TOKEN);
+  const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-    console.log("🔄 Replacing global slash commands...");
+  try {
+    console.log("🧹 Cleaning old slash commands...");
+
+    // ---------------------------------
+    // Delete ALL global commands
+    // ---------------------------------
 
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
       {
-        body: commands
+        body: []
       }
     );
 
-    console.log("✅ Registered only /guessnumber and /embed.");
+    console.log("🗑️ Old global commands removed.");
+
+    // ---------------------------------
+    // If GUILD_ID exists:
+    // Delete old guild commands
+    // ---------------------------------
+
+    if (GUILD_ID) {
+      await rest.put(
+        Routes.applicationGuildCommands(
+          CLIENT_ID,
+          GUILD_ID
+        ),
+        {
+          body: []
+        }
+      );
+
+      console.log("🗑️ Old guild commands removed.");
+
+      // Register ONLY the two commands to the server
+      await rest.put(
+        Routes.applicationGuildCommands(
+          CLIENT_ID,
+          GUILD_ID
+        ),
+        {
+          body: commands
+        }
+      );
+
+      console.log(
+        "✅ Registered ONLY /guessnumber and /embed to the server."
+      );
+
+    } else {
+
+      // ---------------------------------
+      // No GUILD_ID = register globally
+      // ---------------------------------
+
+      await rest.put(
+        Routes.applicationCommands(CLIENT_ID),
+        {
+          body: commands
+        }
+      );
+
+      console.log(
+        "✅ Registered ONLY /guessnumber and /embed globally."
+      );
+    }
+
   } catch (error) {
-    console.error("❌ Failed to register commands:", error);
+    console.error("❌ Command registration error:", error);
   }
 }
 
@@ -156,14 +217,21 @@ client.on("interactionCreate", async interaction => {
       interaction.isChatInputCommand() &&
       interaction.commandName === "guessnumber"
     ) {
-      const answer = interaction.options.getInteger("answer");
+      const answer =
+        interaction.options.getInteger("answer");
 
-      // Prevent duplicate game in the same channel
+      // Prevent duplicate games
       if (games.has(interaction.channelId)) {
         await interaction.reply({
-          content: "⚠️ There is already a Guess Game in this channel.",
+          content:
+            "⚠️ There is already a Guess Game in this channel.",
           ephemeral: true
         });
+
+        // Delete the temporary reply
+        setTimeout(() => {
+          interaction.deleteReply().catch(() => {});
+        }, 1500);
 
         return;
       }
@@ -176,11 +244,13 @@ client.on("interactionCreate", async interaction => {
       });
 
       // =========================
-      // DM answer to host
+      // DM ANSWER
       // =========================
 
       const answerEmbed = new EmbedBuilder()
-        .setDescription(`🔢 **Answer:** \`${answer}\``)
+        .setDescription(
+          `🔢 **Answer:** \`${answer}\``
+        )
         .setColor(0x808080)
         .setFooter({
           text: `Today at ${getTodayTime()}`
@@ -191,6 +261,7 @@ client.on("interactionCreate", async interaction => {
           embeds: [answerEmbed]
         });
       } catch (error) {
+
         games.delete(interaction.channelId);
 
         await interaction.reply({
@@ -199,11 +270,15 @@ client.on("interactionCreate", async interaction => {
           ephemeral: true
         });
 
+        setTimeout(() => {
+          interaction.deleteReply().catch(() => {});
+        }, 2000);
+
         return;
       }
 
       // =========================
-      // Acknowledge command silently
+      // SILENTLY ACKNOWLEDGE
       // =========================
 
       await interaction.deferReply({
@@ -213,7 +288,7 @@ client.on("interactionCreate", async interaction => {
       await interaction.deleteReply();
 
       // =========================
-      // ONLY ONE PUBLIC PANEL
+      // PUBLIC GAME PANEL
       // =========================
 
       const panelEmbed = new EmbedBuilder()
@@ -226,13 +301,15 @@ client.on("interactionCreate", async interaction => {
           text: `Today at ${getTodayTime()}`
         });
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("guess_start")
-          .setLabel("Start")
-          .setStyle(ButtonStyle.Success)
-      );
+      const row = new ActionRowBuilder()
+        .addComponents(
+          new ButtonBuilder()
+            .setCustomId("guess_start")
+            .setLabel("Start")
+            .setStyle(ButtonStyle.Success)
+        );
 
+      // Send ONLY ONE public message
       await interaction.channel.send({
         embeds: [panelEmbed],
         components: [row]
@@ -266,7 +343,21 @@ client.on("interactionCreate", async interaction => {
         embed.setTitle(title);
       }
 
-      await interaction.reply({
+      // =========================
+      // SILENTLY ACKNOWLEDGE
+      // =========================
+
+      await interaction.deferReply({
+        ephemeral: true
+      });
+
+      await interaction.deleteReply();
+
+      // =========================
+      // SEND ONLY ONE EMBED
+      // =========================
+
+      await interaction.channel.send({
         embeds: [embed]
       });
 
@@ -274,18 +365,20 @@ client.on("interactionCreate", async interaction => {
     }
 
     // =========================
-    // Start Button
+    // START BUTTON
     // =========================
 
     if (
       interaction.isButton() &&
       interaction.customId === "guess_start"
     ) {
-      const game = games.get(interaction.channelId);
+      const game =
+        games.get(interaction.channelId);
 
       if (!game) {
         await interaction.reply({
-          content: "❌ There is no active guessing game.",
+          content:
+            "❌ There is no active guessing game.",
           ephemeral: true
         });
 
@@ -294,7 +387,8 @@ client.on("interactionCreate", async interaction => {
 
       if (game.active) {
         await interaction.reply({
-          content: "⚠️ The Guess Game has already started.",
+          content:
+            "⚠️ The Guess Game has already started.",
           ephemeral: true
         });
 
@@ -304,7 +398,7 @@ client.on("interactionCreate", async interaction => {
       game.active = true;
 
       // =========================
-      // Unlock channel
+      // UNLOCK CHANNEL
       // =========================
 
       if (
@@ -320,12 +414,15 @@ client.on("interactionCreate", async interaction => {
             }
           );
         } catch (error) {
-          console.error("⚠️ Could not unlock channel:", error);
+          console.error(
+            "⚠️ Could not unlock channel:",
+            error
+          );
         }
       }
 
       // =========================
-      // Game Embed
+      // GAME EMBED
       // =========================
 
       const gameEmbed = new EmbedBuilder()
@@ -339,6 +436,7 @@ client.on("interactionCreate", async interaction => {
           text: `Today at ${getTodayTime()}`
         });
 
+      // Replace original panel
       await interaction.update({
         embeds: [gameEmbed],
         components: []
@@ -348,9 +446,15 @@ client.on("interactionCreate", async interaction => {
     }
 
   } catch (error) {
-    console.error("❌ Interaction error:", error);
+    console.error(
+      "❌ Interaction error:",
+      error
+    );
 
-    if (!interaction.replied && !interaction.deferred) {
+    if (
+      !interaction.replied &&
+      !interaction.deferred
+    ) {
       await interaction.reply({
         content: "❌ An error occurred.",
         ephemeral: true
@@ -367,18 +471,20 @@ client.on("messageCreate", async message => {
   try {
     if (message.author.bot) return;
 
-    const game = games.get(message.channelId);
+    const game =
+      games.get(message.channelId);
 
     if (!game || !game.active) return;
 
-    const guess = Number(message.content.trim());
+    const guess =
+      Number(message.content.trim());
 
     if (!Number.isInteger(guess)) return;
 
     if (guess < 1 || guess > 10000) return;
 
     // =========================
-    // Correct Answer
+    // CORRECT ANSWER
     // =========================
 
     if (guess === game.answer) {
@@ -399,7 +505,7 @@ client.on("messageCreate", async message => {
       });
 
       // =========================
-      // Lock channel
+      // LOCK CHANNEL
       // =========================
 
       if (
@@ -414,7 +520,10 @@ client.on("messageCreate", async message => {
             }
           );
         } catch (error) {
-          console.error("⚠️ Could not lock channel:", error);
+          console.error(
+            "⚠️ Could not lock channel:",
+            error
+          );
         }
       }
 
@@ -423,10 +532,13 @@ client.on("messageCreate", async message => {
       return;
     }
 
-    // Wrong guesses intentionally get NO response.
+    // Wrong guesses = NO RESPONSE
 
   } catch (error) {
-    console.error("❌ Message handling error:", error);
+    console.error(
+      "❌ Message handling error:",
+      error
+    );
   }
 });
 
@@ -435,19 +547,31 @@ client.on("messageCreate", async message => {
 // =========================
 
 client.on("error", error => {
-  console.error("❌ Discord client error:", error);
+  console.error(
+    "❌ Discord client error:",
+    error
+  );
 });
 
 client.on("warn", warning => {
-  console.warn("⚠️ Discord warning:", warning);
+  console.warn(
+    "⚠️ Discord warning:",
+    warning
+  );
 });
 
 process.on("unhandledRejection", error => {
-  console.error("❌ Unhandled promise rejection:", error);
+  console.error(
+    "❌ Unhandled promise rejection:",
+    error
+  );
 });
 
 process.on("uncaughtException", error => {
-  console.error("❌ Uncaught exception:", error);
+  console.error(
+    "❌ Uncaught exception:",
+    error
+  );
 });
 
 // =========================
@@ -457,6 +581,10 @@ process.on("uncaughtException", error => {
 console.log("🔑 Logging into Discord...");
 
 client.login(TOKEN).catch(error => {
-  console.error("❌ Discord login failed:", error);
+  console.error(
+    "❌ Discord login failed:",
+    error
+  );
+
   process.exit(1);
 });
