@@ -8,7 +8,11 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  ChannelType
 } = require("discord.js");
 
 const OpenAI = require("openai");
@@ -180,6 +184,25 @@ function addConversationMessage(
 }
 
 // =========================
+// SOURCE FINDER
+// =========================
+
+// channelId -> {
+//   channelName,
+//   scannedAt,
+//   files: []
+// }
+const sourceIndexes = new Map();
+
+// guildId -> logs channel ID
+const logChannels = new Map();
+
+// Search sessions
+const searchSessions = new Map();
+
+const MAX_SEARCH_RESULTS = 200;
+
+// =========================
 // Time
 // =========================
 
@@ -232,6 +255,12 @@ User: "+ 1"
 Assistant: "2"
 
 Do not randomly reset the conversation when the user replies.
+
+STYLE:
+- You may use casual shortcuts such as "tf", "stfu", "bro", "fr", "nah", "bruh", when appropriate.
+- Use emojis such as 🙄, 💀, 🙏, 😭, 🤦, 😭, 💔, 🤨, 😭, etc.
+- Do not overuse them.
+- Keep the personality playful rather than genuinely abusive.
 
 SAFETY:
 - Do not use hateful slurs.
@@ -293,12 +322,14 @@ async function askAI(
   prompt,
   history = []
 ) {
+
   // =========================
   // Try Groq First
   // =========================
 
   if (groq) {
     try {
+
       console.log(
         `⚡ Asking Groq (${GROQ_MODEL})...`
       );
@@ -315,6 +346,7 @@ async function askAI(
         response?.choices?.[0]?.message?.content?.trim();
 
       if (text) {
+
         return {
           success: true,
           provider: "Groq",
@@ -323,6 +355,7 @@ async function askAI(
               ? text.slice(0, 1890) + "..."
               : text
         };
+
       }
 
       console.warn(
@@ -330,6 +363,7 @@ async function askAI(
       );
 
     } catch (error) {
+
       console.error(
         "❌ Groq error:",
         error?.status || "",
@@ -347,7 +381,9 @@ async function askAI(
   // =========================
 
   if (openrouter) {
+
     try {
+
       console.log(
         `🌐 Asking OpenRouter (${OPENROUTER_MODEL})...`
       );
@@ -364,6 +400,7 @@ async function askAI(
         response?.choices?.[0]?.message?.content?.trim();
 
       if (text) {
+
         return {
           success: true,
           provider: "OpenRouter",
@@ -372,6 +409,7 @@ async function askAI(
               ? text.slice(0, 1890) + "..."
               : text
         };
+
       }
 
       console.warn(
@@ -379,11 +417,13 @@ async function askAI(
       );
 
     } catch (error) {
+
       console.error(
         "❌ OpenRouter error:",
         error?.status || "",
         error?.message || error
       );
+
     }
   }
 
@@ -392,6 +432,724 @@ async function askAI(
     provider: null,
     text: null
   };
+}
+
+// =========================
+// SOURCE FINDER HELPERS
+// =========================
+
+function normalizeFilename(name) {
+  return String(name || "")
+    .toLowerCase()
+    .trim();
+}
+
+function collectAttachmentsFromMessage(
+  message,
+  results
+) {
+
+  // =========================
+  // Normal attachments
+  // =========================
+
+  if (message.attachments) {
+
+    for (
+      const attachment of message.attachments.values()
+    ) {
+
+      results.push({
+        id: attachment.id,
+        name:
+          attachment.name ||
+          attachment.filename ||
+          "file",
+        url: attachment.url,
+        size:
+          attachment.size || 0,
+        messageId:
+          message.id,
+        channelId:
+          message.channelId,
+        createdTimestamp:
+          message.createdTimestamp,
+        source: "message"
+      });
+
+    }
+  }
+
+  // =========================
+  // Forwarded messages
+  // =========================
+
+  if (
+    message.messageSnapshots &&
+    typeof message.messageSnapshots.values ===
+      "function"
+  ) {
+
+    for (
+      const snapshot of message.messageSnapshots.values()
+    ) {
+
+      if (!snapshot) {
+        continue;
+      }
+
+      const snapshotAttachments =
+        snapshot.attachments;
+
+      if (
+        snapshotAttachments &&
+        typeof snapshotAttachments.values ===
+          "function"
+      ) {
+
+        for (
+          const attachment of snapshotAttachments.values()
+        ) {
+
+          results.push({
+            id:
+              `forwarded-${attachment.id}`,
+            name:
+              attachment.name ||
+              attachment.filename ||
+              "file",
+            url:
+              attachment.url,
+            size:
+              attachment.size || 0,
+            messageId:
+              message.id,
+            channelId:
+              message.channelId,
+            createdTimestamp:
+              message.createdTimestamp,
+            source:
+              "forwarded"
+          });
+
+        }
+
+      } else if (
+        Array.isArray(
+          snapshotAttachments
+        )
+      ) {
+
+        for (
+          const attachment of snapshotAttachments
+        ) {
+
+          results.push({
+            id:
+              `forwarded-${attachment.id}`,
+            name:
+              attachment.name ||
+              attachment.filename ||
+              "file",
+            url:
+              attachment.url,
+            size:
+              attachment.size || 0,
+            messageId:
+              message.id,
+            channelId:
+              message.channelId,
+            createdTimestamp:
+              message.createdTimestamp,
+            source:
+              "forwarded"
+          });
+
+        }
+      }
+    }
+  }
+}
+
+// =========================
+// Scan Channel
+// =========================
+
+async function scanChannel(
+  channel
+) {
+
+  const files = [];
+
+  let before = null;
+  let totalMessages = 0;
+
+  while (true) {
+
+    const options = {
+      limit: 100
+    };
+
+    if (before) {
+      options.before = before;
+    }
+
+    const batch =
+      await channel.messages.fetch(
+        options
+      );
+
+    if (!batch.size) {
+      break;
+    }
+
+    totalMessages +=
+      batch.size;
+
+    for (
+      const message of batch.values()
+    ) {
+
+      collectAttachmentsFromMessage(
+        message,
+        files
+      );
+    }
+
+    const oldestMessage =
+      batch.last();
+
+    if (!oldestMessage) {
+      break;
+    }
+
+    before =
+      oldestMessage.id;
+
+    if (
+      batch.size < 100
+    ) {
+      break;
+    }
+  }
+
+  // =========================
+  // Remove duplicate files
+  // =========================
+
+  const unique =
+    new Map();
+
+  for (
+    const file of files
+  ) {
+
+    const key =
+      `${file.id}:${file.url}`;
+
+    if (
+      !unique.has(key)
+    ) {
+
+      unique.set(
+        key,
+        file
+      );
+
+    }
+  }
+
+  // =========================
+  // Oldest -> newest
+  // =========================
+
+  const sortedFiles =
+    [
+      ...unique.values()
+    ].sort(
+      (a, b) =>
+        (a.createdTimestamp || 0) -
+        (b.createdTimestamp || 0)
+    );
+
+  sourceIndexes.set(
+    channel.id,
+    {
+      channelName:
+        channel.name,
+      scannedAt:
+        Date.now(),
+      files:
+        sortedFiles
+    }
+  );
+
+  return {
+    totalMessages,
+    totalFiles:
+      sortedFiles.length
+  };
+}
+
+// =========================
+// Search Sources
+// =========================
+
+function searchSources(
+  guildId,
+  query
+) {
+
+  const cleanQuery =
+    normalizeFilename(
+      query
+    );
+
+  const results = [];
+
+  for (
+    const [
+      channelId,
+      index
+    ] of sourceIndexes.entries()
+  ) {
+
+    if (!index) {
+      continue;
+    }
+
+    const channel =
+      client.channels.cache.get(
+        channelId
+      );
+
+    if (
+      !channel ||
+      channel.guildId !== guildId
+    ) {
+      continue;
+    }
+
+    for (
+      const file of index.files
+    ) {
+
+      const filename =
+        normalizeFilename(
+          file.name
+        );
+
+      if (
+        filename.includes(
+          cleanQuery
+        )
+      ) {
+
+        results.push({
+          ...file,
+          channelName:
+            index.channelName
+        });
+
+      }
+
+      if (
+        results.length >=
+        MAX_SEARCH_RESULTS
+      ) {
+        break;
+      }
+    }
+
+    if (
+      results.length >=
+      MAX_SEARCH_RESULTS
+    ) {
+      break;
+    }
+  }
+
+  return results;
+}
+
+// =========================
+// Logs
+// =========================
+
+async function logSourceSearch(
+  interaction,
+  query,
+  results
+) {
+
+  if (!interaction.guildId) {
+    return;
+  }
+
+  const logChannelId =
+    logChannels.get(
+      interaction.guildId
+    );
+
+  if (!logChannelId) {
+    return;
+  }
+
+  const logChannel =
+    client.channels.cache.get(
+      logChannelId
+    );
+
+  if (
+    !logChannel ||
+    !logChannel.isTextBased()
+  ) {
+    return;
+  }
+
+  const firstFile =
+    results[0];
+
+  const embed =
+    new EmbedBuilder()
+      .setTitle(
+        "SOURCE SEARCH LOG 🔎"
+      )
+      .setColor(
+        0x808080
+      )
+      .addFields(
+        {
+          name: "User",
+          value:
+            `<@${interaction.user.id}>\n\`${interaction.user.id}\``
+        },
+        {
+          name: "Search",
+          value:
+            `\`${query.slice(0, 100)}\``
+        },
+        {
+          name: "Results",
+          value:
+            `\`${results.length}\``
+        },
+        {
+          name: "First Match",
+          value:
+            firstFile
+              ? `\`${firstFile.name}\``
+              : "None"
+        }
+      )
+      .setFooter({
+        text:
+          `Today at ${getTodayTime()}`
+      });
+
+  await logChannel.send({
+    embeds: [embed]
+  }).catch(
+    error => {
+      console.error(
+        "❌ Could not send source search log:",
+        error
+      );
+    }
+  );
+}
+
+// =========================
+// Search Result UI
+// =========================
+
+function createSearchButtons(
+  sessionId,
+  page,
+  total
+) {
+
+  const row =
+    new ActionRowBuilder();
+
+  row.addComponents(
+
+    new ButtonBuilder()
+      .setCustomId(
+        `source_prev:${sessionId}`
+      )
+      .setEmoji("⬅️")
+      .setStyle(
+        ButtonStyle.Secondary
+      )
+      .setDisabled(
+        page <= 0
+      ),
+
+    new ButtonBuilder()
+      .setCustomId(
+        `source_next:${sessionId}`
+      )
+      .setEmoji("➡️")
+      .setStyle(
+        ButtonStyle.Secondary
+      )
+      .setDisabled(
+        page >= total - 1
+      )
+  );
+
+  return row;
+}
+
+// =========================
+// Download Found File
+// =========================
+
+async function downloadFile(
+  file
+) {
+
+  try {
+
+    if (!file.url) {
+      return null;
+    }
+
+    const response =
+      await fetch(
+        file.url
+      );
+
+    if (!response.ok) {
+
+      console.error(
+        `❌ Failed to download ${file.name}: HTTP ${response.status}`
+      );
+
+      return null;
+    }
+
+    const arrayBuffer =
+      await response.arrayBuffer();
+
+    return Buffer.from(
+      arrayBuffer
+    );
+
+  } catch (error) {
+
+    console.error(
+      "❌ File download error:",
+      error
+    );
+
+    return null;
+  }
+}
+
+// =========================
+// Show Search Result
+// =========================
+
+async function showSearchResult(
+  interaction,
+  session,
+  page
+) {
+
+  const result =
+    session.results[page];
+
+  if (!result) {
+
+    await interaction.reply({
+      content:
+        "❌ This search result no longer exists.",
+      ephemeral: true
+    });
+
+    return;
+  }
+
+  const total =
+    session.results.length;
+
+  const embed =
+    new EmbedBuilder()
+      .setTitle(
+        "FILE"
+      )
+      .setDescription(
+        `**${result.name}**\n\n` +
+        `⬅️ **${page + 1}/${total}** ➡️`
+      )
+      .setColor(
+        0x808080
+      )
+      .addFields(
+        {
+          name: "Source",
+          value:
+            result.source ===
+            "forwarded"
+              ? "Forwarded message"
+              : "Message"
+        },
+        {
+          name: "Channel",
+          value:
+            `<#${result.channelId}>`
+        }
+      )
+      .setFooter({
+        text:
+          `Today at ${getTodayTime()}`
+      });
+
+  // =========================
+  // Download file
+  // =========================
+
+  const buffer =
+    await downloadFile(
+      result
+    );
+
+  const buttons =
+    createSearchButtons(
+      session.id,
+      page,
+      total
+    );
+
+  if (!buffer) {
+
+    if (
+      interaction.replied ||
+      interaction.deferred
+    ) {
+
+      await interaction.editReply({
+        content:
+          `📁 **${result.name}**\n\n` +
+          `⬅️ ${page + 1}/${total} ➡️\n\n` +
+          "⚠️ I couldn't re-upload this file. The original attachment may no longer be available.",
+        embeds: [],
+        components: [
+          buttons
+        ]
+      });
+
+    } else {
+
+      await interaction.reply({
+        content:
+          `📁 **${result.name}**\n\n` +
+          `⬅️ ${page + 1}/${total} ➡️\n\n` +
+          "⚠️ I couldn't re-upload this file. The original attachment may no longer be available.",
+        components: [
+          buttons
+        ],
+        ephemeral: true
+      });
+
+    }
+
+    return;
+  }
+
+  // =========================
+  // Discord attachment
+  // =========================
+
+  const fileSize =
+    buffer.length;
+
+  // Discord upload limit safety
+  const MAX_UPLOAD =
+    20 * 1024 * 1024;
+
+  if (
+    fileSize >
+    MAX_UPLOAD
+  ) {
+
+    if (
+      interaction.replied ||
+      interaction.deferred
+    ) {
+
+      await interaction.editReply({
+        content:
+          `📁 **${result.name}**\n\n` +
+          `⬅️ ${page + 1}/${total} ➡️\n\n` +
+          "⚠️ This file is too large for the bot to re-upload.",
+        embeds: [],
+        components: [
+          buttons
+        ]
+      });
+
+    } else {
+
+      await interaction.reply({
+        content:
+          `📁 **${result.name}**\n\n` +
+          `⬅️ ${page + 1}/${total} ➡️\n\n` +
+          "⚠️ This file is too large for the bot to re-upload.",
+        components: [
+          buttons
+        ],
+        ephemeral: true
+      });
+
+    }
+
+    return;
+  }
+
+  const filePayload = {
+    attachment:
+      buffer,
+    name:
+      result.name
+  };
+
+  if (
+    interaction.replied ||
+    interaction.deferred
+  ) {
+
+    await interaction.editReply({
+      content: null,
+      embeds: [
+        embed
+      ],
+      files: [
+        filePayload
+      ],
+      components: [
+        buttons
+      ]
+    });
+
+  } else {
+
+    await interaction.reply({
+      embeds: [
+        embed
+      ],
+      files: [
+        filePayload
+      ],
+      components: [
+        buttons
+      ],
+      ephemeral: true
+    });
+
+  }
 }
 
 // =========================
@@ -478,6 +1236,72 @@ const commands = [
           "The ID of the server to leave."
         )
         .setRequired(true)
+    ),
+
+  // =========================
+  // /panel
+  // =========================
+
+  new SlashCommandBuilder()
+    .setName("panel")
+    .setDescription(
+      "Send the Source Finder panel."
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageNicknames.toString()
+    ),
+
+  // =========================
+  // /scanchannel
+  // =========================
+
+  new SlashCommandBuilder()
+    .setName("scanchannel")
+    .setDescription(
+      "Scan a channel for source/files."
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageNicknames.toString()
+    )
+    .addChannelOption(option =>
+      option
+        .setName("channel")
+        .setDescription(
+          "Channel to scan."
+        )
+        .setRequired(true)
+        .addChannelTypes(
+          ChannelType.GuildText,
+          ChannelType.GuildAnnouncement,
+          ChannelType.PublicThread,
+          ChannelType.PrivateThread,
+          ChannelType.AnnouncementThread
+        )
+    ),
+
+  // =========================
+  // /logs
+  // =========================
+
+  new SlashCommandBuilder()
+    .setName("logs")
+    .setDescription(
+      "Set the Source Finder search log channel."
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageNicknames.toString()
+    )
+    .addChannelOption(option =>
+      option
+        .setName("channel")
+        .setDescription(
+          "Channel where search logs will be sent."
+        )
+        .setRequired(true)
+        .addChannelTypes(
+          ChannelType.GuildText,
+          ChannelType.GuildAnnouncement
+        )
     )
 
 ].map(command =>
@@ -489,6 +1313,7 @@ const commands = [
 // =========================
 
 async function registerCommands() {
+
   const rest =
     new REST({
       version: "10"
@@ -500,7 +1325,6 @@ async function registerCommands() {
       "🧹 Cleaning old slash commands..."
     );
 
-    // Remove global commands
     await rest.put(
       Routes.applicationCommands(
         CLIENT_ID
@@ -514,7 +1338,6 @@ async function registerCommands() {
       "🗑️ Old global commands removed."
     );
 
-    // Remove guild commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -529,7 +1352,6 @@ async function registerCommands() {
       "🗑️ Old guild commands removed."
     );
 
-    // Register only current commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -545,6 +1367,7 @@ async function registerCommands() {
     );
 
   } catch (error) {
+
     console.error(
       "❌ Command registration error:",
       error
@@ -637,7 +1460,13 @@ client.on(
           interaction.commandName ===
             "guessnumber" ||
           interaction.commandName ===
-            "embed"
+            "embed" ||
+          interaction.commandName ===
+            "panel" ||
+          interaction.commandName ===
+            "scanchannel" ||
+          interaction.commandName ===
+            "logs"
         )
       ) {
 
@@ -668,6 +1497,179 @@ client.on(
       }
 
       // =========================
+      // /panel
+      // =========================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "panel"
+      ) {
+
+        const panelEmbed =
+          new EmbedBuilder()
+            .setTitle(
+              "Source Finder Panel"
+            )
+            .setDescription(
+              "**Click the** `Search` **button below to search a Source/File.**"
+            )
+            .setColor(
+              0x808080
+            )
+            .setFooter({
+              text:
+                `Sent by ${interaction.user.tag} • ${interaction.user.id}`
+            });
+
+        const row =
+          new ActionRowBuilder()
+            .addComponents(
+              new ButtonBuilder()
+                .setCustomId(
+                  "source_search"
+                )
+                .setLabel(
+                  "Search"
+                )
+                .setEmoji(
+                  "🔎"
+                )
+                .setStyle(
+                  ButtonStyle.Success
+                )
+            );
+
+        await interaction.reply({
+          embeds: [
+            panelEmbed
+          ],
+          components: [
+            row
+          ]
+        });
+
+        return;
+      }
+
+      // =========================
+      // /scanchannel
+      // =========================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "scanchannel"
+      ) {
+
+        const channel =
+          interaction.options.getChannel(
+            "channel"
+          );
+
+        if (
+          !channel ||
+          !channel.isTextBased() ||
+          !channel.messages
+        ) {
+
+          await interaction.reply({
+            content:
+              "❌ That channel cannot be scanned.",
+            ephemeral: true
+          });
+
+          return;
+        }
+
+        await interaction.deferReply({
+          ephemeral: true
+        });
+
+        console.log(
+          `🔎 Starting source scan in #${channel.name} (${channel.id})...`
+        );
+
+        try {
+
+          const result =
+            await scanChannel(
+              channel
+            );
+
+          await interaction.editReply({
+            content:
+              `✅ **Scan complete.**\n\n` +
+              `📁 Files found: **${result.totalFiles}**\n` +
+              `💬 Messages scanned: **${result.totalMessages}**\n` +
+              `📌 Channel: <#${channel.id}>\n\n` +
+              `Oldest messages were included in the scan.`
+          });
+
+          console.log(
+            `✅ Scan complete: ${result.totalFiles} files in #${channel.name}.`
+          );
+
+        } catch (error) {
+
+          console.error(
+            "❌ Channel scan error:",
+            error
+          );
+
+          await interaction.editReply({
+            content:
+              "❌ I couldn't scan that channel. Make sure the bot can **View Channel** and **Read Message History**."
+          });
+        }
+
+        return;
+      }
+
+      // =========================
+      // /logs
+      // =========================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "logs"
+      ) {
+
+        const channel =
+          interaction.options.getChannel(
+            "channel"
+          );
+
+        if (
+          !channel ||
+          !channel.isTextBased()
+        ) {
+
+          await interaction.reply({
+            content:
+              "❌ Please select a valid text channel.",
+            ephemeral: true
+          });
+
+          return;
+        }
+
+        logChannels.set(
+          interaction.guildId,
+          channel.id
+        );
+
+        await interaction.reply({
+          content:
+            `✅ Source Finder logs will now be sent to <#${channel.id}>.`,
+          ephemeral: true
+        });
+
+        return;
+      }
+
+      // =========================
       // /serverlist
       // =========================
 
@@ -691,8 +1693,10 @@ client.on(
         if (
           guilds.length === 0
         ) {
+
           description +=
             "No servers found.";
+
         }
 
         for (
@@ -740,6 +1744,7 @@ client.on(
             }
 
           } catch {
+
             inviteLink =
               "Unavailable";
           }
@@ -761,14 +1766,18 @@ client.on(
                 4000
               )
             )
-            .setColor(0x808080)
+            .setColor(
+              0x808080
+            )
             .setFooter({
               text:
                 `Today at ${getTodayTime()}`
             });
 
         await interaction.editReply({
-          embeds: [embed]
+          embeds: [
+            embed
+          ]
         });
 
         return;
@@ -886,13 +1895,14 @@ client.on(
           }
         );
 
-        // DM answer
         const answerEmbed =
           new EmbedBuilder()
             .setDescription(
               `🔢 **Answer:** \`${answer}\``
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         try {
 
@@ -926,14 +1936,12 @@ client.on(
           return;
         }
 
-        // Acknowledge silently
         await interaction.deferReply({
           ephemeral: true
         });
 
         await interaction.deleteReply();
 
-        // Game panel
         const panelEmbed =
           new EmbedBuilder()
             .setTitle(
@@ -943,7 +1951,9 @@ client.on(
               `> **Host by:** <@${interaction.user.id}>\n` +
               `> **Click the** \`Start Button\` **to start** \`Guess Game\`.`
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         const row =
           new ActionRowBuilder()
@@ -997,17 +2007,20 @@ client.on(
             .setDescription(
               description
             )
-            .setColor(0x808080)
+            .setColor(
+              0x808080
+            )
             .setFooter({
               text:
                 `Today at ${getTodayTime()}`
             });
 
         if (title) {
-          embed.setTitle(title);
+          embed.setTitle(
+            title
+          );
         }
 
-        // Silent command
         await interaction.deferReply({
           ephemeral: true
         });
@@ -1015,8 +2028,310 @@ client.on(
         await interaction.deleteReply();
 
         await interaction.channel.send({
-          embeds: [embed]
+          embeds: [
+            embed
+          ]
         });
+
+        return;
+      }
+
+      // =========================
+      // SEARCH BUTTON
+      // =========================
+
+      if (
+        interaction.isButton() &&
+        interaction.customId ===
+          "source_search"
+      ) {
+
+        const modal =
+          new ModalBuilder()
+            .setCustomId(
+              "source_search_modal"
+            )
+            .setTitle(
+              "Source Finder"
+            );
+
+        const input =
+          new TextInputBuilder()
+            .setCustomId(
+              "source_query"
+            )
+            .setLabel(
+              "Find source..."
+            )
+            .setPlaceholder(
+              "Find source..."
+            )
+            .setStyle(
+              TextInputStyle.Short
+            )
+            .setRequired(
+              true
+            )
+            .setMaxLength(
+              100
+            );
+
+        const row =
+          new ActionRowBuilder()
+            .addComponents(
+              input
+            );
+
+        modal.addComponents(
+          row
+        );
+
+        await interaction.showModal(
+          modal
+        );
+
+        return;
+      }
+
+      // =========================
+      // SEARCH MODAL
+      // =========================
+
+      if (
+        interaction.isModalSubmit() &&
+        interaction.customId ===
+          "source_search_modal"
+      ) {
+
+        const query =
+          interaction.fields
+            .getTextInputValue(
+              "source_query"
+            )
+            .trim();
+
+        if (!query) {
+
+          await interaction.reply({
+            content:
+              "❌ Please enter a source/file name.",
+            ephemeral: true
+          });
+
+          return;
+        }
+
+        const results =
+          searchSources(
+            interaction.guildId,
+            query
+          );
+
+        // =========================
+        // Log search
+        // =========================
+
+        await logSourceSearch(
+          interaction,
+          query,
+          results
+        );
+
+        if (
+          results.length ===
+          0
+        ) {
+
+          await interaction.reply({
+            content:
+              `❌ No file found for \`${query}\`.`,
+            ephemeral: true
+          });
+
+          return;
+        }
+
+        const sessionId =
+          `${interaction.user.id}-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 8)}`;
+
+        const session = {
+          id:
+            sessionId,
+          userId:
+            interaction.user.id,
+          guildId:
+            interaction.guildId,
+          results,
+          page: 0,
+          createdAt:
+            Date.now()
+        };
+
+        searchSessions.set(
+          sessionId,
+          session
+        );
+
+        // =========================
+        // Clean old sessions
+        // =========================
+
+        for (
+          const [
+            id,
+            oldSession
+          ] of searchSessions
+        ) {
+
+          if (
+            Date.now() -
+              oldSession.createdAt >
+            10 * 60 * 1000
+          ) {
+
+            searchSessions.delete(
+              id
+            );
+          }
+        }
+
+        await interaction.deferReply({
+          ephemeral: true
+        });
+
+        await showSearchResult(
+          interaction,
+          session,
+          0
+        );
+
+        return;
+      }
+
+      // =========================
+      // PREVIOUS FILE
+      // =========================
+
+      if (
+        interaction.isButton() &&
+        interaction.customId.startsWith(
+          "source_prev:"
+        )
+      ) {
+
+        const sessionId =
+          interaction.customId.split(
+            ":"
+          )[1];
+
+        const session =
+          searchSessions.get(
+            sessionId
+          );
+
+        if (!session) {
+
+          await interaction.reply({
+            content:
+              "❌ This search session expired. Search again.",
+            ephemeral: true
+          });
+
+          return;
+        }
+
+        if (
+          interaction.user.id !==
+          session.userId
+        ) {
+
+          await interaction.reply({
+            content:
+              "❌ This search belongs to another user.",
+            ephemeral: true
+          });
+
+          return;
+        }
+
+        session.page =
+          Math.max(
+            0,
+            session.page - 1
+          );
+
+        await interaction.deferUpdate();
+
+        await showSearchResult(
+          interaction,
+          session,
+          session.page
+        );
+
+        return;
+      }
+
+      // =========================
+      // NEXT FILE
+      // =========================
+
+      if (
+        interaction.isButton() &&
+        interaction.customId.startsWith(
+          "source_next:"
+        )
+      ) {
+
+        const sessionId =
+          interaction.customId.split(
+            ":"
+          )[1];
+
+        const session =
+          searchSessions.get(
+            sessionId
+          );
+
+        if (!session) {
+
+          await interaction.reply({
+            content:
+              "❌ This search session expired. Search again.",
+            ephemeral: true
+          });
+
+          return;
+        }
+
+        if (
+          interaction.user.id !==
+          session.userId
+        ) {
+
+          await interaction.reply({
+            content:
+              "❌ This search belongs to another user.",
+            ephemeral: true
+          });
+
+          return;
+        }
+
+        session.page =
+          Math.min(
+            session.results.length - 1,
+            session.page + 1
+          );
+
+        await interaction.deferUpdate();
+
+        await showSearchResult(
+          interaction,
+          session,
+          session.page
+        );
 
         return;
       }
@@ -1084,7 +2399,6 @@ client.on(
 
         game.active = true;
 
-        // Unlock channel
         if (
           interaction.guild &&
           interaction.channel &&
@@ -1117,7 +2431,9 @@ client.on(
               "> 🔢 **1 - 10000**\n" +
               "> 💀 **TRY TO WIN**"
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         await interaction.update({
           embeds: [
@@ -1146,6 +2462,7 @@ client.on(
             "❌ An error occurred.",
           ephemeral: true
         }).catch(() => {});
+
       }
     }
   }
@@ -1191,7 +2508,6 @@ client.on(
           guess <= 10000
         ) {
 
-          // Correct answer
           if (
             guess ===
             game.answer
@@ -1214,7 +2530,6 @@ client.on(
               ]
             });
 
-            // Lock channel
             if (
               message.guild &&
               message.channel.permissionOverwrites
@@ -1246,8 +2561,6 @@ client.on(
             return;
           }
 
-          // Wrong guesses:
-          // no response
           return;
         }
       }
@@ -1272,7 +2585,6 @@ client.on(
       const massMention =
         message.mentions.everyone;
 
-      // Direct reply to bot
       let repliedToBot =
         false;
 
@@ -1296,6 +2608,7 @@ client.on(
             referencedMessage.author.id ===
               client.user.id
           ) {
+
             repliedToBot = true;
           }
 
@@ -1307,11 +2620,6 @@ client.on(
           );
         }
       }
-
-      // Only respond to:
-      // mention
-      // @everyone/@here
-      // reply to bot
 
       if (
         !botMentioned &&
@@ -1496,20 +2804,24 @@ Understand the user's new message in the context of your previous message.`;
 client.on(
   "error",
   error => {
+
     console.error(
       "❌ Discord client error:",
       error
     );
+
   }
 );
 
 client.on(
   "warn",
   warning => {
+
     console.warn(
       "⚠️ Discord warning:",
       warning
     );
+
   }
 );
 
@@ -1520,20 +2832,24 @@ client.on(
 process.on(
   "unhandledRejection",
   error => {
+
     console.error(
       "❌ Unhandled promise rejection:",
       error
     );
+
   }
 );
 
 process.on(
   "uncaughtException",
   error => {
+
     console.error(
       "❌ Uncaught exception:",
       error
     );
+
   }
 );
 
