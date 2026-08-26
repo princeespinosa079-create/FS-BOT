@@ -338,93 +338,24 @@ async function askAI(prompt, history = []) {
   };
 }
 
-// =========================
+// ======================================================
 // SOURCE FINDER HELPERS
-// =========================
+// ======================================================
 
 function normalizeFilename(name) {
   return String(name || "")
     .toLowerCase()
     .replace(/\.[^/.]+$/, "")
     .replace(/[_-]+/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function getSearchTokens(query) {
-  return normalizeFilename(query)
-    .split(" ")
-    .map(word => word.trim())
+function getSearchTokens(text) {
+  return normalizeFilename(text)
+    .split(/\s+/)
     .filter(Boolean);
-}
-
-function getFilenameTokens(filename) {
-  return normalizeFilename(filename)
-    .split(" ")
-    .map(word => word.trim())
-    .filter(Boolean);
-}
-
-// =========================
-// Smart Search Score
-// =========================
-
-function calculateSearchScore(filename, query) {
-  const cleanFilename = normalizeFilename(filename);
-  const cleanQuery = normalizeFilename(query);
-
-  const queryTokens = getSearchTokens(query);
-  const filenameTokens = getFilenameTokens(filename);
-
-  if (!cleanQuery || !filenameTokens.length) {
-    return 0;
-  }
-
-  let score = 0;
-
-  // Exact full filename match
-  if (cleanFilename === cleanQuery) {
-    score += 1000;
-  }
-
-  // Full phrase
-  if (cleanFilename.includes(cleanQuery)) {
-    score += 500;
-  }
-
-  for (const queryToken of queryTokens) {
-    if (!queryToken) continue;
-
-    // Exact word
-    if (filenameTokens.includes(queryToken)) {
-      score += 100;
-      continue;
-    }
-
-    // Partial word
-    const partialMatch = filenameTokens.some(
-      filenameToken =>
-        filenameToken.includes(queryToken) ||
-        queryToken.includes(filenameToken)
-    );
-
-    if (partialMatch) {
-      score += 60;
-    }
-
-    // Prefix match
-    const prefixMatch = filenameTokens.some(
-      filenameToken =>
-        filenameToken.startsWith(queryToken) ||
-        queryToken.startsWith(filenameToken)
-    );
-
-    if (prefixMatch) {
-      score += 25;
-    }
-  }
-
-  return score;
 }
 
 // =========================
@@ -457,8 +388,7 @@ function collectAttachmentsFromMessage(
 
   if (
     message.messageSnapshots &&
-    typeof message.messageSnapshots.values ===
-      "function"
+    typeof message.messageSnapshots.values === "function"
   ) {
     for (
       const snapshot of message.messageSnapshots.values()
@@ -470,8 +400,7 @@ function collectAttachmentsFromMessage(
 
       if (
         snapshotAttachments &&
-        typeof snapshotAttachments.values ===
-          "function"
+        typeof snapshotAttachments.values === "function"
       ) {
         for (
           const attachment of snapshotAttachments.values()
@@ -490,12 +419,8 @@ function collectAttachmentsFromMessage(
             source: "forwarded"
           });
         }
-      } else if (
-        Array.isArray(snapshotAttachments)
-      ) {
-        for (
-          const attachment of snapshotAttachments
-        ) {
+      } else if (Array.isArray(snapshotAttachments)) {
+        for (const attachment of snapshotAttachments) {
           results.push({
             id: `forwarded-${attachment.id}`,
             name:
@@ -593,23 +518,23 @@ async function scanChannel(channel) {
   };
 }
 
-// =========================
+// ======================================================
 // SMART SOURCE SEARCH
-// =========================
+// ======================================================
 
 function searchSources(guildId, query) {
-  const cleanQuery =
+  const normalizedQuery =
     normalizeFilename(query);
 
-  if (!cleanQuery) {
-    return [];
-  }
+  const queryTokens =
+    getSearchTokens(query);
 
-  const scoredResults = [];
+  const exactResults = [];
+  const strongResults = [];
+  const fallbackResults = [];
 
   for (
-    const [channelId, index]
-    of sourceIndexes.entries()
+    const [channelId, index] of sourceIndexes.entries()
   ) {
     if (!index) continue;
 
@@ -624,44 +549,132 @@ function searchSources(guildId, query) {
     }
 
     for (const file of index.files) {
-      const score =
-        calculateSearchScore(
-          file.name,
-          cleanQuery
-        );
+      const normalizedFile =
+        normalizeFilename(file.name);
 
-      if (score > 0) {
-        scoredResults.push({
+      const fileTokens =
+        getSearchTokens(file.name);
+
+      // Exact normalized filename
+      if (normalizedFile === normalizedQuery) {
+        exactResults.push({
           ...file,
           channelName: index.channelName,
-          searchScore: score
+          _score: 10000
+        });
+
+        continue;
+      }
+
+      // Entire query appears in filename
+      if (
+        normalizedFile.includes(
+          normalizedQuery
+        )
+      ) {
+        strongResults.push({
+          ...file,
+          channelName: index.channelName,
+          _score: 5000
+        });
+
+        continue;
+      }
+
+      // ==============================================
+      // Token-based smart matching
+      //
+      // Example:
+      // Search: "Anti Desync"
+      // File:   "Work Desync.txt"
+      //
+      // "desync" matches, so it can be returned.
+      // ==============================================
+
+      let matchedTokens = 0;
+      let score = 0;
+
+      for (const queryToken of queryTokens) {
+        if (!queryToken) continue;
+
+        let bestTokenScore = 0;
+
+        for (const fileToken of fileTokens) {
+          if (
+            fileToken === queryToken
+          ) {
+            bestTokenScore = Math.max(
+              bestTokenScore,
+              100
+            );
+          } else if (
+            fileToken.includes(queryToken) ||
+            queryToken.includes(fileToken)
+          ) {
+            bestTokenScore = Math.max(
+              bestTokenScore,
+              60
+            );
+          }
+        }
+
+        if (bestTokenScore > 0) {
+          matchedTokens++;
+          score += bestTokenScore;
+        }
+      }
+
+      if (matchedTokens > 0) {
+        // More matched words = better result
+        score += matchedTokens * 100;
+
+        // Prefer filenames with fewer unrelated words
+        score -= Math.max(
+          0,
+          fileTokens.length - matchedTokens
+        ) * 2;
+
+        fallbackResults.push({
+          ...file,
+          channelName: index.channelName,
+          _score: score
         });
       }
     }
   }
 
-  // Highest relevance first
-  scoredResults.sort((a, b) => {
-    if (b.searchScore !== a.searchScore) {
-      return b.searchScore - a.searchScore;
-    }
+  // Exact matches first
+  if (exactResults.length > 0) {
+    return exactResults
+      .slice(0, MAX_SEARCH_RESULTS)
+      .map(removeSearchScore);
+  }
 
-    return (
-      (a.createdTimestamp || 0) -
-      (b.createdTimestamp || 0)
-    );
-  });
+  // Strong full-name matches second
+  if (strongResults.length > 0) {
+    return strongResults
+      .sort((a, b) => b._score - a._score)
+      .slice(0, MAX_SEARCH_RESULTS)
+      .map(removeSearchScore);
+  }
 
-  return scoredResults
+  // Smart token fallback
+  fallbackResults.sort(
+    (a, b) => b._score - a._score
+  );
+
+  return fallbackResults
     .slice(0, MAX_SEARCH_RESULTS)
-    .map(file => {
-      const {
-        searchScore,
-        ...cleanFile
-      } = file;
+    .map(removeSearchScore);
+}
 
-      return cleanFile;
-    });
+function removeSearchScore(file) {
+  const {
+    _score,
+    ...cleanFile
+  } = file;
+
+  return cleanFile;
 }
 
 // =========================
@@ -733,19 +746,21 @@ async function logSourceSearch(
           `Today at ${getTodayTime()}`
       });
 
-  await logChannel.send({
-    embeds: [embed]
-  }).catch(error => {
-    console.error(
-      "❌ Could not send source search log:",
-      error
-    );
-  });
+  await logChannel
+    .send({
+      embeds: [embed]
+    })
+    .catch(error => {
+      console.error(
+        "❌ Could not send source search log:",
+        error
+      );
+    });
 }
 
-// =========================
-// Search Buttons
-// =========================
+// ======================================================
+// SEARCH BUTTONS
+// ======================================================
 
 function createSearchButtons(
   sessionId,
@@ -761,15 +776,33 @@ function createSearchButtons(
         `source_prev:${sessionId}`
       )
       .setEmoji("⬅️")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(page <= 0),
+      .setStyle(
+        ButtonStyle.Secondary
+      )
+      .setDisabled(
+        page <= 0
+      ),
+
+    new ButtonBuilder()
+      .setCustomId(
+        `source_page:${sessionId}`
+      )
+      .setLabel(
+        `${page + 1}/${total}`
+      )
+      .setStyle(
+        ButtonStyle.Primary
+      )
+      .setDisabled(true),
 
     new ButtonBuilder()
       .setCustomId(
         `source_next:${sessionId}`
       )
       .setEmoji("➡️")
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(
+        ButtonStyle.Secondary
+      )
       .setDisabled(
         page >= total - 1
       )
@@ -778,9 +811,9 @@ function createSearchButtons(
   return row;
 }
 
-// =========================
-// Download Found File
-// =========================
+// ======================================================
+// DOWNLOAD FOUND FILE
+// ======================================================
 
 async function downloadFile(file) {
   try {
@@ -802,8 +835,9 @@ async function downloadFile(file) {
     const arrayBuffer =
       await response.arrayBuffer();
 
-    return Buffer.from(arrayBuffer);
-
+    return Buffer.from(
+      arrayBuffer
+    );
   } catch (error) {
     console.error(
       "❌ File download error:",
@@ -814,9 +848,15 @@ async function downloadFile(file) {
   }
 }
 
-// =========================
-// Show Search Result
-// =========================
+// ======================================================
+// SHOW SEARCH RESULT
+//
+// IMPORTANT:
+// NO EMBED
+// NO CONTENT
+// NO EXTRA TEXT
+// ONLY FILE + BUTTONS
+// ======================================================
 
 async function showSearchResult(
   interaction,
@@ -827,46 +867,11 @@ async function showSearchResult(
     session.results[page];
 
   if (!result) {
-    if (
-      interaction.replied ||
-      interaction.deferred
-    ) {
-      await interaction.editReply({
-        content:
-          "❌ This search result no longer exists.",
-        embeds: [],
-        files: [],
-        components: []
-      }).catch(() => {});
-    } else {
-      await interaction.reply({
-        content:
-          "❌ This search result no longer exists.",
-        ephemeral: true
-      });
-    }
-
     return;
   }
 
   const total =
     session.results.length;
-
-  /*
-   * IMPORTANT:
-   * No embed.
-   * No filename text.
-   * No source/channel text.
-   *
-   * The ONLY text is:
-   *
-   * FILE
-   * ⬅️ 1/200 ➡️
-   */
-
-  const content =
-    `FILE\n` +
-    `⬅️ ${page + 1}/${total} ➡️`;
 
   const buttons =
     createSearchButtons(
@@ -879,57 +884,65 @@ async function showSearchResult(
     await downloadFile(result);
 
   if (!buffer) {
-    const errorContent =
-      `FILE\n` +
-      `⬅️ ${page + 1}/${total} ➡️\n\n` +
-      `⚠️ File is no longer available.`;
+    const errorButtons =
+      createSearchButtons(
+        session.id,
+        page,
+        total
+      );
 
     if (
       interaction.replied ||
       interaction.deferred
     ) {
       await interaction.editReply({
-        content: errorContent,
+        content: null,
         embeds: [],
         files: [],
-        components: [buttons]
-      });
+        components: [
+          errorButtons
+        ]
+      }).catch(() => {});
     } else {
       await interaction.reply({
-        content: errorContent,
-        components: [buttons],
+        content: null,
+        embeds: [],
+        components: [
+          errorButtons
+        ],
         ephemeral: true
-      });
+      }).catch(() => {});
     }
 
     return;
   }
 
+  // Discord upload safety
   const MAX_UPLOAD =
     20 * 1024 * 1024;
 
   if (buffer.length > MAX_UPLOAD) {
-    const errorContent =
-      `FILE\n` +
-      `⬅️ ${page + 1}/${total} ➡️\n\n` +
-      `⚠️ This file is too large for the bot to re-upload.`;
-
     if (
       interaction.replied ||
       interaction.deferred
     ) {
       await interaction.editReply({
-        content: errorContent,
+        content: null,
         embeds: [],
         files: [],
-        components: [buttons]
-      });
+        components: [
+          buttons
+        ]
+      }).catch(() => {});
     } else {
       await interaction.reply({
-        content: errorContent,
-        components: [buttons],
+        content: null,
+        embeds: [],
+        components: [
+          buttons
+        ],
         ephemeral: true
-      });
+      }).catch(() => {});
     }
 
     return;
@@ -937,25 +950,45 @@ async function showSearchResult(
 
   const filePayload = {
     attachment: buffer,
-    name: result.name
+    name:
+      result.name || "file"
   };
+
+  // ==========================================
+  // ONLY:
+  //
+  // [ FILE ATTACHMENT ]
+  //
+  // [⬅️] [1/200] [➡️]
+  //
+  // No embed.
+  // No text.
+  // ==========================================
 
   if (
     interaction.replied ||
     interaction.deferred
   ) {
     await interaction.editReply({
-      content,
+      content: null,
       embeds: [],
-      files: [filePayload],
-      components: [buttons]
+      files: [
+        filePayload
+      ],
+      components: [
+        buttons
+      ]
     });
   } else {
     await interaction.reply({
-      content,
+      content: null,
       embeds: [],
-      files: [filePayload],
-      components: [buttons],
+      files: [
+        filePayload
+      ],
+      components: [
+        buttons
+      ],
       ephemeral: true
     });
   }
@@ -1095,7 +1128,9 @@ const commands = [
         )
     )
 
-].map(command => command.toJSON());
+].map(command =>
+  command.toJSON()
+);
 
 // =========================
 // Register Commands
@@ -1152,7 +1187,6 @@ async function registerCommands() {
     console.log(
       "✅ Registered current slash commands."
     );
-
   } catch (error) {
     console.error(
       "❌ Command registration error:",
@@ -1178,13 +1212,17 @@ client.once(
 
     console.log(
       `⚡ Groq: ${
-        groq ? "Enabled" : "Disabled"
+        groq
+          ? "Enabled"
+          : "Disabled"
       }`
     );
 
     console.log(
       `🌐 OpenRouter: ${
-        openrouter ? "Enabled" : "Disabled"
+        openrouter
+          ? "Enabled"
+          : "Disabled"
       }`
     );
 
@@ -1207,8 +1245,10 @@ client.on(
 
       if (
         interaction.isChatInputCommand() &&
-        interaction.commandName ===
-          "serverlist"
+        (
+          interaction.commandName ===
+            "serverlist"
+        )
       ) {
         if (
           interaction.user.id !==
@@ -1230,14 +1270,17 @@ client.on(
 
       if (
         interaction.isChatInputCommand() &&
-        [
-          "guessnumber",
-          "embed",
-          "panel",
-          "scanchannel",
-          "logs"
-        ].includes(
-          interaction.commandName
+        (
+          interaction.commandName ===
+            "guessnumber" ||
+          interaction.commandName ===
+            "embed" ||
+          interaction.commandName ===
+            "panel" ||
+          interaction.commandName ===
+            "scanchannel" ||
+          interaction.commandName ===
+            "logs"
         )
       ) {
         if (
@@ -1279,7 +1322,9 @@ client.on(
             .setDescription(
               "**Click the** `Search` **button below to search a Source/File.**"
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         const row =
           new ActionRowBuilder()
@@ -1296,22 +1341,21 @@ client.on(
                 )
             );
 
-        /*
-         * A slash command MUST be acknowledged.
-         * We acknowledge it privately, delete that
-         * acknowledgement, then send the real panel
-         * directly into the channel.
-         */
-
+        // Don't leave a visible slash-command reply.
         await interaction.deferReply({
           ephemeral: true
         });
 
         await interaction.deleteReply();
 
+        // Send the panel directly into the channel.
         await interaction.channel.send({
-          embeds: [panelEmbed],
-          components: [row]
+          embeds: [
+            panelEmbed
+          ],
+          components: [
+            row
+          ]
         });
 
         return;
@@ -1355,7 +1399,9 @@ client.on(
 
         try {
           const result =
-            await scanChannel(channel);
+            await scanChannel(
+              channel
+            );
 
           await interaction.editReply({
             content:
@@ -1369,7 +1415,6 @@ client.on(
           console.log(
             `✅ Scan complete: ${result.totalFiles} files in #${channel.name}.`
           );
-
         } catch (error) {
           console.error(
             "❌ Channel scan error:",
@@ -1446,7 +1491,9 @@ client.on(
         let description =
           `**Total Servers:** \`${guilds.length}\`\n\n`;
 
-        if (!guilds.length) {
+        if (
+          guilds.length === 0
+        ) {
           description +=
             "No servers found.";
         }
@@ -1456,7 +1503,8 @@ client.on(
           i < guilds.length;
           i++
         ) {
-          const guild = guilds[i];
+          const guild =
+            guilds[i];
 
           let inviteLink =
             "Unavailable";
@@ -1505,16 +1553,23 @@ client.on(
               "SERVER LIST 📋"
             )
             .setDescription(
-              description.slice(0, 4000)
+              description.slice(
+                0,
+                4000
+              )
             )
-            .setColor(0x808080)
+            .setColor(
+              0x808080
+            )
             .setFooter({
               text:
                 `Today at ${getTodayTime()}`
             });
 
         await interaction.editReply({
-          embeds: [embed]
+          embeds: [
+            embed
+          ]
         });
 
         return;
@@ -1569,11 +1624,15 @@ client.on(
             .setDescription(
               `🔢 **Answer:** \`${answer}\``
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         try {
           await interaction.user.send({
-            embeds: [answerEmbed]
+            embeds: [
+              answerEmbed
+            ]
           });
         } catch {
           games.delete(
@@ -1610,7 +1669,9 @@ client.on(
               `> **Host by:** <@${interaction.user.id}>\n` +
               `> **Click the** \`Start Button\` **to start** \`Guess Game\`.`
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         const row =
           new ActionRowBuilder()
@@ -1628,8 +1689,12 @@ client.on(
             );
 
         await interaction.channel.send({
-          embeds: [panelEmbed],
-          components: [row]
+          embeds: [
+            panelEmbed
+          ],
+          components: [
+            row
+          ]
         });
 
         return;
@@ -1659,14 +1724,18 @@ client.on(
             .setDescription(
               description
             )
-            .setColor(0x808080)
+            .setColor(
+              0x808080
+            )
             .setFooter({
               text:
                 `Today at ${getTodayTime()}`
             });
 
         if (title) {
-          embed.setTitle(title);
+          embed.setTitle(
+            title
+          );
         }
 
         await interaction.deferReply({
@@ -1676,7 +1745,9 @@ client.on(
         await interaction.deleteReply();
 
         await interaction.channel.send({
-          embeds: [embed]
+          embeds: [
+            embed
+          ]
         });
 
         return;
@@ -1714,14 +1785,22 @@ client.on(
             .setStyle(
               TextInputStyle.Short
             )
-            .setRequired(true)
-            .setMaxLength(100);
+            .setRequired(
+              true
+            )
+            .setMaxLength(
+              100
+            );
 
         const row =
           new ActionRowBuilder()
-            .addComponents(input);
+            .addComponents(
+              input
+            );
 
-        modal.addComponents(row);
+        modal.addComponents(
+          row
+        );
 
         await interaction.showModal(
           modal
@@ -1768,7 +1847,10 @@ client.on(
           results
         );
 
-        if (!results.length) {
+        if (
+          results.length ===
+          0
+        ) {
           await interaction.reply({
             content:
               `❌ No file found for \`${query}\`.`,
@@ -1784,14 +1866,16 @@ client.on(
             .slice(2, 8)}`;
 
         const session = {
-          id: sessionId,
+          id:
+            sessionId,
           userId:
             interaction.user.id,
           guildId:
             interaction.guildId,
           results,
           page: 0,
-          createdAt: Date.now()
+          createdAt:
+            Date.now()
         };
 
         searchSessions.set(
@@ -1799,6 +1883,7 @@ client.on(
           session
         );
 
+        // Clean old sessions
         for (
           const [
             id,
@@ -1810,7 +1895,9 @@ client.on(
               oldSession.createdAt >
             10 * 60 * 1000
           ) {
-            searchSessions.delete(id);
+            searchSessions.delete(
+              id
+            );
           }
         }
 
@@ -1838,7 +1925,9 @@ client.on(
         )
       ) {
         const sessionId =
-          interaction.customId.split(":")[1];
+          interaction.customId.split(
+            ":"
+          )[1];
 
         const session =
           searchSessions.get(
@@ -1896,7 +1985,9 @@ client.on(
         )
       ) {
         const sessionId =
-          interaction.customId.split(":")[1];
+          interaction.customId.split(
+            ":"
+          )[1];
 
         const session =
           searchSessions.get(
@@ -2030,10 +2121,14 @@ client.on(
               "> 🔢 **1 - 10000**\n" +
               "> 💀 **TRY TO WIN**"
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         await interaction.update({
-          embeds: [gameEmbed],
+          embeds: [
+            gameEmbed
+          ],
           components: []
         });
 
@@ -2050,11 +2145,13 @@ client.on(
         !interaction.replied &&
         !interaction.deferred
       ) {
-        await interaction.reply({
-          content:
-            "❌ An error occurred.",
-          ephemeral: true
-        }).catch(() => {});
+        await interaction
+          .reply({
+            content:
+              "❌ An error occurred.",
+            ephemeral: true
+          })
+          .catch(() => {});
       }
     }
   }
@@ -2107,10 +2204,14 @@ client.on(
                   `> 🎊 <@${message.author.id}> **WON!**\n` +
                   `> ✅ **${guess}**`
                 )
-                .setColor(0x808080);
+                .setColor(
+                  0x808080
+                );
 
             await message.channel.send({
-              embeds: [winEmbed]
+              embeds: [
+                winEmbed
+              ]
             });
 
             if (
@@ -2145,10 +2246,13 @@ client.on(
       }
 
       // =========================
-      // AI Trigger
+      // AI Trigger Detection
       // =========================
 
-      if (!groq && !openrouter) {
+      if (
+        !groq &&
+        !openrouter
+      ) {
         return;
       }
 
@@ -2161,8 +2265,11 @@ client.on(
       const massMention =
         message.mentions.everyone;
 
-      let repliedToBot = false;
-      let referencedMessage = null;
+      let repliedToBot =
+        false;
+
+      let referencedMessage =
+        null;
 
       if (
         message.reference &&
@@ -2197,11 +2304,8 @@ client.on(
         return;
       }
 
-      // =========================
-      // Cooldown
-      // =========================
-
-      const now = Date.now();
+      const now =
+        Date.now();
 
       const lastUsed =
         aiCooldowns.get(
@@ -2219,10 +2323,6 @@ client.on(
         message.author.id,
         now
       );
-
-      // =========================
-      // Clean Prompt
-      // =========================
 
       let prompt =
         message.content || "";
@@ -2255,7 +2355,8 @@ client.on(
         referencedMessage
       ) {
         const previousBotMessage =
-          referencedMessage.content || "";
+          referencedMessage.content ||
+          "";
 
         prompt =
           `Previous bot message:
@@ -2271,10 +2372,6 @@ Understand the user's new message in the context of your previous message.`;
         prompt =
           "Someone pinged you without asking a question. Give a short sarcastic reaction.";
       }
-
-      // =========================
-      // Conversation
-      // =========================
 
       const conversationKey =
         `${message.guildId || "dm"}:${message.channelId}:${message.author.id}`;
@@ -2398,7 +2495,9 @@ console.log(
   "🔑 Logging into Discord..."
 );
 
-client.login(TOKEN).catch(
+client.login(
+  TOKEN
+).catch(
   error => {
     console.error(
       "❌ Discord login failed:",
