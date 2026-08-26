@@ -86,13 +86,10 @@ const OPENROUTER_MODEL = "openrouter/auto";
 
 const app = express();
 
-const PORT =
-  process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => {
-  res.status(200).send(
-    "FS Bot is online."
-  );
+  res.status(200).send("FS Bot is online.");
 });
 
 app.get("/health", (req, res) => {
@@ -110,15 +107,11 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `🌐 Web server running on port ${PORT}`
-    );
-  }
-);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `🌐 Web server running on port ${PORT}`
+  );
+});
 
 // =========================
 // Discord Client
@@ -167,18 +160,14 @@ function addConversationMessage(
   role,
   content
 ) {
-  const history =
-    getConversation(key);
+  const history = getConversation(key);
 
   history.push({
     role,
     content
   });
 
-  while (
-    history.length >
-    MAX_HISTORY
-  ) {
+  while (history.length > MAX_HISTORY) {
     history.shift();
   }
 }
@@ -192,6 +181,7 @@ function addConversationMessage(
 //   scannedAt,
 //   files: []
 // }
+
 const sourceIndexes = new Map();
 
 // guildId -> logs channel ID
@@ -258,7 +248,7 @@ Do not randomly reset the conversation when the user replies.
 
 STYLE:
 - You may use casual shortcuts such as "tf", "stfu", "bro", "fr", "nah", "bruh", when appropriate.
-- Use emojis such as 🙄, 💀, 🙏, 😭, 🤦, 😭, 💔, 🤨, 😭, etc.
+- Use emojis such as 🙄, 💀, 🙏, 😭, 🤦, 💔, 🤨.
 - Do not overuse them.
 - Keep the personality playful rather than genuinely abusive.
 
@@ -304,14 +294,12 @@ async function requestAI(
     }
   ];
 
-  return await clientInstance.chat.completions.create(
-    {
-      model,
-      messages: input,
-      max_tokens: 250,
-      temperature: 0.8
-    }
-  );
+  return await clientInstance.chat.completions.create({
+    model,
+    messages: input,
+    max_tokens: 250,
+    temperature: 0.8
+  });
 }
 
 // =========================
@@ -322,14 +310,12 @@ async function askAI(
   prompt,
   history = []
 ) {
-
   // =========================
   // Try Groq First
   // =========================
 
   if (groq) {
     try {
-
       console.log(
         `⚡ Asking Groq (${GROQ_MODEL})...`
       );
@@ -346,7 +332,6 @@ async function askAI(
         response?.choices?.[0]?.message?.content?.trim();
 
       if (text) {
-
         return {
           success: true,
           provider: "Groq",
@@ -355,15 +340,12 @@ async function askAI(
               ? text.slice(0, 1890) + "..."
               : text
         };
-
       }
 
       console.warn(
         "⚠️ Groq returned an empty response."
       );
-
     } catch (error) {
-
       console.error(
         "❌ Groq error:",
         error?.status || "",
@@ -381,9 +363,7 @@ async function askAI(
   // =========================
 
   if (openrouter) {
-
     try {
-
       console.log(
         `🌐 Asking OpenRouter (${OPENROUTER_MODEL})...`
       );
@@ -400,7 +380,6 @@ async function askAI(
         response?.choices?.[0]?.message?.content?.trim();
 
       if (text) {
-
         return {
           success: true,
           provider: "OpenRouter",
@@ -409,21 +388,17 @@ async function askAI(
               ? text.slice(0, 1890) + "..."
               : text
         };
-
       }
 
       console.warn(
         "⚠️ OpenRouter returned an empty response."
       );
-
     } catch (error) {
-
       console.error(
         "❌ OpenRouter error:",
         error?.status || "",
         error?.message || error
       );
-
     }
   }
 
@@ -444,21 +419,22 @@ function normalizeFilename(name) {
     .trim();
 }
 
+// =========================
+// Collect Attachments
+// =========================
+
 function collectAttachmentsFromMessage(
   message,
   results
 ) {
-
   // =========================
   // Normal attachments
   // =========================
 
   if (message.attachments) {
-
     for (
       const attachment of message.attachments.values()
     ) {
-
       results.push({
         id: attachment.id,
         name:
@@ -476,7 +452,6 @@ function collectAttachmentsFromMessage(
           message.createdTimestamp,
         source: "message"
       });
-
     }
   }
 
@@ -489,11 +464,9 @@ function collectAttachmentsFromMessage(
     typeof message.messageSnapshots.values ===
       "function"
   ) {
-
     for (
       const snapshot of message.messageSnapshots.values()
     ) {
-
       if (!snapshot) {
         continue;
       }
@@ -506,11 +479,9 @@ function collectAttachmentsFromMessage(
         typeof snapshotAttachments.values ===
           "function"
       ) {
-
         for (
           const attachment of snapshotAttachments.values()
         ) {
-
           results.push({
             id:
               `forwarded-${attachment.id}`,
@@ -531,19 +502,13 @@ function collectAttachmentsFromMessage(
             source:
               "forwarded"
           });
-
         }
-
       } else if (
-        Array.isArray(
-          snapshotAttachments
-        )
+        Array.isArray(snapshotAttachments)
       ) {
-
         for (
           const attachment of snapshotAttachments
         ) {
-
           results.push({
             id:
               `forwarded-${attachment.id}`,
@@ -564,7 +529,6 @@ function collectAttachmentsFromMessage(
             source:
               "forwarded"
           });
-
         }
       }
     }
@@ -575,17 +539,13 @@ function collectAttachmentsFromMessage(
 // Scan Channel
 // =========================
 
-async function scanChannel(
-  channel
-) {
-
+async function scanChannel(channel) {
   const files = [];
 
   let before = null;
   let totalMessages = 0;
 
   while (true) {
-
     const options = {
       limit: 100
     };
@@ -603,13 +563,11 @@ async function scanChannel(
       break;
     }
 
-    totalMessages +=
-      batch.size;
+    totalMessages += batch.size;
 
     for (
       const message of batch.values()
     ) {
-
       collectAttachmentsFromMessage(
         message,
         files
@@ -623,12 +581,9 @@ async function scanChannel(
       break;
     }
 
-    before =
-      oldestMessage.id;
+    before = oldestMessage.id;
 
-    if (
-      batch.size < 100
-    ) {
+    if (batch.size < 100) {
       break;
     }
   }
@@ -637,25 +592,14 @@ async function scanChannel(
   // Remove duplicate files
   // =========================
 
-  const unique =
-    new Map();
+  const unique = new Map();
 
-  for (
-    const file of files
-  ) {
-
+  for (const file of files) {
     const key =
       `${file.id}:${file.url}`;
 
-    if (
-      !unique.has(key)
-    ) {
-
-      unique.set(
-        key,
-        file
-      );
-
+    if (!unique.has(key)) {
+      unique.set(key, file);
     }
   }
 
@@ -664,9 +608,7 @@ async function scanChannel(
   // =========================
 
   const sortedFiles =
-    [
-      ...unique.values()
-    ].sort(
+    [...unique.values()].sort(
       (a, b) =>
         (a.createdTimestamp || 0) -
         (b.createdTimestamp || 0)
@@ -692,18 +634,30 @@ async function scanChannel(
 }
 
 // =========================
-// Search Sources
+// SMART SEARCH
 // =========================
 
 function searchSources(
   guildId,
   query
 ) {
-
   const cleanQuery =
-    normalizeFilename(
-      query
-    );
+    normalizeFilename(query);
+
+  if (!cleanQuery) {
+    return [];
+  }
+
+  // Split search into words.
+  // Example:
+  // "Anti Desync"
+  // becomes:
+  // ["anti", "desync"]
+
+  const searchWords =
+    cleanQuery
+      .split(/\s+/)
+      .filter(Boolean);
 
   const results = [];
 
@@ -713,7 +667,6 @@ function searchSources(
       index
     ] of sourceIndexes.entries()
   ) {
-
     if (!index) {
       continue;
     }
@@ -733,43 +686,157 @@ function searchSources(
     for (
       const file of index.files
     ) {
-
       const filename =
         normalizeFilename(
           file.name
         );
 
+      // Remove extension
+      const filenameWithoutExtension =
+        filename.replace(
+          /\.[^/.]+$/,
+          ""
+        );
+
+      // Split filename into words
+      const filenameWords =
+        filenameWithoutExtension
+          .split(
+            /[\s_\-().[\]]+/
+          )
+          .filter(Boolean);
+
+      let score = 0;
+
+      // =========================
+      // Exact full filename
+      // =========================
+
       if (
-        filename.includes(
+        filenameWithoutExtension ===
+        cleanQuery
+      ) {
+        score += 1000;
+      }
+
+      // =========================
+      // Full phrase match
+      // =========================
+
+      if (
+        filenameWithoutExtension.includes(
           cleanQuery
         )
       ) {
+        score += 500;
+      }
 
+      // =========================
+      // Individual words
+      // =========================
+
+      for (
+        const searchWord of searchWords
+      ) {
+        if (!searchWord) {
+          continue;
+        }
+
+        // Exact word
+        if (
+          filenameWords.includes(
+            searchWord
+          )
+        ) {
+          score += 200;
+          continue;
+        }
+
+        // Partial word
+        if (
+          filenameWithoutExtension.includes(
+            searchWord
+          )
+        ) {
+          score += 100;
+          continue;
+        }
+
+        // Similar/partial word
+        for (
+          const filenameWord of filenameWords
+        ) {
+          if (
+            filenameWord.includes(
+              searchWord
+            ) ||
+            searchWord.includes(
+              filenameWord
+            )
+          ) {
+            score += 50;
+            break;
+          }
+        }
+      }
+
+      // =========================
+      // Add matching file
+      // =========================
+
+      if (score > 0) {
         results.push({
           ...file,
           channelName:
-            index.channelName
+            index.channelName,
+          searchScore:
+            score
         });
-
       }
-
-      if (
-        results.length >=
-        MAX_SEARCH_RESULTS
-      ) {
-        break;
-      }
-    }
-
-    if (
-      results.length >=
-      MAX_SEARCH_RESULTS
-    ) {
-      break;
     }
   }
 
-  return results;
+  // =========================
+  // Best matches first
+  // =========================
+
+  results.sort(
+    (a, b) => {
+      if (
+        b.searchScore !==
+        a.searchScore
+      ) {
+        return (
+          b.searchScore -
+          a.searchScore
+        );
+      }
+
+      return (
+        (a.createdTimestamp || 0) -
+        (b.createdTimestamp || 0)
+      );
+    }
+  );
+
+  // =========================
+  // Limit results
+  // =========================
+
+  return results
+    .slice(
+      0,
+      MAX_SEARCH_RESULTS
+    )
+    .map(file => {
+      const copy = {
+        ...file
+      };
+
+      delete copy.searchScore;
+
+      return copy;
+    });
 }
 
 // =========================
@@ -781,7 +848,6 @@ async function logSourceSearch(
   query,
   results
 ) {
-
   if (!interaction.guildId) {
     return;
   }
@@ -827,7 +893,10 @@ async function logSourceSearch(
         {
           name: "Search",
           value:
-            `\`${query.slice(0, 100)}\``
+            `\`${query.slice(
+              0,
+              100
+            )}\``
         },
         {
           name: "Results",
@@ -847,20 +916,20 @@ async function logSourceSearch(
           `Today at ${getTodayTime()}`
       });
 
-  await logChannel.send({
-    embeds: [embed]
-  }).catch(
-    error => {
+  await logChannel
+    .send({
+      embeds: [embed]
+    })
+    .catch(error => {
       console.error(
         "❌ Could not send source search log:",
         error
       );
-    }
-  );
+    });
 }
 
 // =========================
-// Search Result UI
+// Search Buttons
 // =========================
 
 function createSearchButtons(
@@ -868,12 +937,10 @@ function createSearchButtons(
   page,
   total
 ) {
-
   const row =
     new ActionRowBuilder();
 
   row.addComponents(
-
     new ButtonBuilder()
       .setCustomId(
         `source_prev:${sessionId}`
@@ -906,23 +973,16 @@ function createSearchButtons(
 // Download Found File
 // =========================
 
-async function downloadFile(
-  file
-) {
-
+async function downloadFile(file) {
   try {
-
     if (!file.url) {
       return null;
     }
 
     const response =
-      await fetch(
-        file.url
-      );
+      await fetch(file.url);
 
     if (!response.ok) {
-
       console.error(
         `❌ Failed to download ${file.name}: HTTP ${response.status}`
       );
@@ -936,9 +996,7 @@ async function downloadFile(
     return Buffer.from(
       arrayBuffer
     );
-
   } catch (error) {
-
     console.error(
       "❌ File download error:",
       error
@@ -949,7 +1007,7 @@ async function downloadFile(
 }
 
 // =========================
-// Show Search Result
+// Show Private Search Result
 // =========================
 
 async function showSearchResult(
@@ -957,64 +1015,34 @@ async function showSearchResult(
   session,
   page
 ) {
-
   const result =
     session.results[page];
 
   if (!result) {
-
-    await interaction.reply({
-      content:
-        "❌ This search result no longer exists.",
-      ephemeral: true
-    });
+    if (
+      interaction.replied ||
+      interaction.deferred
+    ) {
+      await interaction.editReply({
+        content:
+          "❌ This search result no longer exists.",
+        embeds: [],
+        files: [],
+        components: []
+      });
+    } else {
+      await interaction.reply({
+        content:
+          "❌ This search result no longer exists.",
+        ephemeral: true
+      });
+    }
 
     return;
   }
 
   const total =
     session.results.length;
-
-  const embed =
-    new EmbedBuilder()
-      .setTitle(
-        "FILE"
-      )
-      .setDescription(
-        `**${result.name}**\n\n` +
-        `⬅️ **${page + 1}/${total}** ➡️`
-      )
-      .setColor(
-        0x808080
-      )
-      .addFields(
-        {
-          name: "Source",
-          value:
-            result.source ===
-            "forwarded"
-              ? "Forwarded message"
-              : "Message"
-        },
-        {
-          name: "Channel",
-          value:
-            `<#${result.channelId}>`
-        }
-      )
-      .setFooter({
-        text:
-          `Today at ${getTodayTime()}`
-      });
-
-  // =========================
-  // Download file
-  // =========================
-
-  const buffer =
-    await downloadFile(
-      result
-    );
 
   const buttons =
     createSearchButtons(
@@ -1023,91 +1051,102 @@ async function showSearchResult(
       total
     );
 
+  // =========================
+  // NO EMBED
+  // PRIVATE RESULT
+  // =========================
+
+  const content =
+    `📁 **${result.name}**\n` +
+    `📌 Source: <#${result.channelId}>\n\n` +
+    `⬅️ **${page + 1}/${total}** ➡️`;
+
+  // =========================
+  // Download
+  // =========================
+
+  const buffer =
+    await downloadFile(
+      result
+    );
+
   if (!buffer) {
+    const errorContent =
+      `${content}\n\n` +
+      `⚠️ I couldn't re-upload this file. The original attachment may no longer be available.`;
 
     if (
       interaction.replied ||
       interaction.deferred
     ) {
-
       await interaction.editReply({
         content:
-          `📁 **${result.name}**\n\n` +
-          `⬅️ ${page + 1}/${total} ➡️\n\n` +
-          "⚠️ I couldn't re-upload this file. The original attachment may no longer be available.",
+          errorContent,
         embeds: [],
+        files: [],
         components: [
           buttons
         ]
       });
-
     } else {
-
       await interaction.reply({
         content:
-          `📁 **${result.name}**\n\n` +
-          `⬅️ ${page + 1}/${total} ➡️\n\n` +
-          "⚠️ I couldn't re-upload this file. The original attachment may no longer be available.",
+          errorContent,
         components: [
           buttons
         ],
         ephemeral: true
       });
-
     }
 
     return;
   }
 
   // =========================
-  // Discord attachment
+  // Discord upload limit
   // =========================
 
-  const fileSize =
-    buffer.length;
-
-  // Discord upload limit safety
   const MAX_UPLOAD =
     20 * 1024 * 1024;
 
   if (
-    fileSize >
+    buffer.length >
     MAX_UPLOAD
   ) {
+    const errorContent =
+      `${content}\n\n` +
+      `⚠️ This file is too large for the bot to re-upload.`;
 
     if (
       interaction.replied ||
       interaction.deferred
     ) {
-
       await interaction.editReply({
         content:
-          `📁 **${result.name}**\n\n` +
-          `⬅️ ${page + 1}/${total} ➡️\n\n` +
-          "⚠️ This file is too large for the bot to re-upload.",
+          errorContent,
         embeds: [],
+        files: [],
         components: [
           buttons
         ]
       });
-
     } else {
-
       await interaction.reply({
         content:
-          `📁 **${result.name}**\n\n` +
-          `⬅️ ${page + 1}/${total} ➡️\n\n` +
-          "⚠️ This file is too large for the bot to re-upload.",
+          errorContent,
         components: [
           buttons
         ],
         ephemeral: true
       });
-
     }
 
     return;
   }
+
+  // =========================
+  // File Payload
+  // =========================
 
   const filePayload = {
     attachment:
@@ -1116,16 +1155,17 @@ async function showSearchResult(
       result.name
   };
 
+  // =========================
+  // Edit private reply
+  // =========================
+
   if (
     interaction.replied ||
     interaction.deferred
   ) {
-
     await interaction.editReply({
-      content: null,
-      embeds: [
-        embed
-      ],
+      content,
+      embeds: [],
       files: [
         filePayload
       ],
@@ -1133,13 +1173,9 @@ async function showSearchResult(
         buttons
       ]
     });
-
   } else {
-
     await interaction.reply({
-      embeds: [
-        embed
-      ],
+      content,
       files: [
         filePayload
       ],
@@ -1148,7 +1184,6 @@ async function showSearchResult(
       ],
       ephemeral: true
     });
-
   }
 }
 
@@ -1170,15 +1205,16 @@ const commands = [
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageNicknames.toString()
     )
-    .addIntegerOption(option =>
-      option
-        .setName("answer")
-        .setDescription(
-          "Secret answer from 1 to 10000."
-        )
-        .setRequired(true)
-        .setMinValue(1)
-        .setMaxValue(10000)
+    .addIntegerOption(
+      option =>
+        option
+          .setName("answer")
+          .setDescription(
+            "Secret answer from 1 to 10000."
+          )
+          .setRequired(true)
+          .setMinValue(1)
+          .setMaxValue(10000)
     ),
 
   // =========================
@@ -1193,21 +1229,23 @@ const commands = [
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageNicknames.toString()
     )
-    .addStringOption(option =>
-      option
-        .setName("description")
-        .setDescription(
-          "Embed description."
-        )
-        .setRequired(true)
+    .addStringOption(
+      option =>
+        option
+          .setName("description")
+          .setDescription(
+            "Embed description."
+          )
+          .setRequired(true)
     )
-    .addStringOption(option =>
-      option
-        .setName("title")
-        .setDescription(
-          "Embed title."
-        )
-        .setRequired(false)
+    .addStringOption(
+      option =>
+        option
+          .setName("title")
+          .setDescription(
+            "Embed title."
+          )
+          .setRequired(false)
     ),
 
   // =========================
@@ -1218,24 +1256,6 @@ const commands = [
     .setName("serverlist")
     .setDescription(
       "Show all servers where the bot is installed. (Owner only)"
-    ),
-
-  // =========================
-  // /leave
-  // =========================
-
-  new SlashCommandBuilder()
-    .setName("leave")
-    .setDescription(
-      "Make the bot leave a server. (Owner only)"
-    )
-    .addStringOption(option =>
-      option
-        .setName("server-id")
-        .setDescription(
-          "The ID of the server to leave."
-        )
-        .setRequired(true)
     ),
 
   // =========================
@@ -1263,20 +1283,21 @@ const commands = [
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageNicknames.toString()
     )
-    .addChannelOption(option =>
-      option
-        .setName("channel")
-        .setDescription(
-          "Channel to scan."
-        )
-        .setRequired(true)
-        .addChannelTypes(
-          ChannelType.GuildText,
-          ChannelType.GuildAnnouncement,
-          ChannelType.PublicThread,
-          ChannelType.PrivateThread,
-          ChannelType.AnnouncementThread
-        )
+    .addChannelOption(
+      option =>
+        option
+          .setName("channel")
+          .setDescription(
+            "Channel to scan."
+          )
+          .setRequired(true)
+          .addChannelTypes(
+            ChannelType.GuildText,
+            ChannelType.GuildAnnouncement,
+            ChannelType.PublicThread,
+            ChannelType.PrivateThread,
+            ChannelType.AnnouncementThread
+          )
     ),
 
   // =========================
@@ -1291,17 +1312,18 @@ const commands = [
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageNicknames.toString()
     )
-    .addChannelOption(option =>
-      option
-        .setName("channel")
-        .setDescription(
-          "Channel where search logs will be sent."
-        )
-        .setRequired(true)
-        .addChannelTypes(
-          ChannelType.GuildText,
-          ChannelType.GuildAnnouncement
-        )
+    .addChannelOption(
+      option =>
+        option
+          .setName("channel")
+          .setDescription(
+            "Channel where search logs will be sent."
+          )
+          .setRequired(true)
+          .addChannelTypes(
+            ChannelType.GuildText,
+            ChannelType.GuildAnnouncement
+          )
     )
 
 ].map(command =>
@@ -1313,18 +1335,17 @@ const commands = [
 // =========================
 
 async function registerCommands() {
-
   const rest =
     new REST({
       version: "10"
     }).setToken(TOKEN);
 
   try {
-
     console.log(
       "🧹 Cleaning old slash commands..."
     );
 
+    // Remove old global commands
     await rest.put(
       Routes.applicationCommands(
         CLIENT_ID
@@ -1338,6 +1359,7 @@ async function registerCommands() {
       "🗑️ Old global commands removed."
     );
 
+    // Remove old guild commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -1352,6 +1374,7 @@ async function registerCommands() {
       "🗑️ Old guild commands removed."
     );
 
+    // Register current commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -1366,8 +1389,11 @@ async function registerCommands() {
       "✅ Registered current slash commands."
     );
 
-  } catch (error) {
+    console.log(
+      "❌ /leave is removed."
+    );
 
+  } catch (error) {
     console.error(
       "❌ Command registration error:",
       error
@@ -1382,7 +1408,6 @@ async function registerCommands() {
 client.once(
   "ready",
   async () => {
-
     console.log(
       `✅ Logged in as ${client.user.tag}`
     );
@@ -1418,7 +1443,6 @@ client.once(
 client.on(
   "interactionCreate",
   async interaction => {
-
     try {
 
       // =========================
@@ -1427,19 +1451,13 @@ client.on(
 
       if (
         interaction.isChatInputCommand() &&
-        (
-          interaction.commandName ===
-            "serverlist" ||
-          interaction.commandName ===
-            "leave"
-        )
+        interaction.commandName ===
+          "serverlist"
       ) {
-
         if (
           interaction.user.id !==
           OWNER_ID
         ) {
-
           await interaction.reply({
             content:
               "❌ Only the bot owner can use this command.",
@@ -1469,14 +1487,12 @@ client.on(
             "logs"
         )
       ) {
-
         if (
           !interaction.memberPermissions ||
           !interaction.memberPermissions.has(
             PermissionFlagsBits.ManageNicknames
           )
         ) {
-
           await interaction.reply({
             content:
               "❌ You need the **Manage Nicknames** permission to use this command.",
@@ -1505,7 +1521,6 @@ client.on(
         interaction.commandName ===
           "panel"
       ) {
-
         const panelEmbed =
           new EmbedBuilder()
             .setTitle(
@@ -1561,7 +1576,6 @@ client.on(
         interaction.commandName ===
           "scanchannel"
       ) {
-
         const channel =
           interaction.options.getChannel(
             "channel"
@@ -1572,7 +1586,6 @@ client.on(
           !channel.isTextBased() ||
           !channel.messages
         ) {
-
           await interaction.reply({
             content:
               "❌ That channel cannot be scanned.",
@@ -1591,7 +1604,6 @@ client.on(
         );
 
         try {
-
           const result =
             await scanChannel(
               channel
@@ -1611,7 +1623,6 @@ client.on(
           );
 
         } catch (error) {
-
           console.error(
             "❌ Channel scan error:",
             error
@@ -1635,7 +1646,6 @@ client.on(
         interaction.commandName ===
           "logs"
       ) {
-
         const channel =
           interaction.options.getChannel(
             "channel"
@@ -1645,7 +1655,6 @@ client.on(
           !channel ||
           !channel.isTextBased()
         ) {
-
           await interaction.reply({
             content:
               "❌ Please select a valid text channel.",
@@ -1678,7 +1687,6 @@ client.on(
         interaction.commandName ===
           "serverlist"
       ) {
-
         await interaction.deferReply({
           ephemeral: true
         });
@@ -1693,10 +1701,8 @@ client.on(
         if (
           guilds.length === 0
         ) {
-
           description +=
             "No servers found.";
-
         }
 
         for (
@@ -1704,7 +1710,6 @@ client.on(
           i < guilds.length;
           i++
         ) {
-
           const guild =
             guilds[i];
 
@@ -1712,7 +1717,6 @@ client.on(
             "Unavailable";
 
           try {
-
             const channel =
               guild.channels.cache.find(
                 channel =>
@@ -1727,24 +1731,19 @@ client.on(
               );
 
             if (channel) {
-
               const invite =
-                await channel.createInvite(
-                  {
-                    maxAge: 0,
-                    maxUses: 0,
-                    unique: false,
-                    reason:
-                      "Server list invite"
-                  }
-                );
+                await channel.createInvite({
+                  maxAge: 0,
+                  maxUses: 0,
+                  unique: false,
+                  reason:
+                    "Server list invite"
+                });
 
               inviteLink =
                 invite.url;
             }
-
           } catch {
-
             inviteLink =
               "Unavailable";
           }
@@ -1784,69 +1783,6 @@ client.on(
       }
 
       // =========================
-      // /leave
-      // =========================
-
-      if (
-        interaction.isChatInputCommand() &&
-        interaction.commandName ===
-          "leave"
-      ) {
-
-        const serverId =
-          interaction.options
-            .getString(
-              "server-id"
-            )
-            .trim();
-
-        const guild =
-          client.guilds.cache.get(
-            serverId
-          );
-
-        if (!guild) {
-
-          await interaction.reply({
-            content:
-              `❌ I am not in a server with ID \`${serverId}\`.`,
-            ephemeral: true
-          });
-
-          return;
-        }
-
-        const serverName =
-          guild.name;
-
-        try {
-
-          await guild.leave();
-
-          await interaction.reply({
-            content:
-              `✅ Successfully left **${serverName}** (\`${serverId}\`).`,
-            ephemeral: true
-          });
-
-        } catch (error) {
-
-          console.error(
-            "❌ Failed to leave server:",
-            error
-          );
-
-          await interaction.reply({
-            content:
-              `❌ Failed to leave **${serverName}**.`,
-            ephemeral: true
-          });
-        }
-
-        return;
-      }
-
-      // =========================
       // /guessnumber
       // =========================
 
@@ -1855,7 +1791,6 @@ client.on(
         interaction.commandName ===
           "guessnumber"
       ) {
-
         const answer =
           interaction.options.getInteger(
             "answer"
@@ -1866,7 +1801,6 @@ client.on(
             interaction.channelId
           )
         ) {
-
           await interaction.reply({
             content:
               "⚠️ There is already a Guess Game in this channel.",
@@ -1905,15 +1839,12 @@ client.on(
             );
 
         try {
-
           await interaction.user.send({
             embeds: [
               answerEmbed
             ]
           });
-
         } catch {
-
           games.delete(
             interaction.channelId
           );
@@ -1991,7 +1922,6 @@ client.on(
         interaction.commandName ===
           "embed"
       ) {
-
         const description =
           interaction.options.getString(
             "description"
@@ -2045,7 +1975,6 @@ client.on(
         interaction.customId ===
           "source_search"
       ) {
-
         const modal =
           new ModalBuilder()
             .setCustomId(
@@ -2102,7 +2031,6 @@ client.on(
         interaction.customId ===
           "source_search_modal"
       ) {
-
         const query =
           interaction.fields
             .getTextInputValue(
@@ -2111,7 +2039,6 @@ client.on(
             .trim();
 
         if (!query) {
-
           await interaction.reply({
             content:
               "❌ Please enter a source/file name.",
@@ -2128,7 +2055,7 @@ client.on(
           );
 
         // =========================
-        // Log search
+        // Log Search
         // =========================
 
         await logSourceSearch(
@@ -2138,10 +2065,8 @@ client.on(
         );
 
         if (
-          results.length ===
-          0
+          results.length === 0
         ) {
-
           await interaction.reply({
             content:
               `❌ No file found for \`${query}\`.`,
@@ -2150,6 +2075,10 @@ client.on(
 
           return;
         }
+
+        // =========================
+        // Search Session
+        // =========================
 
         const sessionId =
           `${interaction.user.id}-${Date.now()}-${Math.random()
@@ -2184,13 +2113,11 @@ client.on(
             oldSession
           ] of searchSessions
         ) {
-
           if (
             Date.now() -
               oldSession.createdAt >
             10 * 60 * 1000
           ) {
-
             searchSessions.delete(
               id
             );
@@ -2220,7 +2147,6 @@ client.on(
           "source_prev:"
         )
       ) {
-
         const sessionId =
           interaction.customId.split(
             ":"
@@ -2232,7 +2158,6 @@ client.on(
           );
 
         if (!session) {
-
           await interaction.reply({
             content:
               "❌ This search session expired. Search again.",
@@ -2246,7 +2171,6 @@ client.on(
           interaction.user.id !==
           session.userId
         ) {
-
           await interaction.reply({
             content:
               "❌ This search belongs to another user.",
@@ -2283,7 +2207,6 @@ client.on(
           "source_next:"
         )
       ) {
-
         const sessionId =
           interaction.customId.split(
             ":"
@@ -2295,7 +2218,6 @@ client.on(
           );
 
         if (!session) {
-
           await interaction.reply({
             content:
               "❌ This search session expired. Search again.",
@@ -2309,7 +2231,6 @@ client.on(
           interaction.user.id !==
           session.userId
         ) {
-
           await interaction.reply({
             content:
               "❌ This search belongs to another user.",
@@ -2345,14 +2266,12 @@ client.on(
         interaction.customId ===
           "guess_start"
       ) {
-
         const game =
           games.get(
             interaction.channelId
           );
 
         if (!game) {
-
           await interaction.reply({
             content:
               "❌ There is no active guessing game.",
@@ -2376,7 +2295,6 @@ client.on(
           !isHost &&
           !canManageNicknames
         ) {
-
           await interaction.reply({
             content:
               "❌ Only Host or Manage Nicknames can start this Guess Game.",
@@ -2387,7 +2305,6 @@ client.on(
         }
 
         if (game.active) {
-
           await interaction.reply({
             content:
               "⚠️ The Guess Game has already started.",
@@ -2404,9 +2321,7 @@ client.on(
           interaction.channel &&
           interaction.channel.permissionOverwrites
         ) {
-
           try {
-
             await interaction.channel
               .permissionOverwrites.edit(
                 interaction.guild.roles.everyone,
@@ -2414,9 +2329,7 @@ client.on(
                   SendMessages: true
                 }
               );
-
           } catch (error) {
-
             console.error(
               "⚠️ Could not unlock channel:",
               error
@@ -2446,7 +2359,6 @@ client.on(
       }
 
     } catch (error) {
-
       console.error(
         "❌ Interaction error:",
         error
@@ -2456,13 +2368,11 @@ client.on(
         !interaction.replied &&
         !interaction.deferred
       ) {
-
         await interaction.reply({
           content:
             "❌ An error occurred.",
           ephemeral: true
         }).catch(() => {});
-
       }
     }
   }
@@ -2475,7 +2385,6 @@ client.on(
 client.on(
   "messageCreate",
   async message => {
-
     try {
 
       // Ignore bots
@@ -2496,7 +2405,6 @@ client.on(
         game &&
         game.active
       ) {
-
         const guess =
           Number(
             message.content.trim()
@@ -2507,12 +2415,10 @@ client.on(
           guess >= 1 &&
           guess <= 10000
         ) {
-
           if (
             guess ===
             game.answer
           ) {
-
             const winEmbed =
               new EmbedBuilder()
                 .setDescription(
@@ -2534,9 +2440,7 @@ client.on(
               message.guild &&
               message.channel.permissionOverwrites
             ) {
-
               try {
-
                 await message.channel
                   .permissionOverwrites.edit(
                     message.guild.roles.everyone,
@@ -2544,9 +2448,7 @@ client.on(
                       SendMessages: false
                     }
                   );
-
               } catch (error) {
-
                 console.error(
                   "⚠️ Could not lock channel:",
                   error
@@ -2595,9 +2497,7 @@ client.on(
         message.reference &&
         message.reference.messageId
       ) {
-
         try {
-
           referencedMessage =
             await message.channel.messages.fetch(
               message.reference.messageId
@@ -2608,12 +2508,9 @@ client.on(
             referencedMessage.author.id ===
               client.user.id
           ) {
-
             repliedToBot = true;
           }
-
         } catch (error) {
-
           console.log(
             "⚠️ Could not fetch replied message:",
             error.message
@@ -2661,7 +2558,6 @@ client.on(
         message.content || "";
 
       if (client.user) {
-
         prompt =
           prompt.replace(
             new RegExp(
@@ -2692,7 +2588,6 @@ client.on(
         repliedToBot &&
         referencedMessage
       ) {
-
         const previousBotMessage =
           referencedMessage.content ||
           "";
@@ -2708,7 +2603,6 @@ Understand the user's new message in the context of your previous message.`;
       }
 
       if (!prompt) {
-
         prompt =
           "Someone pinged you without asking a question. Give a short sarcastic reaction.";
       }
@@ -2743,7 +2637,6 @@ Understand the user's new message in the context of your previous message.`;
         !result.success ||
         !result.text
       ) {
-
         await message.reply({
           content:
             "💀 Both AI providers failed right now. Try again later.",
@@ -2788,7 +2681,6 @@ Understand the user's new message in the context of your previous message.`;
       );
 
     } catch (error) {
-
       console.error(
         "❌ Message handler error:",
         error
@@ -2804,24 +2696,20 @@ Understand the user's new message in the context of your previous message.`;
 client.on(
   "error",
   error => {
-
     console.error(
       "❌ Discord client error:",
       error
     );
-
   }
 );
 
 client.on(
   "warn",
   warning => {
-
     console.warn(
       "⚠️ Discord warning:",
       warning
     );
-
   }
 );
 
@@ -2832,24 +2720,20 @@ client.on(
 process.on(
   "unhandledRejection",
   error => {
-
     console.error(
       "❌ Unhandled promise rejection:",
       error
     );
-
   }
 );
 
 process.on(
   "uncaughtException",
   error => {
-
     console.error(
       "❌ Uncaught exception:",
       error
     );
-
   }
 );
 
@@ -2865,7 +2749,6 @@ client.login(
   TOKEN
 ).catch(
   error => {
-
     console.error(
       "❌ Discord login failed:",
       error
