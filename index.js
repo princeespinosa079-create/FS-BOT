@@ -17,6 +17,8 @@ const {
 
 const OpenAI = require("openai");
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 
 // =========================
 // Environment Variables
@@ -93,14 +95,22 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "online",
-    bot: client.user ? client.user.tag : "connecting",
-    groq: groq ? "enabled" : "disabled",
-    openrouter: openrouter ? "enabled" : "disabled"
+    bot: client.user
+      ? client.user.tag
+      : "connecting",
+    groq: groq
+      ? "enabled"
+      : "disabled",
+    openrouter: openrouter
+      ? "enabled"
+      : "disabled"
   });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🌐 Web server running on port ${PORT}`);
+  console.log(
+    `🌐 Web server running on port ${PORT}`
+  );
 });
 
 // =========================
@@ -126,6 +136,7 @@ const games = new Map();
 // =========================
 
 const aiCooldowns = new Map();
+
 const AI_COOLDOWN = 2000;
 
 // =========================
@@ -133,6 +144,7 @@ const AI_COOLDOWN = 2000;
 // =========================
 
 const conversations = new Map();
+
 const MAX_HISTORY = 10;
 
 function getConversation(key) {
@@ -143,15 +155,23 @@ function getConversation(key) {
   return conversations.get(key);
 }
 
-function addConversationMessage(key, role, content) {
-  const history = getConversation(key);
+function addConversationMessage(
+  key,
+  role,
+  content
+) {
+  const history =
+    getConversation(key);
 
   history.push({
     role,
     content
   });
 
-  while (history.length > MAX_HISTORY) {
+  while (
+    history.length >
+    MAX_HISTORY
+  ) {
     history.shift();
   }
 }
@@ -160,23 +180,225 @@ function addConversationMessage(key, role, content) {
 // SOURCE FINDER
 // =========================
 
+/*
+channelId -> {
+  channelName,
+  scannedAt,
+  files: []
+}
+*/
+
 const sourceIndexes = new Map();
+
+// guildId -> logs channel ID
 const logChannels = new Map();
+
+// Search sessions
 const searchSessions = new Map();
 
 const MAX_SEARCH_RESULTS = 200;
+
+// =========================
+// Persistent Storage
+// =========================
+
+const SOURCE_INDEX_FILE =
+  path.join(
+    __dirname,
+    "source-index.json"
+  );
+
+const LOG_CHANNELS_FILE =
+  path.join(
+    __dirname,
+    "log-channels.json"
+  );
+
+// =========================
+// Load Persistent Library
+// =========================
+
+function loadPersistentData() {
+  try {
+    if (
+      fs.existsSync(
+        SOURCE_INDEX_FILE
+      )
+    ) {
+      const raw =
+        fs.readFileSync(
+          SOURCE_INDEX_FILE,
+          "utf8"
+        );
+
+      const data =
+        JSON.parse(raw);
+
+      sourceIndexes.clear();
+
+      for (
+        const [channelId, index]
+        of Object.entries(data)
+      ) {
+        if (
+          index &&
+          Array.isArray(index.files)
+        ) {
+          sourceIndexes.set(
+            channelId,
+            index
+          );
+        }
+      }
+
+      console.log(
+        `📚 Loaded ${sourceIndexes.size} scanned channel(s).`
+      );
+    }
+  } catch (error) {
+    console.error(
+      "❌ Failed to load source library:",
+      error
+    );
+  }
+
+  try {
+    if (
+      fs.existsSync(
+        LOG_CHANNELS_FILE
+      )
+    ) {
+      const raw =
+        fs.readFileSync(
+          LOG_CHANNELS_FILE,
+          "utf8"
+        );
+
+      const data =
+        JSON.parse(raw);
+
+      logChannels.clear();
+
+      for (
+        const [guildId, channelId]
+        of Object.entries(data)
+      ) {
+        logChannels.set(
+          guildId,
+          channelId
+        );
+      }
+
+      console.log(
+        `📋 Loaded ${logChannels.size} log channel setting(s).`
+      );
+    }
+  } catch (error) {
+    console.error(
+      "❌ Failed to load log channels:",
+      error
+    );
+  }
+}
+
+// =========================
+// Save Persistent Library
+// =========================
+
+function saveSourceLibrary() {
+  try {
+    const data = {};
+
+    for (
+      const [channelId, index]
+      of sourceIndexes.entries()
+    ) {
+      data[channelId] = index;
+    }
+
+    const tempFile =
+      SOURCE_INDEX_FILE +
+      ".tmp";
+
+    fs.writeFileSync(
+      tempFile,
+      JSON.stringify(
+        data,
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    fs.renameSync(
+      tempFile,
+      SOURCE_INDEX_FILE
+    );
+
+  } catch (error) {
+    console.error(
+      "❌ Failed to save source library:",
+      error
+    );
+  }
+}
+
+// =========================
+// Save Log Channels
+// =========================
+
+function saveLogChannels() {
+  try {
+    const data = {};
+
+    for (
+      const [guildId, channelId]
+      of logChannels.entries()
+    ) {
+      data[guildId] = channelId;
+    }
+
+    const tempFile =
+      LOG_CHANNELS_FILE +
+      ".tmp";
+
+    fs.writeFileSync(
+      tempFile,
+      JSON.stringify(
+        data,
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    fs.renameSync(
+      tempFile,
+      LOG_CHANNELS_FILE
+    );
+
+  } catch (error) {
+    console.error(
+      "❌ Failed to save log channels:",
+      error
+    );
+  }
+}
 
 // =========================
 // Time
 // =========================
 
 function getTodayTime() {
-  return new Date().toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Asia/Manila"
-  });
+  return new Date().toLocaleTimeString(
+    "en-US",
+    {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "Asia/Manila"
+    }
+  );
 }
 
 // =========================
@@ -202,7 +424,7 @@ CONVERSATION CONTEXT:
 If the user replies to one of your previous messages, understand what your previous message meant.
 
 STYLE:
-- You may use casual shortcuts such as "tf", "stfu", "bro", "fr", "nah", "bruh", when appropriate.
+- You may use casual shortcuts such as "bro", "fr", "nah", "bruh", when appropriate.
 - Use emojis such as 🙄, 💀, 🙏, 😭, 🤦, 💔, 🤨.
 - Do not overuse them.
 - Keep the personality playful rather than genuinely abusive.
@@ -254,17 +476,23 @@ async function requestAI(
 // Ask AI
 // =========================
 
-async function askAI(prompt, history = []) {
+async function askAI(
+  prompt,
+  history = []
+) {
   if (groq) {
     try {
-      console.log(`⚡ Asking Groq (${GROQ_MODEL})...`);
-
-      const response = await requestAI(
-        groq,
-        GROQ_MODEL,
-        prompt,
-        history
+      console.log(
+        `⚡ Asking Groq (${GROQ_MODEL})...`
       );
+
+      const response =
+        await requestAI(
+          groq,
+          GROQ_MODEL,
+          prompt,
+          history
+        );
 
       const text =
         response?.choices?.[0]?.message?.content?.trim();
@@ -279,8 +507,6 @@ async function askAI(prompt, history = []) {
               : text
         };
       }
-
-      console.warn("⚠️ Groq returned an empty response.");
     } catch (error) {
       console.error(
         "❌ Groq error:",
@@ -288,7 +514,9 @@ async function askAI(prompt, history = []) {
         error?.message || error
       );
 
-      console.log("🔄 Trying OpenRouter...");
+      console.log(
+        "🔄 Trying OpenRouter..."
+      );
     }
   }
 
@@ -298,12 +526,13 @@ async function askAI(prompt, history = []) {
         `🌐 Asking OpenRouter (${OPENROUTER_MODEL})...`
       );
 
-      const response = await requestAI(
-        openrouter,
-        OPENROUTER_MODEL,
-        prompt,
-        history
-      );
+      const response =
+        await requestAI(
+          openrouter,
+          OPENROUTER_MODEL,
+          prompt,
+          history
+        );
 
       const text =
         response?.choices?.[0]?.message?.content?.trim();
@@ -318,10 +547,6 @@ async function askAI(prompt, history = []) {
               : text
         };
       }
-
-      console.warn(
-        "⚠️ OpenRouter returned an empty response."
-      );
     } catch (error) {
       console.error(
         "❌ OpenRouter error:",
@@ -338,24 +563,81 @@ async function askAI(prompt, history = []) {
   };
 }
 
-// ======================================================
+// =========================
 // SOURCE FINDER HELPERS
-// ======================================================
+// =========================
 
 function normalizeFilename(name) {
   return String(name || "")
     .toLowerCase()
-    .replace(/\.[^/.]+$/, "")
-    .replace(/[_-]+/g, " ")
-    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\.[^.]+$/, "")
+    .replace(/[_\-]+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function getSearchTokens(text) {
-  return normalizeFilename(text)
-    .split(/\s+/)
-    .filter(Boolean);
+// =========================
+// LUA FILTER
+// =========================
+
+function shouldIgnoreFile(name) {
+  const filename =
+    String(name || "")
+      .trim()
+      .toLowerCase();
+
+  return filename.endsWith(".lua");
+}
+
+// =========================
+// Duplicate Filename Check
+// =========================
+
+function filenameAlreadyIndexed(
+  filename,
+  exceptChannelId = null
+) {
+  const normalized =
+    normalizeFilename(
+      filename
+    );
+
+  for (
+    const [
+      channelId,
+      index
+    ] of sourceIndexes.entries()
+  ) {
+    if (
+      exceptChannelId &&
+      channelId ===
+        exceptChannelId
+    ) {
+      continue;
+    }
+
+    if (
+      !index ||
+      !Array.isArray(index.files)
+    ) {
+      continue;
+    }
+
+    for (
+      const file of index.files
+    ) {
+      if (
+        normalizeFilename(
+          file.name
+        ) === normalized
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 // =========================
@@ -368,8 +650,18 @@ function collectAttachmentsFromMessage(
 ) {
   if (message.attachments) {
     for (
-      const attachment of message.attachments.values()
+      const attachment of
+      message.attachments.values()
     ) {
+      if (
+        shouldIgnoreFile(
+          attachment.name ||
+          attachment.filename
+        )
+      ) {
+        continue;
+      }
+
       results.push({
         id: attachment.id,
         name:
@@ -377,10 +669,14 @@ function collectAttachmentsFromMessage(
           attachment.filename ||
           "file",
         url: attachment.url,
-        size: attachment.size || 0,
-        messageId: message.id,
-        channelId: message.channelId,
-        createdTimestamp: message.createdTimestamp,
+        size:
+          attachment.size || 0,
+        messageId:
+          message.id,
+        channelId:
+          message.channelId,
+        createdTimestamp:
+          message.createdTimestamp,
         source: "message"
       });
     }
@@ -388,51 +684,96 @@ function collectAttachmentsFromMessage(
 
   if (
     message.messageSnapshots &&
-    typeof message.messageSnapshots.values === "function"
+    typeof message.messageSnapshots.values ===
+      "function"
   ) {
     for (
-      const snapshot of message.messageSnapshots.values()
+      const snapshot of
+      message.messageSnapshots.values()
     ) {
-      if (!snapshot) continue;
+      if (!snapshot) {
+        continue;
+      }
 
       const snapshotAttachments =
         snapshot.attachments;
 
       if (
         snapshotAttachments &&
-        typeof snapshotAttachments.values === "function"
+        typeof snapshotAttachments.values ===
+          "function"
       ) {
         for (
-          const attachment of snapshotAttachments.values()
+          const attachment of
+          snapshotAttachments.values()
         ) {
+          if (
+            shouldIgnoreFile(
+              attachment.name ||
+              attachment.filename
+            )
+          ) {
+            continue;
+          }
+
           results.push({
-            id: `forwarded-${attachment.id}`,
+            id:
+              `forwarded-${attachment.id}`,
             name:
               attachment.name ||
               attachment.filename ||
               "file",
-            url: attachment.url,
-            size: attachment.size || 0,
-            messageId: message.id,
-            channelId: message.channelId,
-            createdTimestamp: message.createdTimestamp,
-            source: "forwarded"
+            url:
+              attachment.url,
+            size:
+              attachment.size || 0,
+            messageId:
+              message.id,
+            channelId:
+              message.channelId,
+            createdTimestamp:
+              message.createdTimestamp,
+            source:
+              "forwarded"
           });
         }
-      } else if (Array.isArray(snapshotAttachments)) {
-        for (const attachment of snapshotAttachments) {
+      } else if (
+        Array.isArray(
+          snapshotAttachments
+        )
+      ) {
+        for (
+          const attachment of
+          snapshotAttachments
+        ) {
+          if (
+            shouldIgnoreFile(
+              attachment.name ||
+              attachment.filename
+            )
+          ) {
+            continue;
+          }
+
           results.push({
-            id: `forwarded-${attachment.id}`,
+            id:
+              `forwarded-${attachment.id}`,
             name:
               attachment.name ||
               attachment.filename ||
               "file",
-            url: attachment.url,
-            size: attachment.size || 0,
-            messageId: message.id,
-            channelId: message.channelId,
-            createdTimestamp: message.createdTimestamp,
-            source: "forwarded"
+            url:
+              attachment.url,
+            size:
+              attachment.size || 0,
+            messageId:
+              message.id,
+            channelId:
+              message.channelId,
+            createdTimestamp:
+              message.createdTimestamp,
+            source:
+              "forwarded"
           });
         }
       }
@@ -444,11 +785,20 @@ function collectAttachmentsFromMessage(
 // Scan Channel
 // =========================
 
-async function scanChannel(channel) {
+async function scanChannel(
+  channel
+) {
+  const existingIndex =
+    sourceIndexes.get(
+      channel.id
+    );
+
   const files = [];
 
   let before = null;
   let totalMessages = 0;
+  let newFiles = 0;
+  let duplicateFiles = 0;
 
   while (true) {
     const options = {
@@ -456,90 +806,327 @@ async function scanChannel(channel) {
     };
 
     if (before) {
-      options.before = before;
+      options.before =
+        before;
     }
 
     const batch =
-      await channel.messages.fetch(options);
+      await channel.messages.fetch(
+        options
+      );
 
     if (!batch.size) {
       break;
     }
 
-    totalMessages += batch.size;
+    totalMessages +=
+      batch.size;
 
-    for (const message of batch.values()) {
+    for (
+      const message of batch.values()
+    ) {
       collectAttachmentsFromMessage(
         message,
         files
       );
     }
 
-    const oldestMessage = batch.last();
+    const oldestMessage =
+      batch.last();
 
     if (!oldestMessage) {
       break;
     }
 
-    before = oldestMessage.id;
+    before =
+      oldestMessage.id;
 
-    if (batch.size < 100) {
+    if (
+      batch.size < 100
+    ) {
       break;
     }
   }
 
-  const unique = new Map();
+  const uniqueThisScan =
+    new Map();
 
-  for (const file of files) {
-    const key = `${file.id}:${file.url}`;
+  for (
+    const file of files
+  ) {
+    const key =
+      normalizeFilename(
+        file.name
+      );
 
-    if (!unique.has(key)) {
-      unique.set(key, file);
+    if (!key) {
+      continue;
     }
+
+    if (
+      uniqueThisScan.has(key)
+    ) {
+      duplicateFiles++;
+      continue;
+    }
+
+    uniqueThisScan.set(
+      key,
+      file
+    );
   }
 
-  const sortedFiles = [
-    ...unique.values()
-  ].sort(
+  const previousFiles =
+    existingIndex &&
+    Array.isArray(
+      existingIndex.files
+    )
+      ? existingIndex.files
+      : [];
+
+  const previousByName =
+    new Map();
+
+  for (
+    const file of previousFiles
+  ) {
+    previousByName.set(
+      normalizeFilename(
+        file.name
+      ),
+      file
+    );
+  }
+
+  const finalFiles = [
+    ...previousFiles
+  ];
+
+  for (
+    const file of
+    uniqueThisScan.values()
+  ) {
+    const normalized =
+      normalizeFilename(
+        file.name
+      );
+
+    // Already in this channel
+    if (
+      previousByName.has(
+        normalized
+      )
+    ) {
+      duplicateFiles++;
+      continue;
+    }
+
+    // Already exists in another scanned channel
+    if (
+      filenameAlreadyIndexed(
+        file.name,
+        channel.id
+      )
+    ) {
+      duplicateFiles++;
+      continue;
+    }
+
+    finalFiles.push(file);
+    newFiles++;
+  }
+
+  finalFiles.sort(
     (a, b) =>
       (a.createdTimestamp || 0) -
       (b.createdTimestamp || 0)
   );
 
-  sourceIndexes.set(channel.id, {
-    channelName: channel.name,
-    scannedAt: Date.now(),
-    files: sortedFiles
-  });
+  sourceIndexes.set(
+    channel.id,
+    {
+      channelName:
+        channel.name,
+      scannedAt:
+        Date.now(),
+      files:
+        finalFiles
+    }
+  );
+
+  saveSourceLibrary();
 
   return {
     totalMessages,
-    totalFiles: sortedFiles.length
+    totalFiles:
+      finalFiles.length,
+    newFiles,
+    duplicateFiles
   };
 }
 
-// ======================================================
-// SMART SOURCE SEARCH
-// ======================================================
+// =========================
+// Search Scoring
+// =========================
 
-function searchSources(guildId, query) {
-  const normalizedQuery =
-    normalizeFilename(query);
+function scoreSearch(
+  filename,
+  query
+) {
+  const file =
+    normalizeFilename(
+      filename
+    );
 
-  const queryTokens =
-    getSearchTokens(query);
+  const search =
+    normalizeFilename(
+      query
+    );
 
-  const exactResults = [];
-  const strongResults = [];
-  const fallbackResults = [];
+  if (!file || !search) {
+    return 0;
+  }
+
+  // Exact match
+  if (file === search) {
+    return 1000;
+  }
+
+  // Full query contained
+  if (
+    file.includes(search)
+  ) {
+    return 900;
+  }
+
+  const queryWords =
+    search
+      .split(" ")
+      .filter(Boolean);
+
+  const fileWords =
+    file
+      .split(" ")
+      .filter(Boolean);
+
+  let score = 0;
 
   for (
-    const [channelId, index] of sourceIndexes.entries()
+    const queryWord of queryWords
   ) {
-    if (!index) continue;
+    if (
+      fileWords.includes(
+        queryWord
+      )
+    ) {
+      score += 150;
+      continue;
+    }
+
+    if (
+      fileWords.some(
+        word =>
+          word.includes(
+            queryWord
+          ) ||
+          queryWord.includes(
+            word
+          )
+      )
+    ) {
+      score += 90;
+      continue;
+    }
+
+    // Prefix matching
+    if (
+      fileWords.some(
+        word =>
+          word.startsWith(
+            queryWord.slice(
+              0,
+              Math.max(
+                3,
+                Math.floor(
+                  queryWord.length *
+                    0.6
+                )
+              )
+            )
+          )
+      )
+    ) {
+      score += 50;
+    }
+  }
+
+  // Character overlap fallback
+  if (
+    score === 0
+  ) {
+    const compactQuery =
+      search.replace(
+        /\s/g,
+        ""
+      );
+
+    const compactFile =
+      file.replace(
+        /\s/g,
+        ""
+      );
+
+    let matched = 0;
+
+    for (
+      const char of compactQuery
+    ) {
+      if (
+        compactFile.includes(
+          char
+        )
+      ) {
+        matched++;
+      }
+    }
+
+    if (
+      compactQuery.length
+    ) {
+      score =
+        (matched /
+          compactQuery.length) *
+        30;
+    }
+  }
+
+  return score;
+}
+
+// =========================
+// Search Sources
+// =========================
+
+function searchSources(
+  guildId,
+  query
+) {
+  const results = [];
+
+  for (
+    const [
+      channelId,
+      index
+    ] of sourceIndexes.entries()
+  ) {
+    if (!index) {
+      continue;
+    }
 
     const channel =
-      client.channels.cache.get(channelId);
+      client.channels.cache.get(
+        channelId
+      );
 
     if (
       !channel ||
@@ -548,133 +1135,131 @@ function searchSources(guildId, query) {
       continue;
     }
 
-    for (const file of index.files) {
-      const normalizedFile =
-        normalizeFilename(file.name);
-
-      const fileTokens =
-        getSearchTokens(file.name);
-
-      // Exact normalized filename
-      if (normalizedFile === normalizedQuery) {
-        exactResults.push({
-          ...file,
-          channelName: index.channelName,
-          _score: 10000
-        });
-
-        continue;
-      }
-
-      // Entire query appears in filename
+    for (
+      const file of index.files
+    ) {
       if (
-        normalizedFile.includes(
-          normalizedQuery
+        shouldIgnoreFile(
+          file.name
         )
       ) {
-        strongResults.push({
-          ...file,
-          channelName: index.channelName,
-          _score: 5000
-        });
-
         continue;
       }
 
-      // ==============================================
-      // Token-based smart matching
-      //
-      // Example:
-      // Search: "Anti Desync"
-      // File:   "Work Desync.txt"
-      //
-      // "desync" matches, so it can be returned.
-      // ==============================================
+      const score =
+        scoreSearch(
+          file.name,
+          query
+        );
 
-      let matchedTokens = 0;
-      let score = 0;
-
-      for (const queryToken of queryTokens) {
-        if (!queryToken) continue;
-
-        let bestTokenScore = 0;
-
-        for (const fileToken of fileTokens) {
-          if (
-            fileToken === queryToken
-          ) {
-            bestTokenScore = Math.max(
-              bestTokenScore,
-              100
-            );
-          } else if (
-            fileToken.includes(queryToken) ||
-            queryToken.includes(fileToken)
-          ) {
-            bestTokenScore = Math.max(
-              bestTokenScore,
-              60
-            );
-          }
-        }
-
-        if (bestTokenScore > 0) {
-          matchedTokens++;
-          score += bestTokenScore;
-        }
-      }
-
-      if (matchedTokens > 0) {
-        // More matched words = better result
-        score += matchedTokens * 100;
-
-        // Prefer filenames with fewer unrelated words
-        score -= Math.max(
-          0,
-          fileTokens.length - matchedTokens
-        ) * 2;
-
-        fallbackResults.push({
+      if (score > 0) {
+        results.push({
           ...file,
-          channelName: index.channelName,
-          _score: score
+          channelName:
+            index.channelName,
+          searchScore:
+            score
         });
       }
     }
   }
 
-  // Exact matches first
-  if (exactResults.length > 0) {
-    return exactResults
-      .slice(0, MAX_SEARCH_RESULTS)
-      .map(removeSearchScore);
-  }
+  results.sort(
+    (a, b) => {
+      if (
+        b.searchScore !==
+        a.searchScore
+      ) {
+        return (
+          b.searchScore -
+          a.searchScore
+        );
+      }
 
-  // Strong full-name matches second
-  if (strongResults.length > 0) {
-    return strongResults
-      .sort((a, b) => b._score - a._score)
-      .slice(0, MAX_SEARCH_RESULTS)
-      .map(removeSearchScore);
-  }
-
-  // Smart token fallback
-  fallbackResults.sort(
-    (a, b) => b._score - a._score
+      return (
+        (a.createdTimestamp || 0) -
+        (b.createdTimestamp || 0)
+      );
+    }
   );
 
-  return fallbackResults
-    .slice(0, MAX_SEARCH_RESULTS)
-    .map(removeSearchScore);
+  return results.slice(
+    0,
+    MAX_SEARCH_RESULTS
+  );
 }
 
-function removeSearchScore(file) {
-  const {
-    _score,
-    ...cleanFile
-  } = file;
+// =========================
+// Remove File By Name
+// =========================
 
-  return cleanFile;
+function removeFileByName(
+  guildId,
+  filename
+) {
+  const target =
+    normalizeFilename(
+      filename
+    );
+
+  let removed = 0;
+  const removedFiles = [];
+
+  for (
+    const [
+      channelId,
+      index
+    ] of sourceIndexes.entries()
+  ) {
+    const channel =
+      client.channels.cache.get(
+        channelId
+      );
+
+    if (
+      !channel ||
+      channel.guildId !== guildId
+    ) {
+      continue;
+    }
+
+    if (
+      !index ||
+      !Array.isArray(index.files)
+    ) {
+      continue;
+    }
+
+    const kept = [];
+
+    for (
+      const file of index.files
+    ) {
+      if (
+        normalizeFilename(
+          file.name
+        ) === target
+      ) {
+        removed++;
+        removedFiles.push(
+          file.name
+        );
+      } else {
+        kept.push(file);
+      }
+    }
+
+    index.files = kept;
+  }
+
+  if (removed > 0) {
+    saveSourceLibrary();
+  }
+
+  return {
+    removed,
+    removedFiles
+  };
 }
 
 // =========================
@@ -711,12 +1296,17 @@ async function logSourceSearch(
     return;
   }
 
-  const firstFile = results[0];
+  const firstFile =
+    results[0];
 
   const embed =
     new EmbedBuilder()
-      .setTitle("SOURCE SEARCH LOG 🔎")
-      .setColor(0x808080)
+      .setTitle(
+        "SOURCE SEARCH LOG 🔎"
+      )
+      .setColor(
+        0x808080
+      )
       .addFields(
         {
           name: "User",
@@ -746,21 +1336,19 @@ async function logSourceSearch(
           `Today at ${getTodayTime()}`
       });
 
-  await logChannel
-    .send({
-      embeds: [embed]
-    })
-    .catch(error => {
-      console.error(
-        "❌ Could not send source search log:",
-        error
-      );
-    });
+  await logChannel.send({
+    embeds: [embed]
+  }).catch(error => {
+    console.error(
+      "❌ Could not send source search log:",
+      error
+    );
+  });
 }
 
-// ======================================================
-// SEARCH BUTTONS
-// ======================================================
+// =========================
+// Search Buttons
+// =========================
 
 function createSearchButtons(
   sessionId,
@@ -811,18 +1399,157 @@ function createSearchButtons(
   return row;
 }
 
-// ======================================================
-// DOWNLOAD FOUND FILE
-// ======================================================
+// =========================
+// File Cache
+// =========================
 
-async function downloadFile(file) {
+const fileCache = new Map();
+
+const MAX_CACHE_SIZE = 25;
+
+function cacheFile(
+  fileId,
+  buffer
+) {
+  if (!buffer) {
+    return;
+  }
+
+  if (
+    fileCache.has(fileId)
+  ) {
+    fileCache.delete(fileId);
+  }
+
+  fileCache.set(
+    fileId,
+    buffer
+  );
+
+  while (
+    fileCache.size >
+    MAX_CACHE_SIZE
+  ) {
+    const oldest =
+      fileCache.keys().next().value;
+
+    fileCache.delete(
+      oldest
+    );
+  }
+}
+
+function getCachedFile(
+  fileId
+) {
+  return fileCache.get(
+    fileId
+  );
+}
+
+// =========================
+// Resolve Fresh Attachment
+// =========================
+
+async function refreshFileURL(
+  file
+) {
   try {
-    if (!file.url) {
+    const channel =
+      client.channels.cache.get(
+        file.channelId
+      );
+
+    if (
+      !channel ||
+      !channel.messages
+    ) {
+      return file.url;
+    }
+
+    const message =
+      await channel.messages.fetch(
+        file.messageId
+      );
+
+    if (!message) {
+      return file.url;
+    }
+
+    if (
+      message.attachments
+    ) {
+      const attachment =
+        message.attachments.find(
+          item =>
+            item.id ===
+              String(
+                file.id
+              ) ||
+            item.name ===
+              file.name
+        );
+
+      if (attachment) {
+        file.url =
+          attachment.url;
+
+        file.size =
+          attachment.size ||
+          file.size;
+
+        return attachment.url;
+      }
+    }
+
+    return file.url;
+
+  } catch {
+    return file.url;
+  }
+}
+
+// =========================
+// Download Found File
+// =========================
+
+async function downloadFile(
+  file
+) {
+  const cached =
+    getCachedFile(
+      file.id
+    );
+
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    let url =
+      await refreshFileURL(
+        file
+      );
+
+    if (!url) {
       return null;
     }
 
-    const response =
-      await fetch(file.url);
+    let response =
+      await fetch(url);
+
+    // Try refreshing again if old URL failed
+    if (!response.ok) {
+      url =
+        await refreshFileURL(
+          file
+        );
+
+      if (url) {
+        response =
+          await fetch(url);
+      }
+    }
 
     if (!response.ok) {
       console.error(
@@ -835,9 +1562,18 @@ async function downloadFile(file) {
     const arrayBuffer =
       await response.arrayBuffer();
 
-    return Buffer.from(
-      arrayBuffer
+    const buffer =
+      Buffer.from(
+        arrayBuffer
+      );
+
+    cacheFile(
+      file.id,
+      buffer
     );
+
+    return buffer;
+
   } catch (error) {
     console.error(
       "❌ File download error:",
@@ -848,15 +1584,56 @@ async function downloadFile(file) {
   }
 }
 
-// ======================================================
-// SHOW SEARCH RESULT
-//
-// IMPORTANT:
-// NO EMBED
-// NO CONTENT
-// NO EXTRA TEXT
-// ONLY FILE + BUTTONS
-// ======================================================
+// =========================
+// Prefetch Nearby Files
+// =========================
+
+function prefetchFile(
+  file
+) {
+  if (!file) {
+    return;
+  }
+
+  if (
+    getCachedFile(
+      file.id
+    )
+  ) {
+    return;
+  }
+
+  downloadFile(
+    file
+  ).catch(() => {});
+}
+
+function prefetchNearby(
+  session,
+  page
+) {
+  const previous =
+    session.results[
+      page - 1
+    ];
+
+  const next =
+    session.results[
+      page + 1
+    ];
+
+  prefetchFile(
+    previous
+  );
+
+  prefetchFile(
+    next
+  );
+}
+
+// =========================
+// Show Search Result
+// =========================
 
 async function showSearchResult(
   interaction,
@@ -864,7 +1641,9 @@ async function showSearchResult(
   page
 ) {
   const result =
-    session.results[page];
+    session.results[
+      page
+    ];
 
   if (!result) {
     return;
@@ -881,117 +1660,70 @@ async function showSearchResult(
     );
 
   const buffer =
-    await downloadFile(result);
+    await downloadFile(
+      result
+    );
 
   if (!buffer) {
-    const errorButtons =
-      createSearchButtons(
-        session.id,
-        page,
-        total
-      );
-
-    if (
-      interaction.replied ||
-      interaction.deferred
-    ) {
-      await interaction.editReply({
-        content: null,
-        embeds: [],
-        files: [],
-        components: [
-          errorButtons
-        ]
-      }).catch(() => {});
-    } else {
-      await interaction.reply({
-        content: null,
-        embeds: [],
-        components: [
-          errorButtons
-        ],
-        ephemeral: true
-      }).catch(() => {});
-    }
-
-    return;
-  }
-
-  // Discord upload safety
-  const MAX_UPLOAD =
-    20 * 1024 * 1024;
-
-  if (buffer.length > MAX_UPLOAD) {
-    if (
-      interaction.replied ||
-      interaction.deferred
-    ) {
-      await interaction.editReply({
-        content: null,
-        embeds: [],
-        files: [],
-        components: [
-          buttons
-        ]
-      }).catch(() => {});
-    } else {
-      await interaction.reply({
-        content: null,
-        embeds: [],
-        components: [
-          buttons
-        ],
-        ephemeral: true
-      }).catch(() => {});
-    }
-
-    return;
-  }
-
-  const filePayload = {
-    attachment: buffer,
-    name:
-      result.name || "file"
-  };
-
-  // ==========================================
-  // ONLY:
-  //
-  // [ FILE ATTACHMENT ]
-  //
-  // [⬅️] [1/200] [➡️]
-  //
-  // No embed.
-  // No text.
-  // ==========================================
-
-  if (
-    interaction.replied ||
-    interaction.deferred
-  ) {
     await interaction.editReply({
-      content: null,
+      content:
+        "⚠️ File unavailable.",
       embeds: [],
-      files: [
-        filePayload
-      ],
+      files: [],
       components: [
         buttons
       ]
-    });
-  } else {
-    await interaction.reply({
-      content: null,
+    }).catch(() => {});
+
+    return;
+  }
+
+  const MAX_UPLOAD =
+    20 * 1024 * 1024;
+
+  if (
+    buffer.length >
+    MAX_UPLOAD
+  ) {
+    await interaction.editReply({
+      content:
+        "⚠️ This file is too large for the bot to upload.",
       embeds: [],
-      files: [
-        filePayload
-      ],
+      files: [],
       components: [
         buttons
-      ],
-      ephemeral: true
-    });
+      ]
+    }).catch(() => {});
+
+    return;
   }
+
+  // NO EMBED
+  // NO DESCRIPTION
+  // NO EXTRA TEXT
+  // Only Discord's file attachment UI + buttons.
+
+  await interaction.editReply({
+    content: null,
+    embeds: [],
+    files: [
+      {
+        attachment:
+          buffer,
+        name:
+          result.name
+      }
+    ],
+    components: [
+      buttons
+    ]
+  });
+
+  // Load nearby pages in background
+  prefetchNearby(
+    session,
+    page
+  );
 }
 
 // =========================
@@ -1104,6 +1836,27 @@ const commands = [
     ),
 
   // =========================
+  // /remove
+  // =========================
+
+  new SlashCommandBuilder()
+    .setName("remove")
+    .setDescription(
+      "Remove a file from the Source Finder library."
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageNicknames.toString()
+    )
+    .addStringOption(option =>
+      option
+        .setName("name")
+        .setDescription(
+          "Exact file name to remove."
+        )
+        .setRequired(true)
+    ),
+
+  // =========================
   // /logs
   // =========================
 
@@ -1140,7 +1893,9 @@ async function registerCommands() {
   const rest =
     new REST({
       version: "10"
-    }).setToken(TOKEN);
+    }).setToken(
+      TOKEN
+    );
 
   try {
     console.log(
@@ -1156,10 +1911,6 @@ async function registerCommands() {
       }
     );
 
-    console.log(
-      "🗑️ Old global commands removed."
-    );
-
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -1168,10 +1919,6 @@ async function registerCommands() {
       {
         body: []
       }
-    );
-
-    console.log(
-      "🗑️ Old guild commands removed."
     );
 
     await rest.put(
@@ -1187,6 +1934,7 @@ async function registerCommands() {
     console.log(
       "✅ Registered current slash commands."
     );
+
   } catch (error) {
     console.error(
       "❌ Command registration error:",
@@ -1225,6 +1973,8 @@ client.once(
           : "Disabled"
       }`
     );
+
+    loadPersistentData();
 
     await registerCommands();
   }
@@ -1280,6 +2030,8 @@ client.on(
           interaction.commandName ===
             "scanchannel" ||
           interaction.commandName ===
+            "remove" ||
+          interaction.commandName ===
             "logs"
         )
       ) {
@@ -1295,11 +2047,14 @@ client.on(
             ephemeral: true
           });
 
-          setTimeout(() => {
-            interaction
-              .deleteReply()
-              .catch(() => {});
-          }, 2000);
+          setTimeout(
+            () => {
+              interaction
+                .deleteReply()
+                .catch(() => {});
+            },
+            2000
+          );
 
           return;
         }
@@ -1341,15 +2096,9 @@ client.on(
                 )
             );
 
-        // Don't leave a visible slash-command reply.
-        await interaction.deferReply({
-          ephemeral: true
-        });
-
-        await interaction.deleteReply();
-
-        // Send the panel directly into the channel.
-        await interaction.channel.send({
+        // Send a normal channel message.
+        // No "Sent by..." footer.
+        await interaction.reply({
           embeds: [
             panelEmbed
           ],
@@ -1406,15 +2155,18 @@ client.on(
           await interaction.editReply({
             content:
               `✅ **Scan complete.**\n\n` +
-              `📁 Files found: **${result.totalFiles}**\n` +
+              `📁 Files in library: **${result.totalFiles}**\n` +
+              `🆕 New files: **${result.newFiles}**\n` +
+              `♻️ Duplicates skipped: **${result.duplicateFiles}**\n` +
               `💬 Messages scanned: **${result.totalMessages}**\n` +
               `📌 Channel: <#${channel.id}>\n\n` +
-              `Oldest messages were included in the scan.`
+              `🚫 Files ending in \`.lua\` were skipped.`
           });
 
           console.log(
             `✅ Scan complete: ${result.totalFiles} files in #${channel.name}.`
           );
+
         } catch (error) {
           console.error(
             "❌ Channel scan error:",
@@ -1426,6 +2178,48 @@ client.on(
               "❌ I couldn't scan that channel. Make sure the bot can **View Channel** and **Read Message History**."
           });
         }
+
+        return;
+      }
+
+      // =========================
+      // /remove
+      // =========================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "remove"
+      ) {
+        const name =
+          interaction.options.getString(
+            "name"
+          );
+
+        const result =
+          removeFileByName(
+            interaction.guildId,
+            name
+          );
+
+        if (
+          result.removed ===
+          0
+        ) {
+          await interaction.reply({
+            content:
+              `❌ No file named \`${name}\` was found in the library.`,
+            ephemeral: true
+          });
+
+          return;
+        }
+
+        await interaction.reply({
+          content:
+            `✅ Removed **${result.removed}** file(s) named \`${name}\` from the Source Finder library.`,
+          ephemeral: true
+        });
 
         return;
       }
@@ -1462,6 +2256,8 @@ client.on(
           channel.id
         );
 
+        saveLogChannels();
+
         await interaction.reply({
           content:
             `✅ Source Finder logs will now be sent to <#${channel.id}>.`,
@@ -1490,13 +2286,6 @@ client.on(
 
         let description =
           `**Total Servers:** \`${guilds.length}\`\n\n`;
-
-        if (
-          guilds.length === 0
-        ) {
-          description +=
-            "No servers found.";
-        }
 
         for (
           let i = 0;
@@ -1536,10 +2325,7 @@ client.on(
               inviteLink =
                 invite.url;
             }
-          } catch {
-            inviteLink =
-              "Unavailable";
-          }
+          } catch {}
 
           description +=
             `**${i + 1}. ${guild.name}**\n` +
@@ -1600,11 +2386,14 @@ client.on(
             ephemeral: true
           });
 
-          setTimeout(() => {
-            interaction
-              .deleteReply()
-              .catch(() => {});
-          }, 1500);
+          setTimeout(
+            () => {
+              interaction
+                .deleteReply()
+                .catch(() => {});
+            },
+            1500
+          );
 
           return;
         }
@@ -1644,12 +2433,6 @@ client.on(
               "❌ I couldn't DM you. Please enable your Discord DMs and try again.",
             ephemeral: true
           });
-
-          setTimeout(() => {
-            interaction
-              .deleteReply()
-              .catch(() => {});
-          }, 2000);
 
           return;
         }
@@ -1883,7 +2666,6 @@ client.on(
           session
         );
 
-        // Clean old sessions
         for (
           const [
             id,
@@ -1963,6 +2745,7 @@ client.on(
             session.page - 1
           );
 
+        // Respond immediately
         await interaction.deferUpdate();
 
         await showSearchResult(
@@ -2023,6 +2806,7 @@ client.on(
             session.page + 1
           );
 
+        // Respond immediately
         await interaction.deferUpdate();
 
         await showSearchResult(
@@ -2145,13 +2929,11 @@ client.on(
         !interaction.replied &&
         !interaction.deferred
       ) {
-        await interaction
-          .reply({
-            content:
-              "❌ An error occurred.",
-            ephemeral: true
-          })
-          .catch(() => {});
+        await interaction.reply({
+          content:
+            "❌ An error occurred.",
+          ephemeral: true
+        }).catch(() => {});
       }
     }
   }
@@ -2189,7 +2971,9 @@ client.on(
           );
 
         if (
-          Number.isInteger(guess) &&
+          Number.isInteger(
+            guess
+          ) &&
           guess >= 1 &&
           guess <= 10000
         ) {
@@ -2246,7 +3030,7 @@ client.on(
       }
 
       // =========================
-      // AI Trigger Detection
+      // AI
       // =========================
 
       if (
@@ -2288,12 +3072,7 @@ client.on(
           ) {
             repliedToBot = true;
           }
-        } catch (error) {
-          console.log(
-            "⚠️ Could not fetch replied message:",
-            error.message
-          );
-        }
+        } catch {}
       }
 
       if (
@@ -2381,10 +3160,6 @@ Understand the user's new message in the context of your previous message.`;
           conversationKey
         );
 
-      console.log(
-        `🤖 AI request from ${message.author.tag}: ${prompt}`
-      );
-
       const result =
         await askAI(
           prompt,
@@ -2425,10 +3200,6 @@ Understand the user's new message in the context of your previous message.`;
           repliedUser: false
         }
       });
-
-      console.log(
-        `✅ AI response sent using ${result.provider}.`
-      );
 
     } catch (error) {
       console.error(
