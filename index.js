@@ -20,9 +20,9 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 
-// ============================================================
-// ENVIRONMENT
-// ============================================================
+// =========================
+// Environment Variables
+// =========================
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -32,6 +32,10 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const OWNER_ID = "1302080645987569694";
+
+// =========================
+// Required Environment Check
+// =========================
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error(
@@ -46,9 +50,9 @@ if (!GROQ_API_KEY && !OPENROUTER_API_KEY) {
   );
 }
 
-// ============================================================
-// AI
-// ============================================================
+// =========================
+// AI Clients
+// =========================
 
 const groq = GROQ_API_KEY
   ? new OpenAI({
@@ -68,11 +72,65 @@ const openrouter = OPENROUTER_API_KEY
     })
   : null;
 
+// =========================
+// AI Models
+// =========================
+
 const GROQ_MODEL = "openai/gpt-oss-20b";
 const OPENROUTER_MODEL = "openrouter/auto";
 
-const AI_COOLDOWN = 2000;
+// =========================
+// Web Server
+// =========================
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.status(200).send("FS Bot is online.");
+});
+
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "online",
+    bot: client.user ? client.user.tag : "connecting",
+    groq: groq ? "enabled" : "disabled",
+    openrouter: openrouter ? "enabled" : "disabled"
+  });
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🌐 Web server running on port ${PORT}`);
+});
+
+// =========================
+// Discord Client
+// =========================
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
+});
+
+// =========================
+// Games
+// =========================
+
+const games = new Map();
+
+// =========================
+// AI Cooldowns
+// =========================
+
 const aiCooldowns = new Map();
+const AI_COOLDOWN = 2000;
+
+// =========================
+// AI Conversation Memory
+// =========================
 
 const conversations = new Map();
 const MAX_HISTORY = 10;
@@ -97,6 +155,210 @@ function addConversationMessage(key, role, content) {
     history.shift();
   }
 }
+
+// =========================
+// SOURCE FINDER
+// =========================
+
+const sourceIndexes = new Map();
+const logChannels = new Map();
+const searchSessions = new Map();
+
+const MAX_SEARCH_RESULTS = 200;
+
+// =========================
+// Persistent Storage
+// =========================
+
+const SOURCE_INDEX_FILE = path.join(
+  __dirname,
+  "source-index.json"
+);
+
+const LOG_CHANNELS_FILE = path.join(
+  __dirname,
+  "log-channels.json"
+);
+
+// =========================
+// Load Persistent Library
+// =========================
+
+function loadPersistentData() {
+  try {
+    if (fs.existsSync(SOURCE_INDEX_FILE)) {
+      const raw = fs.readFileSync(
+        SOURCE_INDEX_FILE,
+        "utf8"
+      );
+
+      const data = JSON.parse(raw);
+
+      sourceIndexes.clear();
+
+      for (const [channelId, index] of Object.entries(data)) {
+        if (
+          index &&
+          Array.isArray(index.files)
+        ) {
+          // Keep ONLY TXT files.
+          index.files = index.files.filter(
+            file => isAllowedFile(file.name)
+          );
+
+          sourceIndexes.set(
+            channelId,
+            index
+          );
+        }
+      }
+
+      // Clean old non-txt files from storage.
+      saveSourceLibrary();
+
+      console.log(
+        `📚 Loaded ${sourceIndexes.size} scanned channel(s).`
+      );
+    }
+  } catch (error) {
+    console.error(
+      "❌ Failed to load source library:",
+      error
+    );
+  }
+
+  try {
+    if (fs.existsSync(LOG_CHANNELS_FILE)) {
+      const raw = fs.readFileSync(
+        LOG_CHANNELS_FILE,
+        "utf8"
+      );
+
+      const data = JSON.parse(raw);
+
+      logChannels.clear();
+
+      for (const [guildId, channelId] of Object.entries(data)) {
+        logChannels.set(
+          guildId,
+          channelId
+        );
+      }
+
+      console.log(
+        `📋 Loaded ${logChannels.size} log channel setting(s).`
+      );
+    }
+  } catch (error) {
+    console.error(
+      "❌ Failed to load log channels:",
+      error
+    );
+  }
+}
+
+// =========================
+// Save Persistent Library
+// =========================
+
+function saveSourceLibrary() {
+  try {
+    const data = {};
+
+    for (const [channelId, index] of sourceIndexes.entries()) {
+      data[channelId] = {
+        ...index,
+
+        // Safety: NEVER persist non-TXT files.
+        files: Array.isArray(index.files)
+          ? index.files.filter(file =>
+              isAllowedFile(file.name)
+            )
+          : []
+      };
+    }
+
+    const tempFile =
+      SOURCE_INDEX_FILE + ".tmp";
+
+    fs.writeFileSync(
+      tempFile,
+      JSON.stringify(
+        data,
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    fs.renameSync(
+      tempFile,
+      SOURCE_INDEX_FILE
+    );
+  } catch (error) {
+    console.error(
+      "❌ Failed to save source library:",
+      error
+    );
+  }
+}
+
+// =========================
+// Save Log Channels
+// =========================
+
+function saveLogChannels() {
+  try {
+    const data = {};
+
+    for (const [guildId, channelId] of logChannels.entries()) {
+      data[guildId] = channelId;
+    }
+
+    const tempFile =
+      LOG_CHANNELS_FILE + ".tmp";
+
+    fs.writeFileSync(
+      tempFile,
+      JSON.stringify(
+        data,
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    fs.renameSync(
+      tempFile,
+      LOG_CHANNELS_FILE
+    );
+  } catch (error) {
+    console.error(
+      "❌ Failed to save log channels:",
+      error
+    );
+  }
+}
+
+// =========================
+// Time
+// =========================
+
+function getTodayTime() {
+  return new Date().toLocaleTimeString(
+    "en-US",
+    {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "Asia/Manila"
+    }
+  );
+}
+
+// =========================
+// AI Personality
+// =========================
 
 const AI_PERSONALITY = `
 You are a Discord chatbot with a sarcastic, snarky, edgy and playful personality.
@@ -132,7 +394,16 @@ SAFETY:
 Keep responses appropriate for a Discord server.
 `;
 
-async function requestAI(clientInstance, model, prompt, history) {
+// =========================
+// AI Request
+// =========================
+
+async function requestAI(
+  clientInstance,
+  model,
+  prompt,
+  history
+) {
   const input = [
     {
       role: "system",
@@ -153,15 +424,24 @@ async function requestAI(clientInstance, model, prompt, history) {
   });
 }
 
+// =========================
+// Ask AI
+// =========================
+
 async function askAI(prompt, history = []) {
   if (groq) {
     try {
-      const response = await requestAI(
-        groq,
-        GROQ_MODEL,
-        prompt,
-        history
+      console.log(
+        `⚡ Asking Groq (${GROQ_MODEL})...`
       );
+
+      const response =
+        await requestAI(
+          groq,
+          GROQ_MODEL,
+          prompt,
+          history
+        );
 
       const text =
         response?.choices?.[0]?.message?.content?.trim();
@@ -182,17 +462,26 @@ async function askAI(prompt, history = []) {
         error?.status || "",
         error?.message || error
       );
+
+      console.log(
+        "🔄 Trying OpenRouter..."
+      );
     }
   }
 
   if (openrouter) {
     try {
-      const response = await requestAI(
-        openrouter,
-        OPENROUTER_MODEL,
-        prompt,
-        history
+      console.log(
+        `🌐 Asking OpenRouter (${OPENROUTER_MODEL})...`
       );
+
+      const response =
+        await requestAI(
+          openrouter,
+          OPENROUTER_MODEL,
+          prompt,
+          history
+        );
 
       const text =
         response?.choices?.[0]?.message?.content?.trim();
@@ -224,264 +513,7 @@ async function askAI(prompt, history = []) {
 }
 
 // ============================================================
-// WEB SERVER
-// ============================================================
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.get("/", (req, res) => {
-  res.status(200).send("FS Bot is online.");
-});
-
-app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "online",
-    bot: client.user ? client.user.tag : "connecting",
-    groq: groq ? "enabled" : "disabled",
-    openrouter: openrouter ? "enabled" : "disabled"
-  });
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🌐 Web server running on port ${PORT}`);
-});
-
-// ============================================================
-// DISCORD CLIENT
-// ============================================================
-
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
-});
-
-// ============================================================
-// GAMES
-// ============================================================
-
-const games = new Map();
-
-// ============================================================
-// SOURCE FINDER
-// ============================================================
-
-/*
-channelId -> {
-  channelName,
-  scannedAt,
-  files: []
-}
-*/
-
-const sourceIndexes = new Map();
-
-const logChannels = new Map();
-
-const searchSessions = new Map();
-
-const MAX_SEARCH_RESULTS = 200;
-
-/*
-IMPORTANT:
-
-This is the number of results shown for a search.
-
-If "pulse" finds 5 files:
-1/5
-2/5
-3/5
-4/5
-5/5
-
-It will NOT show 1/200 anymore.
-*/
-
-// ============================================================
-// FILE PATHS
-// ============================================================
-
-const SOURCE_INDEX_FILE = path.join(
-  __dirname,
-  "source-index.json"
-);
-
-const LOG_CHANNELS_FILE = path.join(
-  __dirname,
-  "log-channels.json"
-);
-
-// ============================================================
-// PERSISTENT STORAGE
-// ============================================================
-
-function loadPersistentData() {
-  try {
-    if (fs.existsSync(SOURCE_INDEX_FILE)) {
-      const raw = fs.readFileSync(
-        SOURCE_INDEX_FILE,
-        "utf8"
-      );
-
-      const data = JSON.parse(raw);
-
-      sourceIndexes.clear();
-
-      for (const [channelId, index] of Object.entries(data)) {
-        if (
-          index &&
-          Array.isArray(index.files)
-        ) {
-          sourceIndexes.set(channelId, index);
-        }
-      }
-
-      console.log(
-        `📚 Loaded ${sourceIndexes.size} scanned channel(s).`
-      );
-    }
-  } catch (error) {
-    console.error(
-      "❌ Failed to load source library:",
-      error
-    );
-  }
-
-  try {
-    if (fs.existsSync(LOG_CHANNELS_FILE)) {
-      const raw = fs.readFileSync(
-        LOG_CHANNELS_FILE,
-        "utf8"
-      );
-
-      const data = JSON.parse(raw);
-
-      logChannels.clear();
-
-      for (const [guildId, channelId] of Object.entries(data)) {
-        logChannels.set(guildId, channelId);
-      }
-
-      console.log(
-        `📋 Loaded ${logChannels.size} log channel setting(s).`
-      );
-    }
-  } catch (error) {
-    console.error(
-      "❌ Failed to load log channels:",
-      error
-    );
-  }
-}
-
-function saveSourceLibrary() {
-  try {
-    const data = {};
-
-    for (const [channelId, index] of sourceIndexes.entries()) {
-      data[channelId] = index;
-    }
-
-    const tempFile = SOURCE_INDEX_FILE + ".tmp";
-
-    fs.writeFileSync(
-      tempFile,
-      JSON.stringify(data, null, 2),
-      "utf8"
-    );
-
-    fs.renameSync(
-      tempFile,
-      SOURCE_INDEX_FILE
-    );
-  } catch (error) {
-    console.error(
-      "❌ Failed to save source library:",
-      error
-    );
-  }
-}
-
-function saveLogChannels() {
-  try {
-    const data = {};
-
-    for (const [guildId, channelId] of logChannels.entries()) {
-      data[guildId] = channelId;
-    }
-
-    const tempFile = LOG_CHANNELS_FILE + ".tmp";
-
-    fs.writeFileSync(
-      tempFile,
-      JSON.stringify(data, null, 2),
-      "utf8"
-    );
-
-    fs.renameSync(
-      tempFile,
-      LOG_CHANNELS_FILE
-    );
-  } catch (error) {
-    console.error(
-      "❌ Failed to save log channels:",
-      error
-    );
-  }
-}
-
-// ============================================================
-// TIME
-// ============================================================
-
-function getTodayTime() {
-  return new Date().toLocaleTimeString(
-    "en-US",
-    {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-      timeZone: "Asia/Manila"
-    }
-  );
-}
-
-// ============================================================
-// FILE FILTER
-// ============================================================
-
-/*
-ONLY .TXT FILES ARE ALLOWED.
-
-Images are automatically ignored:
-.png
-.jpg
-.jpeg
-.gif
-.webp
-.bmp
-etc.
-
-.lua is ignored too.
-*/
-
-function isTxtFile(name) {
-  const filename = String(name || "")
-    .trim()
-    .toLowerCase();
-
-  return filename.endsWith(".txt");
-}
-
-function shouldIgnoreFile(name) {
-  return !isTxtFile(name);
-}
-
-// ============================================================
-// NORMALIZE FILE NAME
+// SOURCE FINDER HELPERS
 // ============================================================
 
 function normalizeFilename(name) {
@@ -494,24 +526,96 @@ function normalizeFilename(name) {
     .trim();
 }
 
-// ============================================================
-// DUPLICATE FILE CHECK
-// ============================================================
+// =========================
+// ONLY TXT FILES
+// =========================
+
+function isAllowedFile(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+    .endsWith(".txt");
+}
+
+function shouldIgnoreFile(name) {
+  return !isAllowedFile(name);
+}
+
+// =========================
+// Tokenize Search
+// =========================
+
+function tokenize(text) {
+  return normalizeFilename(text)
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+// =========================
+// Levenshtein Distance
+// =========================
+
+function levenshtein(a, b) {
+  if (a === b) {
+    return 0;
+  }
+
+  if (!a.length) {
+    return b.length;
+  }
+
+  if (!b.length) {
+    return a.length;
+  }
+
+  const previous = new Array(b.length + 1);
+
+  for (let j = 0; j <= b.length; j++) {
+    previous[j] = j;
+  }
+
+  for (let i = 1; i <= a.length; i++) {
+    const current = new Array(b.length + 1);
+
+    current[0] = i;
+
+    for (let j = 1; j <= b.length; j++) {
+      const cost =
+        a[i - 1] === b[j - 1]
+          ? 0
+          : 1;
+
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + cost
+      );
+    }
+
+    for (let j = 0; j <= b.length; j++) {
+      previous[j] = current[j];
+    }
+  }
+
+  return previous[b.length];
+}
+
+// =========================
+// Duplicate Filename Check
+// =========================
 
 function filenameAlreadyIndexed(
   filename,
   exceptChannelId = null
 ) {
-  const normalized = normalizeFilename(filename);
+  const normalized =
+    normalizeFilename(filename);
 
   if (!normalized) {
     return false;
   }
 
-  for (
-    const [channelId, index]
-    of sourceIndexes.entries()
-  ) {
+  for (const [channelId, index] of sourceIndexes.entries()) {
     if (
       exceptChannelId &&
       channelId === exceptChannelId
@@ -527,6 +631,10 @@ function filenameAlreadyIndexed(
     }
 
     for (const file of index.files) {
+      if (!isAllowedFile(file.name)) {
+        continue;
+      }
+
       if (
         normalizeFilename(file.name) ===
         normalized
@@ -539,52 +647,61 @@ function filenameAlreadyIndexed(
   return false;
 }
 
-// ============================================================
-// COLLECT ATTACHMENTS
-// ============================================================
+// =========================
+// Collect Attachments
+// =========================
+
+function addAttachment(
+  attachment,
+  message,
+  results,
+  source
+) {
+  const name =
+    attachment.name ||
+    attachment.filename ||
+    "file";
+
+  // IMPORTANT:
+  // Only .txt files are accepted.
+  if (!isAllowedFile(name)) {
+    return;
+  }
+
+  results.push({
+    id: attachment.id,
+    name,
+    url: attachment.url,
+    size: attachment.size || 0,
+    messageId: message.id,
+    channelId: message.channelId,
+    createdTimestamp: message.createdTimestamp,
+    source
+  });
+}
 
 function collectAttachmentsFromMessage(
   message,
   results
 ) {
-  // Normal attachments
   if (message.attachments) {
-    for (
-      const attachment
-      of message.attachments.values()
-    ) {
-      const name =
-        attachment.name ||
-        attachment.filename ||
-        "file";
-
-      // ONLY TXT
-      if (!isTxtFile(name)) {
-        continue;
-      }
-
-      results.push({
-        id: attachment.id,
-        name,
-        url: attachment.url,
-        size: attachment.size || 0,
-        messageId: message.id,
-        channelId: message.channelId,
-        createdTimestamp: message.createdTimestamp,
-        source: "message"
-      });
+    for (const attachment of message.attachments.values()) {
+      addAttachment(
+        attachment,
+        message,
+        results,
+        "message"
+      );
     }
   }
 
-  // Forwarded/snapshot attachments
   if (
     message.messageSnapshots &&
     typeof message.messageSnapshots.values ===
       "function"
   ) {
     for (
-      const snapshot
-      of message.messageSnapshots.values()
+      const snapshot of message.messageSnapshots.values()
     ) {
       if (!snapshot) {
         continue;
@@ -599,64 +716,36 @@ function collectAttachmentsFromMessage(
           "function"
       ) {
         for (
-          const attachment
-          of snapshotAttachments.values()
+          const attachment of snapshotAttachments.values()
         ) {
-          const name =
-            attachment.name ||
-            attachment.filename ||
-            "file";
-
-          if (!isTxtFile(name)) {
-            continue;
-          }
-
-          results.push({
-            id: `forwarded-${attachment.id}`,
-            name,
-            url: attachment.url,
-            size: attachment.size || 0,
-            messageId: message.id,
-            channelId: message.channelId,
-            createdTimestamp: message.createdTimestamp,
-            source: "forwarded"
-          });
+          addAttachment(
+            attachment,
+            message,
+            results,
+            "forwarded"
+          );
         }
       } else if (
         Array.isArray(snapshotAttachments)
       ) {
         for (
-          const attachment
-          of snapshotAttachments
+          const attachment of snapshotAttachments
         ) {
-          const name =
-            attachment.name ||
-            attachment.filename ||
-            "file";
-
-          if (!isTxtFile(name)) {
-            continue;
-          }
-
-          results.push({
-            id: `forwarded-${attachment.id}`,
-            name,
-            url: attachment.url,
-            size: attachment.size || 0,
-            messageId: message.id,
-            channelId: message.channelId,
-            createdTimestamp: message.createdTimestamp,
-            source: "forwarded"
-          });
+          addAttachment(
+            attachment,
+            message,
+            results,
+            "forwarded"
+          );
         }
       }
     }
   }
 }
 
-// ============================================================
-// SCAN CHANNEL
-// ============================================================
+// =========================
+// Scan Channel
+// =========================
 
 async function scanChannel(channel) {
   const existingIndex =
@@ -679,7 +768,9 @@ async function scanChannel(channel) {
     }
 
     const batch =
-      await channel.messages.fetch(options);
+      await channel.messages.fetch(
+        options
+      );
 
     if (!batch.size) {
       break;
@@ -707,11 +798,15 @@ async function scanChannel(channel) {
     }
   }
 
-  // Remove duplicates found during this scan
   const uniqueThisScan = new Map();
 
   for (const file of files) {
-    const key = normalizeFilename(file.name);
+    if (!isAllowedFile(file.name)) {
+      continue;
+    }
+
+    const key =
+      normalizeFilename(file.name);
 
     if (!key) {
       continue;
@@ -722,13 +817,18 @@ async function scanChannel(channel) {
       continue;
     }
 
-    uniqueThisScan.set(key, file);
+    uniqueThisScan.set(
+      key,
+      file
+    );
   }
 
   const previousFiles =
     existingIndex &&
     Array.isArray(existingIndex.files)
-      ? existingIndex.files
+      ? existingIndex.files.filter(file =>
+          isAllowedFile(file.name)
+        )
       : [];
 
   const previousByName = new Map();
@@ -740,19 +840,19 @@ async function scanChannel(channel) {
     );
   }
 
-  const finalFiles = [...previousFiles];
+  const finalFiles = [
+    ...previousFiles
+  ];
 
   for (const file of uniqueThisScan.values()) {
     const normalized =
       normalizeFilename(file.name);
 
-    // Already in same channel
     if (previousByName.has(normalized)) {
       duplicateFiles++;
       continue;
     }
 
-    // Already exists in another channel
     if (
       filenameAlreadyIndexed(
         file.name,
@@ -773,11 +873,14 @@ async function scanChannel(channel) {
       (b.createdTimestamp || 0)
   );
 
-  sourceIndexes.set(channel.id, {
-    channelName: channel.name,
-    scannedAt: Date.now(),
-    files: finalFiles
-  });
+  sourceIndexes.set(
+    channel.id,
+    {
+      channelName: channel.name,
+      scannedAt: Date.now(),
+      files: finalFiles
+    }
+  );
 
   saveSourceLibrary();
 
@@ -790,257 +893,187 @@ async function scanChannel(channel) {
 }
 
 // ============================================================
-// SEARCH HELPERS
+// IMPROVED SEARCH
 // ============================================================
 
-function getWords(text) {
-  return normalizeFilename(text)
-    .split(" ")
-    .filter(Boolean);
-}
-
-/*
-Levenshtein distance.
-
-This makes typo/fuzzy matching much better.
-
-Example:
-
-anti desync
-anti desyn
-work desync
-desync work
-*/
-
-// Fast enough for file-name searches.
-function levenshtein(a, b) {
-  if (a === b) return 0;
-
-  if (!a.length) return b.length;
-  if (!b.length) return a.length;
-
-  let previous = new Array(b.length + 1);
-
-  for (let j = 0; j <= b.length; j++) {
-    previous[j] = j;
+function wordSimilarity(queryWord, fileWord) {
+  if (!queryWord || !fileWord) {
+    return 0;
   }
 
-  for (let i = 1; i <= a.length; i++) {
-    const current = new Array(b.length + 1);
-
-    current[0] = i;
-
-    for (let j = 1; j <= b.length; j++) {
-      const cost =
-        a[i - 1] === b[j - 1]
-          ? 0
-          : 1;
-
-      current[j] = Math.min(
-        current[j - 1] + 1,
-        previous[j] + 1,
-        previous[j - 1] + cost
-      );
-    }
-
-    previous = current;
+  if (queryWord === fileWord) {
+    return 100;
   }
 
-  return previous[b.length];
-}
+  if (fileWord.startsWith(queryWord)) {
+    return 85;
+  }
 
-// ============================================================
-// SEARCH SCORE
-// ============================================================
+  if (queryWord.startsWith(fileWord)) {
+    return 70;
+  }
+
+  // Only allow fuzzy matching for reasonably similar words.
+  const distance =
+    levenshtein(
+      queryWord,
+      fileWord
+    );
+
+  const maxLength =
+    Math.max(
+      queryWord.length,
+      fileWord.length
+    );
+
+  if (maxLength < 4) {
+    return 0;
+  }
+
+  const similarity =
+    1 -
+    distance / maxLength;
+
+  if (similarity >= 0.72) {
+    return Math.round(
+      similarity * 60
+    );
+  }
+
+  return 0;
+}
 
 function scoreSearch(filename, query) {
-  const file = normalizeFilename(filename);
-  const search = normalizeFilename(query);
+  const file =
+    normalizeFilename(filename);
+
+  const search =
+    normalizeFilename(query);
 
   if (!file || !search) {
     return 0;
   }
 
-  // Exact
+  const queryWords =
+    tokenize(search);
+
+  const fileWords =
+    tokenize(file);
+
+  if (
+    !queryWords.length ||
+    !fileWords.length
+  ) {
+    return 0;
+  }
+
+  // Exact full filename.
   if (file === search) {
     return 10000;
   }
 
-  // Exact phrase contained
+  // Exact phrase in filename.
   if (file.includes(search)) {
-    return 9000;
+    return 5000;
   }
 
-  const queryWords = getWords(search);
-  const fileWords = getWords(file);
-
-  let score = 0;
-
-  // ==========================================================
-  // WORD MATCHING
-  // ==========================================================
+  let total = 0;
+  let matchedWords = 0;
 
   for (const queryWord of queryWords) {
-    // Exact word
-    if (fileWords.includes(queryWord)) {
-      score += 1500;
-      continue;
-    }
+    let best = 0;
 
-    // Starts with query word
-    if (
-      fileWords.some(word =>
-        word.startsWith(queryWord)
-      )
-    ) {
-      score += 1100;
-      continue;
-    }
-
-    // Query starts with filename word
-    if (
-      fileWords.some(word =>
-        queryWord.startsWith(word)
-      )
-    ) {
-      score += 900;
-      continue;
-    }
-
-    // Contains
-    if (
-      fileWords.some(word =>
-        word.includes(queryWord) ||
-        queryWord.includes(word)
-      )
-    ) {
-      score += 750;
-      continue;
-    }
-
-    // Fuzzy word match
-    let bestDistance = Infinity;
-
-    for (const word of fileWords) {
-      const distance =
-        levenshtein(
+    for (const fileWord of fileWords) {
+      const score =
+        wordSimilarity(
           queryWord,
-          word
+          fileWord
         );
 
-      if (distance < bestDistance) {
-        bestDistance = distance;
+      if (score > best) {
+        best = score;
       }
     }
 
-    const allowedDistance =
-      queryWord.length <= 4
-        ? 1
-        : queryWord.length <= 7
-        ? 2
-        : 3;
-
-    if (bestDistance <= allowedDistance) {
-      score += 500;
+    if (best > 0) {
+      matchedWords++;
+      total += best;
     }
   }
 
-  // ==========================================================
-  // MATCHED WORD RATIO
-  // ==========================================================
+  // This is the important fix:
+  // ALL query words don't need to match for a useful fallback,
+  // but at least one strong word must match.
+  if (matchedWords === 0) {
+    return 0;
+  }
 
-  if (queryWords.length > 0) {
-    let matchedWords = 0;
-
-    for (const queryWord of queryWords) {
-      const found = fileWords.some(word => {
-        if (word === queryWord) {
-          return true;
-        }
-
-        if (word.includes(queryWord)) {
-          return true;
-        }
-
-        if (queryWord.includes(word)) {
-          return true;
-        }
-
-        const distance =
-          levenshtein(
-            queryWord,
-            word
-          );
-
-        const allowed =
-          queryWord.length <= 4
-            ? 1
-            : queryWord.length <= 7
-            ? 2
-            : 3;
-
-        return distance <= allowed;
-      });
-
-      if (found) {
-        matchedWords++;
-      }
-    }
-
-    score +=
+  // For multi-word searches, reward files matching more words.
+  if (queryWords.length > 1) {
+    total +=
       (matchedWords /
         queryWords.length) *
-      600;
+      150;
   }
 
-  // ==========================================================
-  // CHARACTER SIMILARITY
-  // ==========================================================
-
-  const compactQuery =
-    search.replace(/\s/g, "");
-
-  const compactFile =
-    file.replace(/\s/g, "");
+  // Prevent weak single-word matches from filling the
+  // result list with unrelated files.
+  const matchRatio =
+    matchedWords /
+    queryWords.length;
 
   if (
-    compactQuery.length >= 3 &&
-    compactFile.length >= 3
+    queryWords.length >= 2 &&
+    matchRatio < 0.5
   ) {
-    let matched = 0;
+    // Allow a strong single word such as "desync"
+    // to find "Work Desync.txt".
+    const strongest =
+      Math.max(
+        ...queryWords.map(qw =>
+          Math.max(
+            ...fileWords.map(fw =>
+              wordSimilarity(
+                qw,
+                fw
+              )
+            )
+          )
+        )
+      );
 
-    for (const char of compactQuery) {
-      if (compactFile.includes(char)) {
-        matched++;
-      }
+    if (strongest < 70) {
+      return 0;
     }
-
-    score +=
-      (matched /
-        compactQuery.length) *
-      100;
   }
 
-  return score;
+  // Small bonus for filename length similarity.
+  if (file === search) {
+    total += 1000;
+  }
+
+  return total;
 }
 
-// ============================================================
-// SEARCH SOURCES
-// ============================================================
+// =========================
+// Search Sources
+// =========================
 
-function searchSources(guildId, query) {
+function searchSources(
+  guildId,
+  query
+) {
   const results = [];
 
-  for (
-    const [channelId, index]
-    of sourceIndexes.entries()
-  ) {
+  for (const [channelId, index] of sourceIndexes.entries()) {
     if (!index) {
       continue;
     }
 
     const channel =
-      client.channels.cache.get(channelId);
+      client.channels.cache.get(
+        channelId
+      );
 
     if (
       !channel ||
@@ -1054,9 +1087,8 @@ function searchSources(guildId, query) {
     }
 
     for (const file of index.files) {
-      // SAFETY CHECK:
-      // only TXT is searchable
-      if (!isTxtFile(file.name)) {
+      // ONLY TXT.
+      if (!isAllowedFile(file.name)) {
         continue;
       }
 
@@ -1066,54 +1098,51 @@ function searchSources(guildId, query) {
           query
         );
 
-      if (score > 0) {
-        results.push({
-          ...file,
-          channelName:
-            index.channelName,
-          searchScore:
-            score
-        });
+      if (score <= 0) {
+        continue;
       }
+
+      results.push({
+        ...file,
+        channelName:
+          index.channelName,
+        searchScore:
+          score
+      });
     }
   }
 
-  results.sort((a, b) => {
-    if (
-      b.searchScore !==
-      a.searchScore
-    ) {
-      return (
-        b.searchScore -
+  results.sort(
+    (a, b) => {
+      if (
+        b.searchScore !==
         a.searchScore
+      ) {
+        return (
+          b.searchScore -
+          a.searchScore
+        );
+      }
+
+      return (
+        (a.createdTimestamp || 0) -
+        (b.createdTimestamp || 0)
       );
     }
+  );
 
-    return (
-      (a.createdTimestamp || 0) -
-      (b.createdTimestamp || 0)
-    );
-  });
-
-  /*
-  IMPORTANT:
-  The session uses results.length.
-
-  So if only 5 files match:
-  total = 5
-
-  NOT 200.
-  */
-
+  // IMPORTANT:
+  // This is only a safety maximum.
+  // If 4 files match, results.length is 4.
   return results.slice(
     0,
     MAX_SEARCH_RESULTS
   );
 }
 
-// ============================================================
-// REMOVE FILE
-// ============================================================
+// =========================
+// Remove File By Name
+// =========================
 
 function removeFileByName(
   guildId,
@@ -1125,12 +1154,11 @@ function removeFileByName(
   let removed = 0;
   const removedFiles = [];
 
-  for (
-    const [channelId, index]
-    of sourceIndexes.entries()
-  ) {
+  for (const [channelId, index] of sourceIndexes.entries()) {
     const channel =
-      client.channels.cache.get(channelId);
+      client.channels.cache.get(
+        channelId
+      );
 
     if (
       !channel ||
@@ -1176,9 +1204,9 @@ function removeFileByName(
   };
 }
 
-// ============================================================
-// LOGGING
-// ============================================================
+// =========================
+// Logs
+// =========================
 
 async function logSourceSearch(
   interaction,
@@ -1210,14 +1238,17 @@ async function logSourceSearch(
     return;
   }
 
-  const firstFile = results[0];
+  const firstFile =
+    results[0];
 
   const embed =
     new EmbedBuilder()
       .setTitle(
         "SOURCE SEARCH LOG 🔎"
       )
-      .setColor(0x808080)
+      .setColor(
+        0x808080
+      )
       .addFields(
         {
           name: "User",
@@ -1249,12 +1280,17 @@ async function logSourceSearch(
 
   await logChannel.send({
     embeds: [embed]
-  }).catch(() => {});
+  }).catch(error => {
+    console.error(
+      "❌ Could not send source search log:",
+      error
+    );
+  });
 }
 
-// ============================================================
-// SEARCH BUTTONS
-// ============================================================
+// =========================
+// Search Buttons
+// =========================
 
 function createSearchButtons(
   sessionId,
@@ -1273,7 +1309,9 @@ function createSearchButtons(
       .setStyle(
         ButtonStyle.Secondary
       )
-      .setDisabled(page <= 0),
+      .setDisabled(
+        page <= 0
+      ),
 
     new ButtonBuilder()
       .setCustomId(
@@ -1303,15 +1341,17 @@ function createSearchButtons(
   return row;
 }
 
-// ============================================================
-// FILE CACHE
-// ============================================================
+// =========================
+// File Cache
+// =========================
 
 const fileCache = new Map();
+const MAX_CACHE_SIZE = 50;
 
-const MAX_CACHE_SIZE = 40;
-
-function cacheFile(fileId, buffer) {
+function cacheFile(
+  fileId,
+  buffer
+) {
   if (!buffer) {
     return;
   }
@@ -1332,24 +1372,21 @@ function cacheFile(fileId, buffer) {
     const oldest =
       fileCache.keys().next().value;
 
-    fileCache.delete(oldest);
+    fileCache.delete(
+      oldest
+    );
   }
 }
 
 function getCachedFile(fileId) {
-  return fileCache.get(fileId);
+  return fileCache.get(
+    fileId
+  );
 }
 
-// ============================================================
-// DOWNLOAD TRACKING
-// ============================================================
-
-/*
-This prevents multiple button clicks from
-downloading the same file multiple times.
-*/
-
-const downloadingFiles = new Map();
+// =========================
+// Resolve Fresh Attachment
+// =========================
 
 async function refreshFileURL(file) {
   try {
@@ -1402,94 +1439,80 @@ async function refreshFileURL(file) {
   }
 }
 
-async function downloadFile(file) {
-  if (!file) {
-    return null;
-  }
+// =========================
+// Download Found File
+// =========================
 
-  // Cache
+async function downloadFile(file) {
   const cached =
-    getCachedFile(file.id);
+    getCachedFile(
+      file.id
+    );
 
   if (cached) {
     return cached;
   }
 
-  // Already downloading
-  if (
-    downloadingFiles.has(file.id)
-  ) {
-    return downloadingFiles.get(file.id);
-  }
+  try {
+    let url =
+      await refreshFileURL(
+        file
+      );
 
-  const promise =
-    (async () => {
-      try {
-        let url =
-          await refreshFileURL(file);
+    if (!url) {
+      return null;
+    }
 
-        if (!url) {
-          return null;
-        }
+    let response =
+      await fetch(url);
 
-        let response =
+    if (!response.ok) {
+      url =
+        await refreshFileURL(
+          file
+        );
+
+      if (url) {
+        response =
           await fetch(url);
-
-        if (!response.ok) {
-          url =
-            await refreshFileURL(file);
-
-          if (url) {
-            response =
-              await fetch(url);
-          }
-        }
-
-        if (!response.ok) {
-          console.error(
-            `❌ Failed to download ${file.name}: HTTP ${response.status}`
-          );
-
-          return null;
-        }
-
-        const arrayBuffer =
-          await response.arrayBuffer();
-
-        const buffer =
-          Buffer.from(arrayBuffer);
-
-        cacheFile(
-          file.id,
-          buffer
-        );
-
-        return buffer;
-      } catch (error) {
-        console.error(
-          `❌ File download error (${file.name}):`,
-          error
-        );
-
-        return null;
-      } finally {
-        downloadingFiles.delete(
-          file.id
-        );
       }
-    })();
+    }
 
-  downloadingFiles.set(
-    file.id,
-    promise
-  );
+    if (!response.ok) {
+      console.error(
+        `❌ Failed to download ${file.name}: HTTP ${response.status}`
+      );
 
-  return promise;
+      return null;
+    }
+
+    const arrayBuffer =
+      await response.arrayBuffer();
+
+    const buffer =
+      Buffer.from(
+        arrayBuffer
+      );
+
+    cacheFile(
+      file.id,
+      buffer
+    );
+
+    return buffer;
+  } catch (error) {
+    console.error(
+      "❌ File download error:",
+      error
+    );
+
+    return null;
+  }
 }
 
-// ============================================================
-// FAST PREFETCH
-// ============================================================
+// =========================
+// Prefetch
+// =========================
 
 function prefetchFile(file) {
   if (!file) {
@@ -1497,72 +1520,67 @@ function prefetchFile(file) {
   }
 
   if (
-    getCachedFile(file.id)
+    getCachedFile(
+      file.id
+    )
   ) {
     return;
   }
 
-  downloadFile(file).catch(
-    () => {}
-  );
+  downloadFile(
+    file
+  ).catch(() => {});
 }
 
 function prefetchNearby(
   session,
   page
 ) {
-  /*
-  Preload several nearby files instead of
-  only one previous/next file.
+  // Load more than one neighboring result
+  // so buttons feel much faster.
 
-  This makes navigation much faster.
-  */
+  prefetchFile(
+    session.results[
+      page - 2
+    ]
+  );
 
-  const indexes = [
-    page - 2,
-    page - 1,
-    page + 1,
-    page + 2
-  ];
+  prefetchFile(
+    session.results[
+      page - 1
+    ]
+  );
 
-  for (const index of indexes) {
-    if (
-      index >= 0 &&
-      index < session.results.length
-    ) {
-      prefetchFile(
-        session.results[index]
-      );
-    }
-  }
+  prefetchFile(
+    session.results[
+      page + 1
+    ]
+  );
+
+  prefetchFile(
+    session.results[
+      page + 2
+    ]
+  );
 }
 
-// ============================================================
-// SHOW SEARCH RESULT
-// ============================================================
+// =========================
+// Send File To Interaction
+// =========================
 
-async function showSearchResult(
+async function editWithFile(
   interaction,
   session,
   page
 ) {
   const result =
-    session.results[page];
+    session.results[
+      page
+    ];
 
   if (!result) {
     return;
   }
-
-  /*
-  TOTAL IS ALWAYS THE REAL SEARCH RESULT COUNT.
-
-  Example:
-  pulse = 5 files
-
-  page 0 => 1/5
-  page 1 => 2/5
-  page 2 => 3/5
-  */
 
   const total =
     session.results.length;
@@ -1574,16 +1592,10 @@ async function showSearchResult(
       total
     );
 
-  /*
-  Wait for the file first.
-
-  This means:
-  file + number + buttons
-  are updated together.
-  */
-
   const buffer =
-    await downloadFile(result);
+    await downloadFile(
+      result
+    );
 
   if (!buffer) {
     await interaction.editReply({
@@ -1619,17 +1631,15 @@ async function showSearchResult(
     return;
   }
 
-  // ==========================================================
-  // FILE + NUMBER + BUTTONS UPDATE TOGETHER
-  // ==========================================================
-
   await interaction.editReply({
     content: null,
     embeds: [],
     files: [
       {
-        attachment: buffer,
-        name: result.name
+        attachment:
+          buffer,
+        name:
+          result.name
       }
     ],
     components: [
@@ -1637,60 +1647,31 @@ async function showSearchResult(
     ]
   });
 
-  /*
-  Start loading nearby files AFTER the current
-  result has been displayed.
-
-  This keeps the current response fast while
-  preparing the next button press.
-  */
-
   prefetchNearby(
     session,
     page
   );
 }
 
-// ============================================================
-// NORMAL COMMAND MESSAGE
-// ============================================================
+// =========================
+// SHOW INITIAL RESULT
+// =========================
 
-/*
-Discord slash commands must acknowledge the
-interaction. We acknowledge it ephemerally,
-delete that acknowledgement, then send the
-actual message normally in the channel.
-
-This prevents:
-"Bot replied to /panel"
-style command-response messages.
-*/
-
-async function sendNormalCommandMessage(
+async function showSearchResult(
   interaction,
-  data
+  session,
+  page
 ) {
-  await interaction.deferReply({
-    ephemeral: true
-  });
-
-  await interaction.deleteReply().catch(
-    () => {}
+  await editWithFile(
+    interaction,
+    session,
+    page
   );
-
-  if (
-    interaction.channel &&
-    interaction.channel.isTextBased()
-  ) {
-    return interaction.channel.send(data);
-  }
-
-  return null;
 }
 
-// ============================================================
-// SLASH COMMANDS
-// ============================================================
+// =========================
+// Slash Commands
+// =========================
 
 const commands = [
 
@@ -1789,7 +1770,7 @@ const commands = [
       option
         .setName("name")
         .setDescription(
-          "File name to remove."
+          "Exact file name to remove."
         )
         .setRequired(true)
     ),
@@ -1815,17 +1796,21 @@ const commands = [
         )
     )
 
-].map(command => command.toJSON());
+].map(command =>
+  command.toJSON()
+);
 
-// ============================================================
-// REGISTER COMMANDS
-// ============================================================
+// =========================
+// Register Commands
+// =========================
 
 async function registerCommands() {
   const rest =
     new REST({
       version: "10"
-    }).setToken(TOKEN);
+    }).setToken(
+      TOKEN
+    );
 
   try {
     console.log(
@@ -1872,9 +1857,9 @@ async function registerCommands() {
   }
 }
 
-// ============================================================
-// READY
-// ============================================================
+// =========================
+// Ready
+// =========================
 
 client.once(
   "ready",
@@ -1888,7 +1873,11 @@ client.once(
     );
 
     console.log(
-      `⚡ Groq: ${groq ? "Enabled" : "Disabled"}`
+      `⚡ Groq: ${
+        groq
+          ? "Enabled"
+          : "Disabled"
+      }`
     );
 
     console.log(
@@ -1905,18 +1894,18 @@ client.once(
   }
 );
 
-// ============================================================
-// INTERACTIONS
-// ============================================================
+// =========================
+// Interactions
+// =========================
 
 client.on(
   "interactionCreate",
   async interaction => {
     try {
 
-      // ========================================================
+      // =========================
       // OWNER CHECK
-      // ========================================================
+      // =========================
 
       if (
         interaction.isChatInputCommand() &&
@@ -1937,9 +1926,9 @@ client.on(
         }
       }
 
-      // ========================================================
+      // =========================
       // PERMISSION CHECK
-      // ========================================================
+      // =========================
 
       if (
         interaction.isChatInputCommand() &&
@@ -1976,9 +1965,9 @@ client.on(
         }
       }
 
-      // ========================================================
-      // /PANEL
-      // ========================================================
+      // =========================
+      // PANEL
+      // =========================
 
       if (
         interaction.isChatInputCommand() &&
@@ -1993,7 +1982,9 @@ client.on(
             .setDescription(
               "**Click the** `Search` **button below to search a Source/File.**"
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         const row =
           new ActionRowBuilder()
@@ -2010,24 +2001,28 @@ client.on(
                 )
             );
 
-        await sendNormalCommandMessage(
-          interaction,
-          {
-            embeds: [
-              panelEmbed
-            ],
-            components: [
-              row
-            ]
-          }
-        );
+        // Normal channel message.
+        await interaction.deferReply({
+          ephemeral: true
+        });
+
+        await interaction.deleteReply();
+
+        await interaction.channel.send({
+          embeds: [
+            panelEmbed
+          ],
+          components: [
+            row
+          ]
+        });
 
         return;
       }
 
-      // ========================================================
-      // /SCANCHANNEL
-      // ========================================================
+      // =========================
+      // SCAN CHANNEL
+      // =========================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2058,7 +2053,7 @@ client.on(
         });
 
         console.log(
-          `🔎 Starting TXT scan in #${channel.name} (${channel.id})...`
+          `🔎 Starting TXT-only source scan in #${channel.name} (${channel.id})...`
         );
 
         try {
@@ -2075,11 +2070,11 @@ client.on(
               `♻️ Duplicates skipped: **${result.duplicateFiles}**\n` +
               `💬 Messages scanned: **${result.totalMessages}**\n` +
               `📌 Channel: <#${channel.id}>\n\n` +
-              `📝 Only \`.txt\` files are indexed. Images and other file types are ignored.`
+              `📄 Only \`.txt\` files are scanned. Images and other file types are ignored.`
           });
 
           console.log(
-            `✅ Scan complete: ${result.totalFiles} TXT files in #${channel.name}.`
+            `✅ TXT scan complete: ${result.totalFiles} files in #${channel.name}.`
           );
         } catch (error) {
           console.error(
@@ -2096,9 +2091,9 @@ client.on(
         return;
       }
 
-      // ========================================================
-      // /REMOVE
-      // ========================================================
+      // =========================
+      // REMOVE
+      // =========================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2116,7 +2111,10 @@ client.on(
             name
           );
 
-        if (result.removed === 0) {
+        if (
+          result.removed ===
+          0
+        ) {
           await interaction.reply({
             content:
               `❌ No file named \`${name}\` was found in the library.`,
@@ -2135,9 +2133,9 @@ client.on(
         return;
       }
 
-      // ========================================================
-      // /LOGS
-      // ========================================================
+      // =========================
+      // LOGS
+      // =========================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2178,9 +2176,9 @@ client.on(
         return;
       }
 
-      // ========================================================
-      // /SERVERLIST
-      // ========================================================
+      // =========================
+      // SERVER LIST
+      // =========================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2255,22 +2253,26 @@ client.on(
                 4000
               )
             )
-            .setColor(0x808080)
+            .setColor(
+              0x808080
+            )
             .setFooter({
               text:
                 `Today at ${getTodayTime()}`
             });
 
         await interaction.editReply({
-          embeds: [embed]
+          embeds: [
+            embed
+          ]
         });
 
         return;
       }
 
-      // ========================================================
-      // /GUESSNUMBER
-      // ========================================================
+      // =========================
+      // GUESS NUMBER
+      // =========================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2317,7 +2319,9 @@ client.on(
             .setDescription(
               `🔢 **Answer:** \`${answer}\``
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         try {
           await interaction.user.send({
@@ -2339,6 +2343,12 @@ client.on(
           return;
         }
 
+        await interaction.deferReply({
+          ephemeral: true
+        });
+
+        await interaction.deleteReply();
+
         const panelEmbed =
           new EmbedBuilder()
             .setTitle(
@@ -2348,7 +2358,9 @@ client.on(
               `> **Host by:** <@${interaction.user.id}>\n` +
               `> **Click the** \`Start Button\` **to start** \`Guess Game\`.`
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         const row =
           new ActionRowBuilder()
@@ -2365,24 +2377,21 @@ client.on(
                 )
             );
 
-        await sendNormalCommandMessage(
-          interaction,
-          {
-            embeds: [
-              panelEmbed
-            ],
-            components: [
-              row
-            ]
-          }
-        );
+        await interaction.channel.send({
+          embeds: [
+            panelEmbed
+          ],
+          components: [
+            row
+          ]
+        });
 
         return;
       }
 
-      // ========================================================
-      // /EMBED
-      // ========================================================
+      // =========================
+      // EMBED
+      // =========================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2404,31 +2413,38 @@ client.on(
             .setDescription(
               description
             )
-            .setColor(0x808080)
+            .setColor(
+              0x808080
+            )
             .setFooter({
               text:
                 `Today at ${getTodayTime()}`
             });
 
         if (title) {
-          embed.setTitle(title);
+          embed.setTitle(
+            title
+          );
         }
 
-        await sendNormalCommandMessage(
-          interaction,
-          {
-            embeds: [
-              embed
-            ]
-          }
-        );
+        await interaction.deferReply({
+          ephemeral: true
+        });
+
+        await interaction.deleteReply();
+
+        await interaction.channel.send({
+          embeds: [
+            embed
+          ]
+        });
 
         return;
       }
 
-      // ========================================================
+      // =========================
       // SEARCH BUTTON
-      // ========================================================
+      // =========================
 
       if (
         interaction.isButton() &&
@@ -2458,12 +2474,18 @@ client.on(
             .setStyle(
               TextInputStyle.Short
             )
-            .setRequired(true)
-            .setMaxLength(100);
+            .setRequired(
+              true
+            )
+            .setMaxLength(
+              100
+            );
 
         modal.addComponents(
           new ActionRowBuilder()
-            .addComponents(input)
+            .addComponents(
+              input
+            )
         );
 
         await interaction.showModal(
@@ -2473,9 +2495,9 @@ client.on(
         return;
       }
 
-      // ========================================================
+      // =========================
       // SEARCH MODAL
-      // ========================================================
+      // =========================
 
       if (
         interaction.isModalSubmit() &&
@@ -2511,7 +2533,10 @@ client.on(
           results
         );
 
-        if (results.length === 0) {
+        if (
+          results.length ===
+          0
+        ) {
           await interaction.reply({
             content:
               `❌ No file found for \`${query}\`.`,
@@ -2520,6 +2545,10 @@ client.on(
 
           return;
         }
+
+        console.log(
+          `🔎 Search "${query}" -> ${results.length} result(s)`
+        );
 
         const sessionId =
           `${interaction.user.id}-${Date.now()}-${Math.random()
@@ -2534,7 +2563,8 @@ client.on(
             interaction.guildId,
           results,
           page: 0,
-          createdAt: Date.now()
+          createdAt:
+            Date.now()
         };
 
         searchSessions.set(
@@ -2542,7 +2572,7 @@ client.on(
           session
         );
 
-        // Remove expired sessions
+        // Delete expired sessions.
         for (
           const [
             id,
@@ -2554,33 +2584,22 @@ client.on(
               oldSession.createdAt >
             10 * 60 * 1000
           ) {
-            searchSessions.delete(id);
+            searchSessions.delete(
+              id
+            );
           }
         }
+
+        // Start downloading the first result.
+        // Also immediately preload nearby results.
+        prefetchNearby(
+          session,
+          0
+        );
 
         await interaction.deferReply({
           ephemeral: true
         });
-
-        /*
-        Preload the first few results BEFORE
-        showing page 1.
-
-        This makes subsequent navigation
-        extremely fast.
-        */
-
-        prefetchFile(
-          results[0]
-        );
-
-        prefetchFile(
-          results[1]
-        );
-
-        prefetchFile(
-          results[2]
-        );
 
         await showSearchResult(
           interaction,
@@ -2591,9 +2610,9 @@ client.on(
         return;
       }
 
-      // ========================================================
-      // PREVIOUS
-      // ========================================================
+      // =====================================================
+      // PREVIOUS FILE
+      // =====================================================
 
       if (
         interaction.isButton() &&
@@ -2634,38 +2653,53 @@ client.on(
           return;
         }
 
-        session.page =
+        const newPage =
           Math.max(
             0,
             session.page - 1
           );
 
+        session.page =
+          newPage;
+
+        const buttons =
+          createSearchButtons(
+            session.id,
+            newPage,
+            session.results.length
+          );
+
         /*
-        deferUpdate makes Discord stop
-        showing the "..." loading state.
+         * IMPORTANT SPEED FIX:
+         *
+         * We acknowledge the button immediately and
+         * change the page number immediately.
+         *
+         * The old file stays temporarily while the new
+         * file is being downloaded if it wasn't cached.
+         *
+         * This prevents Discord's button from sitting on
+         * the loading "..." state.
+         */
+        await interaction.update({
+          components: [
+            buttons
+          ]
+        });
 
-        showSearchResult then updates:
-        FILE
-        NUMBER
-        BUTTONS
-
-        in ONE editReply.
-        */
-
-        await interaction.deferUpdate();
-
-        await showSearchResult(
+        // Download/show the new file after immediate update.
+        await editWithFile(
           interaction,
           session,
-          session.page
+          newPage
         );
 
         return;
       }
 
-      // ========================================================
-      // NEXT
-      // ========================================================
+      // =====================================================
+      // NEXT FILE
+      // =====================================================
 
       if (
         interaction.isButton() &&
@@ -2706,26 +2740,44 @@ client.on(
           return;
         }
 
-        session.page =
+        const newPage =
           Math.min(
             session.results.length - 1,
             session.page + 1
           );
 
-        await interaction.deferUpdate();
+        session.page =
+          newPage;
 
-        await showSearchResult(
+        const buttons =
+          createSearchButtons(
+            session.id,
+            newPage,
+            session.results.length
+          );
+
+        /*
+         * Immediate button update.
+         * No waiting for download.
+         */
+        await interaction.update({
+          components: [
+            buttons
+          ]
+        });
+
+        await editWithFile(
           interaction,
           session,
-          session.page
+          newPage
         );
 
         return;
       }
 
-      // ========================================================
-      // START GUESS GAME
-      // ========================================================
+      // =========================
+      // START BUTTON
+      // =========================
 
       if (
         interaction.isButton() &&
@@ -2788,12 +2840,13 @@ client.on(
           interaction.channel.permissionOverwrites
         ) {
           try {
-            await interaction.channel.permissionOverwrites.edit(
-              interaction.guild.roles.everyone,
-              {
-                SendMessages: true
-              }
-            );
+            await interaction.channel
+              .permissionOverwrites.edit(
+                interaction.guild.roles.everyone,
+                {
+                  SendMessages: true
+                }
+              );
           } catch (error) {
             console.error(
               "⚠️ Could not unlock channel:",
@@ -2809,7 +2862,9 @@ client.on(
               "> 🔢 **1 - 10000**\n" +
               "> 💀 **TRY TO WIN**"
             )
-            .setColor(0x808080);
+            .setColor(
+              0x808080
+            );
 
         await interaction.update({
           embeds: [
@@ -2841,9 +2896,9 @@ client.on(
   }
 );
 
-// ============================================================
-// MESSAGE CREATE
-// ============================================================
+// =========================
+// Messages
+// =========================
 
 client.on(
   "messageCreate",
@@ -2853,9 +2908,9 @@ client.on(
         return;
       }
 
-      // ========================================================
-      // GUESS GAME
-      // ========================================================
+      // =========================
+      // GUESS NUMBER
+      // =========================
 
       const game =
         games.get(
@@ -2872,7 +2927,9 @@ client.on(
           );
 
         if (
-          Number.isInteger(guess) &&
+          Number.isInteger(
+            guess
+          ) &&
           guess >= 1 &&
           guess <= 10000
         ) {
@@ -2887,7 +2944,9 @@ client.on(
                   `> 🎊 <@${message.author.id}> **WON!**\n` +
                   `> ✅ **${guess}**`
                 )
-                .setColor(0x808080);
+                .setColor(
+                  0x808080
+                );
 
             await message.channel.send({
               embeds: [
@@ -2900,12 +2959,13 @@ client.on(
               message.channel.permissionOverwrites
             ) {
               try {
-                await message.channel.permissionOverwrites.edit(
-                  message.guild.roles.everyone,
-                  {
-                    SendMessages: false
-                  }
-                );
+                await message.channel
+                  .permissionOverwrites.edit(
+                    message.guild.roles.everyone,
+                    {
+                      SendMessages: false
+                    }
+                  );
               } catch (error) {
                 console.error(
                   "⚠️ Could not lock channel:",
@@ -2925,11 +2985,14 @@ client.on(
         }
       }
 
-      // ========================================================
+      // =========================
       // AI
-      // ========================================================
+      // =========================
 
-      if (!groq && !openrouter) {
+      if (
+        !groq &&
+        !openrouter
+      ) {
         return;
       }
 
@@ -2942,8 +3005,11 @@ client.on(
       const massMention =
         message.mentions.everyone;
 
-      let repliedToBot = false;
-      let referencedMessage = null;
+      let repliedToBot =
+        false;
+
+      let referencedMessage =
+        null;
 
       if (
         message.reference &&
@@ -2973,7 +3039,8 @@ client.on(
         return;
       }
 
-      const now = Date.now();
+      const now =
+        Date.now();
 
       const lastUsed =
         aiCooldowns.get(
@@ -3099,9 +3166,9 @@ Understand the user's new message in the context of your previous message.`;
   }
 );
 
-// ============================================================
-// DISCORD ERRORS
-// ============================================================
+// =========================
+// Discord Errors
+// =========================
 
 client.on(
   "error",
@@ -3123,9 +3190,9 @@ client.on(
   }
 );
 
-// ============================================================
-// PROCESS ERRORS
-// ============================================================
+// =========================
+// Process Errors
+// =========================
 
 process.on(
   "unhandledRejection",
@@ -3147,15 +3214,17 @@ process.on(
   }
 );
 
-// ============================================================
-// LOGIN
-// ============================================================
+// =========================
+// Login
+// =========================
 
 console.log(
   "🔑 Logging into Discord..."
 );
 
-client.login(TOKEN).catch(
+client.login(
+  TOKEN
+).catch(
   error => {
     console.error(
       "❌ Discord login failed:",
