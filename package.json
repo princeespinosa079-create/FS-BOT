@@ -6,9 +6,11 @@
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "discord.js": "^14.21.0",
-    "express": "^5.1.0",
-    "openai": "^5.19.1"
+    "express": "^5.1.0"
   }
 }
