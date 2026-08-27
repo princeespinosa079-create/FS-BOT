@@ -20,9 +20,9 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 
-// =========================
-// Environment Variables
-// =========================
+// =====================================================
+// ENVIRONMENT
+// =====================================================
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -32,76 +32,49 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const OPENROUTER_API_KEY =
   process.env.OPENROUTER_API_KEY;
 
-const OWNER_ID =
-  "1302080645987569694";
-
-// =========================
-// Required Environment Check
-// =========================
+const OWNER_ID = "1302080645987569694";
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error(
     "❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID."
   );
-
   process.exit(1);
 }
 
-if (!GROQ_API_KEY && !OPENROUTER_API_KEY) {
-  console.warn(
-    "⚠️ GROQ_API_KEY and OPENROUTER_API_KEY are both missing. AI is disabled."
-  );
-}
-
-// =========================
-// AI Clients
-// =========================
+// =====================================================
+// AI
+// =====================================================
 
 const groq = GROQ_API_KEY
   ? new OpenAI({
       apiKey: GROQ_API_KEY,
-      baseURL:
-        "https://api.groq.com/openai/v1"
+      baseURL: "https://api.groq.com/openai/v1"
     })
   : null;
 
 const openrouter = OPENROUTER_API_KEY
   ? new OpenAI({
       apiKey: OPENROUTER_API_KEY,
-      baseURL:
-        "https://openrouter.ai/api/v1",
+      baseURL: "https://openrouter.ai/api/v1",
       defaultHeaders: {
-        "HTTP-Referer":
-          "https://discord.com",
-        "X-OpenRouter-Title":
-          "FS Bot"
+        "HTTP-Referer": "https://discord.com",
+        "X-OpenRouter-Title": "FS Bot"
       }
     })
   : null;
 
-// =========================
-// AI Models
-// =========================
+const GROQ_MODEL = "openai/gpt-oss-20b";
+const OPENROUTER_MODEL = "openrouter/auto";
 
-const GROQ_MODEL =
-  "openai/gpt-oss-20b";
-
-const OPENROUTER_MODEL =
-  "openrouter/auto";
-
-// =========================
-// Web Server
-// =========================
+// =====================================================
+// EXPRESS
+// =====================================================
 
 const app = express();
-
-const PORT =
-  process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => {
-  res.status(200).send(
-    "FS Bot is online."
-  );
+  res.status(200).send("FS Bot is online.");
 });
 
 app.get("/health", (req, res) => {
@@ -110,28 +83,22 @@ app.get("/health", (req, res) => {
     bot: client.user
       ? client.user.tag
       : "connecting",
-    groq: groq
-      ? "enabled"
-      : "disabled",
+    groq: groq ? "enabled" : "disabled",
     openrouter: openrouter
       ? "enabled"
       : "disabled"
   });
 });
 
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `🌐 Web server running on port ${PORT}`
-    );
-  }
-);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `🌐 Web server running on port ${PORT}`
+  );
+});
 
-// =========================
-// Discord Client
-// =========================
+// =====================================================
+// DISCORD CLIENT
+// =====================================================
 
 const client = new Client({
   intents: [
@@ -141,26 +108,20 @@ const client = new Client({
   ]
 });
 
-// =========================
-// Games
-// =========================
+// =====================================================
+// GAMES
+// =====================================================
 
 const games = new Map();
 
-// =========================
-// AI Cooldowns
-// =========================
+// =====================================================
+// AI MEMORY
+// =====================================================
 
 const aiCooldowns = new Map();
-
-const AI_COOLDOWN = 2000;
-
-// =========================
-// AI Conversation Memory
-// =========================
-
 const conversations = new Map();
 
+const AI_COOLDOWN = 2000;
 const MAX_HISTORY = 10;
 
 function getConversation(key) {
@@ -176,89 +137,61 @@ function addConversationMessage(
   role,
   content
 ) {
-  const history =
-    getConversation(key);
+  const history = getConversation(key);
 
   history.push({
     role,
     content
   });
 
-  while (
-    history.length >
-    MAX_HISTORY
-  ) {
+  while (history.length > MAX_HISTORY) {
     history.shift();
   }
 }
 
-// =========================
+// =====================================================
 // SOURCE FINDER
-// =========================
+// =====================================================
 
-const sourceIndexes =
-  new Map();
+const sourceIndexes = new Map();
+const logChannels = new Map();
+const searchSessions = new Map();
 
-const logChannels =
-  new Map();
-
-const searchSessions =
-  new Map();
-
+// IMPORTANT:
+// This is only a safety limit.
+// Search results are filtered BEFORE this.
 const MAX_SEARCH_RESULTS = 200;
 
-const SEARCH_SESSION_TIME =
-  10 * 60 * 1000;
-
-// =========================
-// Persistent Storage
-// =========================
+// =====================================================
+// FILES
+// =====================================================
 
 const SOURCE_INDEX_FILE =
-  path.join(
-    __dirname,
-    "source-index.json"
-  );
+  path.join(__dirname, "source-index.json");
 
 const LOG_CHANNELS_FILE =
-  path.join(
-    __dirname,
-    "log-channels.json"
-  );
+  path.join(__dirname, "log-channels.json");
 
-// =========================
-// Load Persistent Library
-// =========================
+// =====================================================
+// PERSISTENT DATA
+// =====================================================
 
 function loadPersistentData() {
   try {
-    if (
-      fs.existsSync(
-        SOURCE_INDEX_FILE
-      )
-    ) {
-      const raw =
-        fs.readFileSync(
-          SOURCE_INDEX_FILE,
-          "utf8"
-        );
+    if (fs.existsSync(SOURCE_INDEX_FILE)) {
+      const raw = fs.readFileSync(
+        SOURCE_INDEX_FILE,
+        "utf8"
+      );
 
-      const data =
-        JSON.parse(raw);
+      const data = JSON.parse(raw);
 
       sourceIndexes.clear();
 
-      for (
-        const [
-          channelId,
-          index
-        ] of Object.entries(data)
-      ) {
+      for (const [channelId, index] of Object.entries(data)) {
         if (
           index &&
-          Array.isArray(
-            index.files
-          )
+          Array.isArray(index.files)
         ) {
           sourceIndexes.set(
             channelId,
@@ -279,28 +212,17 @@ function loadPersistentData() {
   }
 
   try {
-    if (
-      fs.existsSync(
-        LOG_CHANNELS_FILE
-      )
-    ) {
-      const raw =
-        fs.readFileSync(
-          LOG_CHANNELS_FILE,
-          "utf8"
-        );
+    if (fs.existsSync(LOG_CHANNELS_FILE)) {
+      const raw = fs.readFileSync(
+        LOG_CHANNELS_FILE,
+        "utf8"
+      );
 
-      const data =
-        JSON.parse(raw);
+      const data = JSON.parse(raw);
 
       logChannels.clear();
 
-      for (
-        const [
-          guildId,
-          channelId
-        ] of Object.entries(data)
-      ) {
+      for (const [guildId, channelId] of Object.entries(data)) {
         logChannels.set(
           guildId,
           channelId
@@ -319,34 +241,20 @@ function loadPersistentData() {
   }
 }
 
-// =========================
-// Save Persistent Library
-// =========================
-
 function saveSourceLibrary() {
   try {
     const data = {};
 
-    for (
-      const [
-        channelId,
-        index
-      ] of sourceIndexes.entries()
-    ) {
+    for (const [channelId, index] of sourceIndexes.entries()) {
       data[channelId] = index;
     }
 
     const tempFile =
-      SOURCE_INDEX_FILE +
-      ".tmp";
+      SOURCE_INDEX_FILE + ".tmp";
 
     fs.writeFileSync(
       tempFile,
-      JSON.stringify(
-        data,
-        null,
-        2
-      ),
+      JSON.stringify(data, null, 2),
       "utf8"
     );
 
@@ -362,34 +270,20 @@ function saveSourceLibrary() {
   }
 }
 
-// =========================
-// Save Log Channels
-// =========================
-
 function saveLogChannels() {
   try {
     const data = {};
 
-    for (
-      const [
-        guildId,
-        channelId
-      ] of logChannels.entries()
-    ) {
+    for (const [guildId, channelId] of logChannels.entries()) {
       data[guildId] = channelId;
     }
 
     const tempFile =
-      LOG_CHANNELS_FILE +
-      ".tmp";
+      LOG_CHANNELS_FILE + ".tmp";
 
     fs.writeFileSync(
       tempFile,
-      JSON.stringify(
-        data,
-        null,
-        2
-      ),
+      JSON.stringify(data, null, 2),
       "utf8"
     );
 
@@ -405,9 +299,9 @@ function saveLogChannels() {
   }
 }
 
-// =========================
-// Time
-// =========================
+// =====================================================
+// TIME
+// =====================================================
 
 function getTodayTime() {
   return new Date().toLocaleTimeString(
@@ -416,15 +310,14 @@ function getTodayTime() {
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
-      timeZone:
-        "Asia/Manila"
+      timeZone: "Asia/Manila"
     }
   );
 }
 
-// =========================
-// AI Personality
-// =========================
+// =====================================================
+// AI PERSONALITY
+// =====================================================
 
 const AI_PERSONALITY = `
 You are a Discord chatbot with a sarcastic, snarky, edgy and playful personality.
@@ -445,7 +338,6 @@ STYLE:
 - You may use casual shortcuts such as "bro", "fr", "nah", "bruh".
 - Use emojis such as 🙄, 💀, 🙏, 😭, 🤦, 💔, 🤨.
 - Do not overuse them.
-- Keep the personality playful rather than genuinely abusive.
 
 SAFETY:
 - Do not use hateful slurs.
@@ -459,9 +351,9 @@ SAFETY:
 Keep responses appropriate for a Discord server.
 `;
 
-// =========================
-// AI Request
-// =========================
+// =====================================================
+// AI REQUEST
+// =====================================================
 
 async function requestAI(
   clientInstance,
@@ -472,8 +364,7 @@ async function requestAI(
   const input = [
     {
       role: "system",
-      content:
-        AI_PERSONALITY
+      content: AI_PERSONALITY
     },
     ...history,
     {
@@ -490,10 +381,6 @@ async function requestAI(
   });
 }
 
-// =========================
-// Ask AI
-// =========================
-
 async function askAI(
   prompt,
   history = []
@@ -509,9 +396,7 @@ async function askAI(
         );
 
       const text =
-        response?.choices?.[0]
-          ?.message?.content
-          ?.trim();
+        response?.choices?.[0]?.message?.content?.trim();
 
       if (text) {
         return {
@@ -519,10 +404,7 @@ async function askAI(
           provider: "Groq",
           text:
             text.length > 1900
-              ? text.slice(
-                  0,
-                  1890
-                ) + "..."
+              ? text.slice(0, 1890) + "..."
               : text
         };
       }
@@ -530,8 +412,7 @@ async function askAI(
       console.error(
         "❌ Groq error:",
         error?.status || "",
-        error?.message ||
-          error
+        error?.message || error
       );
     }
   }
@@ -547,21 +428,15 @@ async function askAI(
         );
 
       const text =
-        response?.choices?.[0]
-          ?.message?.content
-          ?.trim();
+        response?.choices?.[0]?.message?.content?.trim();
 
       if (text) {
         return {
           success: true,
-          provider:
-            "OpenRouter",
+          provider: "OpenRouter",
           text:
             text.length > 1900
-              ? text.slice(
-                  0,
-                  1890
-                ) + "..."
+              ? text.slice(0, 1890) + "..."
               : text
         };
       }
@@ -569,8 +444,7 @@ async function askAI(
       console.error(
         "❌ OpenRouter error:",
         error?.status || "",
-        error?.message ||
-          error
+        error?.message || error
       );
     }
   }
@@ -582,114 +456,69 @@ async function askAI(
   };
 }
 
-// ==================================================
-// SOURCE FINDER HELPERS
-// ==================================================
-
-function isTxtFile(name) {
-  const filename =
-    String(name || "")
-      .trim()
-      .toLowerCase();
-
-  return filename.endsWith(
-    ".txt"
-  );
-}
-
-// ==================================================
-// CLEAN FILENAME
-// ==================================================
-
-function cleanFilename(name) {
-  let filename =
-    String(name || "")
-      .trim();
-
-  if (!filename) {
-    return "file.txt";
-  }
-
-  // Only clean TXT files
-  if (!isTxtFile(filename)) {
-    return filename;
-  }
-
-  const ext =
-    path.extname(filename);
-
-  const base =
-    filename.slice(
-      0,
-      -ext.length
-    );
-
-  /*
-    Remove ONLY 2-10 digits
-    when they are at the very beginning
-    and followed by _, - or whitespace.
-
-    Examples:
-
-    403_spyder_duel.txt
-    -> spyder_duel.txt
-
-    12_spyder_duel.txt
-    -> spyder_duel.txt
-
-    1234567890_spyder_duel.txt
-    -> spyder_duel.txt
-
-    7_spyder_duel.txt
-    -> unchanged
-
-    1_spyder_duel.txt
-    -> unchanged
-
-    12345678901_spyder_duel.txt
-    -> unchanged
-  */
-
-  const cleanedBase =
-    base.replace(
-      /^\d{2,10}[_\-\s]+/,
-      ""
-    );
-
-  return (
-    cleanedBase +
-    ext
-  );
-}
-
-// ==================================================
-// NORMALIZE FILENAME
-// ==================================================
+// =====================================================
+// FILENAME NORMALIZATION
+// =====================================================
 
 function normalizeFilename(name) {
   return String(name || "")
     .toLowerCase()
     .replace(/\.[^.]+$/, "")
     .replace(/[_\-]+/g, " ")
-    .replace(
-      /[^\p{L}\p{N}\s]/gu,
-      " "
-    )
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-// ==================================================
-// Attachment Filter
-// ==================================================
+// =====================================================
+// REMOVE 2-10 DIGIT PREFIX
+// =====================================================
+//
+// 403_spyder_duel.txt
+// -> spyder_duel.txt
+//
+// 12_spyder_duel.txt
+// -> spyder_duel.txt
+//
+// 1234567890_spyder_duel.txt
+// -> spyder_duel.txt
+//
+// 7_spyder_duel.txt
+// -> stays unchanged
+//
+// =====================================================
 
-function shouldIgnoreFile(name) {
-  return !isTxtFile(name);
+function cleanFilename(name) {
+  let filename = String(name || "").trim();
+
+  const match = filename.match(
+    /^(\d{2,10})[_\-\s]+(.+)$/u
+  );
+
+  if (match) {
+    filename = match[2].trim();
+  }
+
+  return filename;
 }
 
-// ==================================================
-// Duplicate Filename Check
-// ==================================================
+// =====================================================
+// ONLY TXT FILES
+// =====================================================
+
+function isAllowedFile(name) {
+  return String(name || "")
+    .toLowerCase()
+    .endsWith(".txt");
+}
+
+function shouldIgnoreFile(name) {
+  return !isAllowedFile(name);
+}
+
+// =====================================================
+// DUPLICATE CHECK
+// =====================================================
 
 function filenameAlreadyIndexed(
   filename,
@@ -697,13 +526,11 @@ function filenameAlreadyIndexed(
 ) {
   const normalized =
     normalizeFilename(
-      cleanFilename(
-        filename
-      )
+      cleanFilename(filename)
     );
 
   if (!normalized) {
-    return true;
+    return false;
   }
 
   for (
@@ -714,29 +541,22 @@ function filenameAlreadyIndexed(
   ) {
     if (
       exceptChannelId &&
-      channelId ===
-        exceptChannelId
+      channelId === exceptChannelId
     ) {
       continue;
     }
 
     if (
       !index ||
-      !Array.isArray(
-        index.files
-      )
+      !Array.isArray(index.files)
     ) {
       continue;
     }
 
-    for (
-      const file of index.files
-    ) {
+    for (const file of index.files) {
       if (
         normalizeFilename(
-          cleanFilename(
-            file.name
-          )
+          cleanFilename(file.name)
         ) === normalized
       ) {
         return true;
@@ -747,62 +567,70 @@ function filenameAlreadyIndexed(
   return false;
 }
 
-// ==================================================
-// Collect Attachments
-// ==================================================
+// =====================================================
+// COLLECT ATTACHMENTS
+// =====================================================
+
+function addAttachment(
+  attachment,
+  message,
+  results,
+  source
+) {
+  if (!attachment) {
+    return;
+  }
+
+  const originalName =
+    attachment.name ||
+    attachment.filename ||
+    "file";
+
+  // ONLY TXT
+  if (!isAllowedFile(originalName)) {
+    return;
+  }
+
+  const cleanedName =
+    cleanFilename(originalName);
+
+  results.push({
+    id: attachment.id,
+    name: cleanedName,
+    originalName,
+    url: attachment.url,
+    size: attachment.size || 0,
+    messageId: message.id,
+    channelId: message.channelId,
+    createdTimestamp:
+      message.createdTimestamp,
+    source
+  });
+}
 
 function collectAttachmentsFromMessage(
   message,
   results
 ) {
+  // Normal attachments
   if (message.attachments) {
     for (
       const attachment of
       message.attachments.values()
     ) {
-      const originalName =
-        attachment.name ||
-        attachment.filename ||
-        "file";
-
-      // ONLY TXT
-      if (
-        shouldIgnoreFile(
-          originalName
-        )
-      ) {
-        continue;
-      }
-
-      const cleanedName =
-        cleanFilename(
-          originalName
-        );
-
-      results.push({
-        id: attachment.id,
-        name: cleanedName,
-        originalName,
-        url: attachment.url,
-        size:
-          attachment.size || 0,
-        messageId:
-          message.id,
-        channelId:
-          message.channelId,
-        createdTimestamp:
-          message.createdTimestamp,
-        source: "message"
-      });
+      addAttachment(
+        attachment,
+        message,
+        results,
+        "message"
+      );
     }
   }
 
   // Forwarded message attachments
   if (
     message.messageSnapshots &&
-    typeof message
-      .messageSnapshots
-      .values ===
+    typeof message.messageSnapshots.values ===
       "function"
   ) {
     for (
@@ -825,41 +653,12 @@ function collectAttachmentsFromMessage(
           const attachment of
           snapshotAttachments.values()
         ) {
-          const originalName =
-            attachment.name ||
-            attachment.filename ||
-            "file";
-
-          if (
-            shouldIgnoreFile(
-              originalName
-            )
-          ) {
-            continue;
-          }
-
-          results.push({
-            id:
-              `forwarded-${attachment.id}`,
-            name:
-              cleanFilename(
-                originalName
-              ),
-            originalName,
-            url:
-              attachment.url,
-            size:
-              attachment.size ||
-              0,
-            messageId:
-              message.id,
-            channelId:
-              message.channelId,
-            createdTimestamp:
-              message.createdTimestamp,
-            source:
-              "forwarded"
-          });
+          addAttachment(
+            attachment,
+            message,
+            results,
+            "forwarded"
+          );
         }
       } else if (
         Array.isArray(
@@ -870,54 +669,23 @@ function collectAttachmentsFromMessage(
           const attachment of
           snapshotAttachments
         ) {
-          const originalName =
-            attachment.name ||
-            attachment.filename ||
-            "file";
-
-          if (
-            shouldIgnoreFile(
-              originalName
-            )
-          ) {
-            continue;
-          }
-
-          results.push({
-            id:
-              `forwarded-${attachment.id}`,
-            name:
-              cleanFilename(
-                originalName
-              ),
-            originalName,
-            url:
-              attachment.url,
-            size:
-              attachment.size ||
-              0,
-            messageId:
-              message.id,
-            channelId:
-              message.channelId,
-            createdTimestamp:
-              message.createdTimestamp,
-            source:
-              "forwarded"
-          });
+          addAttachment(
+            attachment,
+            message,
+            results,
+            "forwarded"
+          );
         }
       }
     }
   }
 }
 
-// ==================================================
-// Scan Channel
-// ==================================================
+// =====================================================
+// SCAN CHANNEL
+// =====================================================
 
-async function scanChannel(
-  channel
-) {
+async function scanChannel(channel) {
   const existingIndex =
     sourceIndexes.get(
       channel.id
@@ -936,8 +704,7 @@ async function scanChannel(
     };
 
     if (before) {
-      options.before =
-        before;
+      options.before = before;
     }
 
     const batch =
@@ -949,12 +716,9 @@ async function scanChannel(
       break;
     }
 
-    totalMessages +=
-      batch.size;
+    totalMessages += batch.size;
 
-    for (
-      const message of batch.values()
-    ) {
+    for (const message of batch.values()) {
       collectAttachmentsFromMessage(
         message,
         files
@@ -968,99 +732,77 @@ async function scanChannel(
       break;
     }
 
-    before =
-      oldestMessage.id;
+    before = oldestMessage.id;
 
-    if (
-      batch.size < 100
-    ) {
+    if (batch.size < 100) {
       break;
     }
   }
 
-  // Deduplicate THIS scan
+  // ===================================================
+  // DEDUPLICATE THIS SCAN
+  // ===================================================
+
   const uniqueThisScan =
     new Map();
 
-  for (
-    const file of files
-  ) {
-    if (
-      !isTxtFile(file.name)
-    ) {
-      continue;
-    }
-
-    const cleanedName =
-      cleanFilename(
-        file.name
-      );
+  for (const file of files) {
+    const cleaned =
+      cleanFilename(file.name);
 
     const key =
-      normalizeFilename(
-        cleanedName
-      );
+      normalizeFilename(cleaned);
 
     if (!key) {
       continue;
     }
 
-    if (
-      uniqueThisScan.has(key)
-    ) {
+    if (uniqueThisScan.has(key)) {
       duplicateFiles++;
       continue;
     }
 
+    file.name = cleaned;
+
     uniqueThisScan.set(
       key,
-      {
-        ...file,
-        name: cleanedName
-      }
+      file
     );
   }
 
+  // ===================================================
+  // PREVIOUS FILES
+  // ===================================================
+
   const previousFiles =
     existingIndex &&
-    Array.isArray(
-      existingIndex.files
-    )
+    Array.isArray(existingIndex.files)
       ? existingIndex.files
       : [];
 
   const previousByName =
     new Map();
 
-  for (
-    const file of previousFiles
-  ) {
-    if (
-      !isTxtFile(file.name)
-    ) {
+  for (const file of previousFiles) {
+    if (!isAllowedFile(file.name)) {
       continue;
     }
 
-    const cleanedName =
-      cleanFilename(
-        file.name
-      );
+    const cleaned =
+      cleanFilename(file.name);
 
     const key =
-      normalizeFilename(
-        cleanedName
-      );
+      normalizeFilename(cleaned);
 
     if (!key) {
       continue;
     }
 
+    file.name = cleaned;
+
     previousByName.set(
       key,
-      {
-        ...file,
-        name: cleanedName
-      }
+      file
     );
   }
 
@@ -1068,16 +810,24 @@ async function scanChannel(
     ...previousByName.values()
   ];
 
+  // ===================================================
+  // ADD NEW FILES
+  // ===================================================
+
   for (
     const file of
     uniqueThisScan.values()
   ) {
     const normalized =
       normalizeFilename(
-        file.name
+        cleanFilename(file.name)
       );
 
-    // Already in this channel
+    if (!normalized) {
+      continue;
+    }
+
+    // Already in same channel
     if (
       previousByName.has(
         normalized
@@ -1087,7 +837,7 @@ async function scanChannel(
       continue;
     }
 
-    // Already in another scanned channel
+    // Already somewhere else
     if (
       filenameAlreadyIndexed(
         file.name,
@@ -1098,16 +848,17 @@ async function scanChannel(
       continue;
     }
 
+    file.name =
+      cleanFilename(file.name);
+
     finalFiles.push(file);
     newFiles++;
   }
 
   finalFiles.sort(
     (a, b) =>
-      (a.createdTimestamp ||
-        0) -
-      (b.createdTimestamp ||
-        0)
+      (a.createdTimestamp || 0) -
+      (b.createdTimestamp || 0)
   );
 
   sourceIndexes.set(
@@ -1133,9 +884,77 @@ async function scanChannel(
   };
 }
 
-// ==================================================
-// Search Scoring
-// ==================================================
+// =====================================================
+// SEARCH TOKENIZATION
+// =====================================================
+
+function tokenize(text) {
+  return normalizeFilename(text)
+    .split(" ")
+    .filter(Boolean);
+}
+
+// =====================================================
+// LEVENSHTEIN
+// =====================================================
+
+function levenshtein(a, b) {
+  if (a === b) {
+    return 0;
+  }
+
+  if (!a.length) {
+    return b.length;
+  }
+
+  if (!b.length) {
+    return a.length;
+  }
+
+  let prev =
+    new Array(b.length + 1);
+
+  let curr =
+    new Array(b.length + 1);
+
+  for (let j = 0; j <= b.length; j++) {
+    prev[j] = j;
+  }
+
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+
+    for (let j = 1; j <= b.length; j++) {
+      const cost =
+        a[i - 1] === b[j - 1]
+          ? 0
+          : 1;
+
+      curr[j] = Math.min(
+        curr[j - 1] + 1,
+        prev[j] + 1,
+        prev[j - 1] + cost
+      );
+    }
+
+    [prev, curr] =
+      [curr, prev];
+  }
+
+  return prev[b.length];
+}
+
+// =====================================================
+// SEARCH SCORE
+// =====================================================
+//
+// IMPORTANT:
+// Returning 0 means "NOT A RESULT".
+//
+// This prevents unrelated files from filling
+// the search to 200 results.
+//
+// =====================================================
 
 function scoreSearch(
   filename,
@@ -1143,170 +962,134 @@ function scoreSearch(
 ) {
   const file =
     normalizeFilename(
-      filename
+      cleanFilename(filename)
     );
 
   const search =
-    normalizeFilename(
-      query
-    );
+    normalizeFilename(query);
 
   if (!file || !search) {
     return 0;
   }
 
-  // Exact filename
   if (file === search) {
-    return 1000;
+    return 10000;
   }
 
-  // Full phrase
-  if (
-    file.includes(search)
-  ) {
-    return 900;
+  if (file.includes(search)) {
+    return 9000;
   }
 
   const queryWords =
-    search
-      .split(" ")
-      .filter(Boolean);
+    tokenize(search);
 
   const fileWords =
-    file
-      .split(" ")
-      .filter(Boolean);
+    tokenize(file);
+
+  if (
+    !queryWords.length ||
+    !fileWords.length
+  ) {
+    return 0;
+  }
 
   let score = 0;
   let matchedWords = 0;
 
-  for (
-    const queryWord of queryWords
-  ) {
-    // Exact word
-    if (
-      fileWords.includes(
-        queryWord
-      )
-    ) {
-      score += 200;
-      matchedWords++;
-      continue;
-    }
+  for (const queryWord of queryWords) {
+    let best = 0;
 
-    // Word contained
-    if (
-      fileWords.some(
-        word =>
-          word.includes(
-            queryWord
-          ) ||
-          queryWord.includes(
-            word
-          )
-      )
-    ) {
-      score += 130;
-      matchedWords++;
-      continue;
-    }
+    for (const fileWord of fileWords) {
+      // Exact word
+      if (fileWord === queryWord) {
+        best = Math.max(best, 1000);
+        continue;
+      }
 
-    // Prefix
-    const prefixLength =
-      Math.max(
-        3,
-        Math.floor(
-          queryWord.length *
-            0.6
-        )
-      );
+      // Starts with query
+      if (fileWord.startsWith(queryWord)) {
+        best = Math.max(best, 700);
+        continue;
+      }
 
-    if (
-      fileWords.some(
-        word =>
-          word.startsWith(
-            queryWord.slice(
-              0,
-              prefixLength
+      // Query starts with filename word
+      if (queryWord.startsWith(fileWord)) {
+        best = Math.max(best, 500);
+        continue;
+      }
+
+      // Contains
+      if (
+        fileWord.includes(queryWord) ||
+        queryWord.includes(fileWord)
+      ) {
+        best = Math.max(best, 400);
+        continue;
+      }
+
+      // Small typo tolerance
+      const distance =
+        levenshtein(
+          queryWord,
+          fileWord
+        );
+
+      const maxLength =
+        Math.max(
+          queryWord.length,
+          fileWord.length
+        );
+
+      if (
+        maxLength >= 4 &&
+        distance <=
+          Math.max(
+            1,
+            Math.floor(
+              maxLength * 0.25
             )
           )
-      )
-    ) {
-      score += 80;
-      matchedWords++;
-    }
-  }
-
-  /*
-    Important:
-    A query like:
-
-      anti desync
-
-    can still find:
-
-      work desync.txt
-
-    because "desync" matches strongly.
-
-    But files matching BOTH words
-    receive a higher score.
-  */
-
-  if (
-    queryWords.length > 1 &&
-    matchedWords ===
-      queryWords.length
-  ) {
-    score += 250;
-  }
-
-  // Character overlap fallback
-  if (
-    score === 0
-  ) {
-    const compactQuery =
-      search.replace(
-        /\s/g,
-        ""
-      );
-
-    const compactFile =
-      file.replace(
-        /\s/g,
-        ""
-      );
-
-    let matched = 0;
-
-    for (
-      const char of compactQuery
-    ) {
-      if (
-        compactFile.includes(
-          char
-        )
       ) {
-        matched++;
+        best = Math.max(best, 250);
       }
     }
 
-    if (
-      compactQuery.length
-    ) {
-      score =
-        (matched /
-          compactQuery.length) *
-        30;
+    if (best > 0) {
+      matchedWords++;
+      score += best;
     }
+  }
+
+  // ===================================================
+  // REQUIRE RELEVANCE
+  // ===================================================
+
+  if (matchedWords === 0) {
+    return 0;
+  }
+
+  // For multi-word searches, require at least one
+  // meaningful word. Exact/strong matches score higher.
+  if (
+    queryWords.length >= 2 &&
+    matchedWords === 0
+  ) {
+    return 0;
+  }
+
+  // Bonus for matching all words
+  if (
+    matchedWords === queryWords.length
+  ) {
+    score += 800;
   }
 
   return score;
 }
 
-// ==================================================
-// Search Sources
-// ==================================================
+// =====================================================
+// SEARCH SOURCES
+// =====================================================
 
 function searchSources(
   guildId,
@@ -1331,54 +1114,47 @@ function searchSources(
 
     if (
       !channel ||
-      channel.guildId !==
-        guildId
+      channel.guildId !== guildId
     ) {
       continue;
     }
 
     if (
-      !Array.isArray(
-        index.files
-      )
+      !Array.isArray(index.files)
     ) {
       continue;
     }
 
-    for (
-      const file of index.files
-    ) {
+    for (const file of index.files) {
       // ONLY TXT
       if (
-        !isTxtFile(
-          file.name
-        )
+        !isAllowedFile(file.name)
       ) {
         continue;
       }
 
-      const cleanedName =
-        cleanFilename(
-          file.name
-        );
-
       const score =
         scoreSearch(
-          cleanedName,
+          file.name,
           query
         );
 
-      if (score > 0) {
-        results.push({
-          ...file,
-          name:
-            cleanedName,
-          channelName:
-            index.channelName,
-          searchScore:
-            score
-        });
+      // IMPORTANT:
+      // score must be > 0
+      // otherwise it is NOT a result.
+      if (score <= 0) {
+        continue;
       }
+
+      results.push({
+        ...file,
+        name:
+          cleanFilename(file.name),
+        channelName:
+          index.channelName,
+        searchScore:
+          score
+      });
     }
   }
 
@@ -1395,37 +1171,49 @@ function searchSources(
       }
 
       return (
-        (a.createdTimestamp ||
-          0) -
-        (b.createdTimestamp ||
-          0)
+        (a.createdTimestamp || 0) -
+        (b.createdTimestamp || 0)
       );
     }
   );
 
-  /*
-    IMPORTANT:
-    This returns only the actual
-    number of search matches.
+  // ===================================================
+  // DEDUPLICATE SEARCH RESULTS BY NAME
+  // ===================================================
 
-    Example:
-      4 matching files
-      -> results.length === 4
-      -> page = 1/4
+  const unique =
+    new Map();
 
-    NOT:
-      1/200
-  */
+  for (const result of results) {
+    const key =
+      normalizeFilename(
+        result.name
+      );
 
-  return results.slice(
+    if (!key) {
+      continue;
+    }
+
+    if (!unique.has(key)) {
+      unique.set(
+        key,
+        result
+      );
+    }
+  }
+
+  // Now MAX_SEARCH_RESULTS is only a safety limit.
+  return [
+    ...unique.values()
+  ].slice(
     0,
     MAX_SEARCH_RESULTS
   );
 }
 
-// ==================================================
-// Remove File By Name
-// ==================================================
+// =====================================================
+// REMOVE FILE
+// =====================================================
 
 function removeFileByName(
   guildId,
@@ -1433,9 +1221,7 @@ function removeFileByName(
 ) {
   const target =
     normalizeFilename(
-      cleanFilename(
-        filename
-      )
+      cleanFilename(filename)
     );
 
   let removed = 0;
@@ -1454,46 +1240,35 @@ function removeFileByName(
 
     if (
       !channel ||
-      channel.guildId !==
-        guildId
+      channel.guildId !== guildId
     ) {
       continue;
     }
 
     if (
       !index ||
-      !Array.isArray(
-        index.files
-      )
+      !Array.isArray(index.files)
     ) {
       continue;
     }
 
     const kept = [];
 
-    for (
-      const file of index.files
-    ) {
-      const cleanedName =
-        cleanFilename(
-          file.name
-        );
+    for (const file of index.files) {
+      const fileName =
+        cleanFilename(file.name);
 
       if (
         normalizeFilename(
-          cleanedName
+          fileName
         ) === target
       ) {
         removed++;
-
         removedFiles.push(
-          cleanedName
+          fileName
         );
       } else {
-        kept.push({
-          ...file,
-          name: cleanedName
-        });
+        kept.push(file);
       }
     }
 
@@ -1510,9 +1285,9 @@ function removeFileByName(
   };
 }
 
-// ==================================================
-// Logs
-// ==================================================
+// =====================================================
+// SEARCH LOG
+// =====================================================
 
 async function logSourceSearch(
   interaction,
@@ -1564,10 +1339,7 @@ async function logSourceSearch(
         {
           name: "Search",
           value:
-            `\`${query.slice(
-              0,
-              100
-            )}\``
+            `\`${query.slice(0, 100)}\``
         },
         {
           name: "Results",
@@ -1599,14 +1371,15 @@ async function logSourceSearch(
     });
 }
 
-// ==================================================
-// Search Buttons
-// ==================================================
+// =====================================================
+// SEARCH BUTTONS
+// =====================================================
 
 function createSearchButtons(
   sessionId,
   page,
-  total
+  total,
+  loading = false
 ) {
   const row =
     new ActionRowBuilder();
@@ -1621,7 +1394,7 @@ function createSearchButtons(
         ButtonStyle.Secondary
       )
       .setDisabled(
-        page <= 0
+        loading || page <= 0
       ),
 
     new ButtonBuilder()
@@ -1629,7 +1402,9 @@ function createSearchButtons(
         `source_page:${sessionId}`
       )
       .setLabel(
-        `${page + 1}/${total}`
+        loading
+          ? "..."
+          : `${page + 1}/${total}`
       )
       .setStyle(
         ButtonStyle.Primary
@@ -1645,19 +1420,19 @@ function createSearchButtons(
         ButtonStyle.Secondary
       )
       .setDisabled(
-        page >= total - 1
+        loading ||
+          page >= total - 1
       )
   );
 
   return row;
 }
 
-// ==================================================
-// File Cache
-// ==================================================
+// =====================================================
+// FILE CACHE
+// =====================================================
 
-const fileCache =
-  new Map();
+const fileCache = new Map();
 
 const MAX_CACHE_SIZE = 50;
 
@@ -1669,9 +1444,7 @@ function cacheFile(
     return;
   }
 
-  if (
-    fileCache.has(fileId)
-  ) {
+  if (fileCache.has(fileId)) {
     fileCache.delete(fileId);
   }
 
@@ -1685,75 +1458,24 @@ function cacheFile(
     MAX_CACHE_SIZE
   ) {
     const oldest =
-      fileCache.keys()
-        .next()
-        .value;
+      fileCache.keys().next().value;
 
-    fileCache.delete(
-      oldest
-    );
+    fileCache.delete(oldest);
   }
 }
 
-function getCachedFile(
-  fileId
-) {
-  return fileCache.get(
-    fileId
-  );
+function getCachedFile(fileId) {
+  return fileCache.get(fileId);
 }
 
-// ==================================================
-// Download Promise Cache
-// ==================================================
+// =====================================================
+// DOWNLOAD LOCK
+// Prevent duplicate downloads of same file
+// =====================================================
 
-const downloadPromises =
-  new Map();
+const downloadingFiles = new Map();
 
-function getDownloadPromise(
-  file
-) {
-  if (
-    !file ||
-    !file.id
-  ) {
-    return null;
-  }
-
-  if (
-    downloadPromises.has(
-      file.id
-    )
-  ) {
-    return downloadPromises.get(
-      file.id
-    );
-  }
-
-  const promise =
-    downloadFileInternal(
-      file
-    ).finally(() => {
-      downloadPromises.delete(
-        file.id
-      );
-    });
-
-  downloadPromises.set(
-    file.id,
-    promise
-  );
-
-  return promise;
-}
-
-// ==================================================
-// Resolve Fresh Attachment
-// ==================================================
-
-async function refreshFileURL(
-  file
-) {
+async function refreshFileURL(file) {
   try {
     const channel =
       client.channels.cache.get(
@@ -1776,16 +1498,12 @@ async function refreshFileURL(
       return file.url;
     }
 
-    if (
-      message.attachments
-    ) {
+    if (message.attachments) {
       const attachment =
         message.attachments.find(
           item =>
             item.id ===
-              String(
-                file.id
-              ) ||
+              String(file.id) ||
             item.name ===
               file.originalName ||
             item.name ===
@@ -1810,167 +1528,166 @@ async function refreshFileURL(
   }
 }
 
-// ==================================================
-// Download Found File
-// ==================================================
+// =====================================================
+// DOWNLOAD FILE
+// =====================================================
 
-async function downloadFileInternal(
-  file
-) {
-  const cached =
-    getCachedFile(
-      file.id
-    );
-
-  if (cached) {
-    return cached;
-  }
-
-  try {
-    let url =
-      await refreshFileURL(
-        file
-      );
-
-    if (!url) {
-      return null;
-    }
-
-    let response =
-      await fetch(url);
-
-    // Refresh URL if old URL failed
-    if (!response.ok) {
-      url =
-        await refreshFileURL(
-          file
-        );
-
-      if (url) {
-        response =
-          await fetch(url);
-      }
-    }
-
-    if (!response.ok) {
-      console.error(
-        `❌ Failed to download ${file.name}: HTTP ${response.status}`
-      );
-
-      return null;
-    }
-
-    const arrayBuffer =
-      await response.arrayBuffer();
-
-    const buffer =
-      Buffer.from(
-        arrayBuffer
-      );
-
-    cacheFile(
-      file.id,
-      buffer
-    );
-
-    return buffer;
-  } catch (error) {
-    console.error(
-      "❌ File download error:",
-      error
-    );
-
+async function downloadFile(file) {
+  if (!file) {
     return null;
   }
-}
 
-async function downloadFile(
-  file
-) {
+  // ONLY TXT
+  if (!isAllowedFile(file.name)) {
+    return null;
+  }
+
   const cached =
-    getCachedFile(
-      file.id
-    );
+    getCachedFile(file.id);
 
   if (cached) {
     return cached;
   }
 
-  return await getDownloadPromise(
-    file
+  // If another request is already downloading it,
+  // wait for that same request instead of starting
+  // another download.
+  if (downloadingFiles.has(file.id)) {
+    return downloadingFiles.get(file.id);
+  }
+
+  const promise =
+    (async () => {
+      try {
+        let url =
+          await refreshFileURL(file);
+
+        if (!url) {
+          return null;
+        }
+
+        let response =
+          await fetch(url);
+
+        if (!response.ok) {
+          url =
+            await refreshFileURL(file);
+
+          if (url) {
+            response =
+              await fetch(url);
+          }
+        }
+
+        if (!response.ok) {
+          console.error(
+            `❌ Failed to download ${file.name}: HTTP ${response.status}`
+          );
+
+          return null;
+        }
+
+        const arrayBuffer =
+          await response.arrayBuffer();
+
+        const buffer =
+          Buffer.from(
+            arrayBuffer
+          );
+
+        cacheFile(
+          file.id,
+          buffer
+        );
+
+        return buffer;
+      } catch (error) {
+        console.error(
+          "❌ File download error:",
+          error
+        );
+
+        return null;
+      } finally {
+        downloadingFiles.delete(
+          file.id
+        );
+      }
+    })();
+
+  downloadingFiles.set(
+    file.id,
+    promise
   );
+
+  return promise;
 }
 
-// ==================================================
-// Prefetch
-// ==================================================
+// =====================================================
+// PREFETCH
+// =====================================================
+//
+// Preload several nearby results.
+// This makes button switching much faster.
+//
+// =====================================================
 
-function prefetchFile(
-  file
-) {
+function prefetchFile(file) {
   if (!file) {
     return;
   }
 
-  if (
-    getCachedFile(
-      file.id
-    )
-  ) {
+  if (!isAllowedFile(file.name)) {
     return;
   }
 
-  getDownloadPromise(
-    file
-  ).catch(() => {});
+  if (getCachedFile(file.id)) {
+    return;
+  }
+
+  downloadFile(file).catch(() => {});
 }
 
 function prefetchNearby(
   session,
   page
 ) {
-  /*
-    Prefetch more than just one file.
-    This makes ⬅️ / ➡️ much faster.
-  */
+  // More aggressive cache:
+  // 3 previous + 3 next
+  for (let offset = 1; offset <= 3; offset++) {
+    const previous =
+      session.results[
+        page - offset
+      ];
 
-  const indexes = [
-    page - 2,
-    page - 1,
-    page + 1,
-    page + 2
-  ];
+    const next =
+      session.results[
+        page + offset
+      ];
 
-  for (
-    const index of indexes
-  ) {
-    if (
-      index >= 0 &&
-      index <
-        session.results.length
-    ) {
-      prefetchFile(
-        session.results[
-          index
-        ]
-      );
-    }
+    prefetchFile(previous);
+    prefetchFile(next);
   }
 }
 
-// ==================================================
-// Show Search Result
-// ==================================================
+// =====================================================
+// SHOW RESULT
+// =====================================================
+//
+// IMPORTANT:
+// The file and 1/5 are changed in ONE Discord edit.
+// This means they cannot show different pages.
+//
+// =====================================================
 
 async function showSearchResult(
   interaction,
   session,
-  page
+  page,
+  loading = false
 ) {
   const result =
-    session.results[
-      page
-    ];
+    session.results[page];
 
   if (!result) {
     return;
@@ -1979,22 +1696,12 @@ async function showSearchResult(
   const total =
     session.results.length;
 
-  /*
-    The button number is generated
-    from the REAL result count.
-  */
-
-  const buttons =
-    createSearchButtons(
-      session.id,
-      page,
-      total
-    );
+  // ===================================================
+  // DOWNLOAD FIRST
+  // ===================================================
 
   const buffer =
-    await downloadFile(
-      result
-    );
+    await downloadFile(result);
 
   if (!buffer) {
     await interaction.editReply({
@@ -2003,7 +1710,11 @@ async function showSearchResult(
       embeds: [],
       files: [],
       components: [
-        buttons
+        createSearchButtons(
+          session.id,
+          page,
+          total
+        )
       ]
     }).catch(() => {});
 
@@ -2013,90 +1724,82 @@ async function showSearchResult(
   const MAX_UPLOAD =
     20 * 1024 * 1024;
 
-  if (
-    buffer.length >
-    MAX_UPLOAD
-  ) {
+  if (buffer.length > MAX_UPLOAD) {
     await interaction.editReply({
       content:
         "⚠️ This file is too large for the bot to upload.",
       embeds: [],
       files: [],
       components: [
-        buttons
+        createSearchButtons(
+          session.id,
+          page,
+          total
+        )
       ]
     }).catch(() => {});
 
     return;
   }
 
-  /*
-    ONE editReply:
-    file + number + buttons
-    update together.
-
-    Discord may show the button
-    interaction loading state while
-    the file is being prepared.
-    Once this completes, everything
-    changes together.
-  */
+  // ===================================================
+  // ONE EDIT
+  //
+  // FILE + NUMBER CHANGE TOGETHER
+  // ===================================================
 
   await interaction.editReply({
     content: null,
     embeds: [],
     files: [
       {
-        attachment:
-          buffer,
+        attachment: buffer,
         name:
-          result.name
+          cleanFilename(result.name)
       }
     ],
     components: [
-      buttons
+      createSearchButtons(
+        session.id,
+        page,
+        total,
+        false
+      )
     ]
   });
 
-  // Prefetch next/previous files
+  // ===================================================
+  // PREFETCH AFTER CURRENT FILE IS SHOWN
+  // ===================================================
+
   prefetchNearby(
     session,
     page
   );
 }
 
-// ==================================================
-// Slash Commands
-// ==================================================
+// =====================================================
+// SLASH COMMANDS
+// =====================================================
 
 const commands = [
-
   new SlashCommandBuilder()
-    .setName(
-      "guessnumber"
-    )
+    .setName("guessnumber")
     .setDescription(
       "Create a number guessing game."
     )
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageNicknames.toString()
     )
-    .addIntegerOption(
-      option =>
-        option
-          .setName(
-            "answer"
-          )
-          .setDescription(
-            "Secret answer from 1 to 10000."
-          )
-          .setRequired(
-            true
-          )
-          .setMinValue(1)
-          .setMaxValue(
-            10000
-          )
+    .addIntegerOption(option =>
+      option
+        .setName("answer")
+        .setDescription(
+          "Secret answer from 1 to 10000."
+        )
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(10000)
     ),
 
   new SlashCommandBuilder()
@@ -2107,35 +1810,25 @@ const commands = [
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageNicknames.toString()
     )
-    .addStringOption(
-      option =>
-        option
-          .setName(
-            "description"
-          )
-          .setDescription(
-            "Embed description."
-          )
-          .setRequired(
-            true
-          )
+    .addStringOption(option =>
+      option
+        .setName("description")
+        .setDescription(
+          "Embed description."
+        )
+        .setRequired(true)
     )
-    .addStringOption(
-      option =>
-        option
-          .setName("title")
-          .setDescription(
-            "Embed title."
-          )
-          .setRequired(
-            false
-          )
+    .addStringOption(option =>
+      option
+        .setName("title")
+        .setDescription(
+          "Embed title."
+        )
+        .setRequired(false)
     ),
 
   new SlashCommandBuilder()
-    .setName(
-      "serverlist"
-    )
+    .setName("serverlist")
     .setDescription(
       "Show all servers where the bot is installed. (Owner only)"
     ),
@@ -2150,54 +1843,44 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
-    .setName(
-      "scanchannel"
-    )
+    .setName("scanchannel")
     .setDescription(
       "Scan a channel for TXT files."
     )
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageNicknames.toString()
     )
-    .addChannelOption(
-      option =>
-        option
-          .setName(
-            "channel"
-          )
-          .setDescription(
-            "Channel to scan."
-          )
-          .setRequired(
-            true
-          )
-          .addChannelTypes(
-            ChannelType.GuildText,
-            ChannelType.GuildAnnouncement,
-            ChannelType.PublicThread,
-            ChannelType.PrivateThread,
-            ChannelType.AnnouncementThread
-          )
+    .addChannelOption(option =>
+      option
+        .setName("channel")
+        .setDescription(
+          "Channel to scan."
+        )
+        .setRequired(true)
+        .addChannelTypes(
+          ChannelType.GuildText,
+          ChannelType.GuildAnnouncement,
+          ChannelType.PublicThread,
+          ChannelType.PrivateThread,
+          ChannelType.AnnouncementThread
+        )
     ),
 
   new SlashCommandBuilder()
     .setName("remove")
     .setDescription(
-      "Remove a TXT file from the Source Finder library."
+      "Remove a file from the Source Finder library."
     )
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageNicknames.toString()
     )
-    .addStringOption(
-      option =>
-        option
-          .setName("name")
-          .setDescription(
-            "File name to remove."
-          )
-          .setRequired(
-            true
-          )
+    .addStringOption(option =>
+      option
+        .setName("name")
+        .setDescription(
+          "File name to remove."
+        )
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -2208,40 +1891,31 @@ const commands = [
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageNicknames.toString()
     )
-    .addChannelOption(
-      option =>
-        option
-          .setName(
-            "channel"
-          )
-          .setDescription(
-            "Channel where search logs will be sent."
-          )
-          .setRequired(
-            true
-          )
-          .addChannelTypes(
-            ChannelType.GuildText,
-            ChannelType.GuildAnnouncement
-          )
+    .addChannelOption(option =>
+      option
+        .setName("channel")
+        .setDescription(
+          "Channel where search logs will be sent."
+        )
+        .setRequired(true)
+        .addChannelTypes(
+          ChannelType.GuildText,
+          ChannelType.GuildAnnouncement
+        )
     )
-
-].map(
-  command =>
-    command.toJSON()
+].map(command =>
+  command.toJSON()
 );
 
-// ==================================================
-// Register Commands
-// ==================================================
+// =====================================================
+// REGISTER COMMANDS
+// =====================================================
 
 async function registerCommands() {
   const rest =
     new REST({
       version: "10"
-    }).setToken(
-      TOKEN
-    );
+    }).setToken(TOKEN);
 
   try {
     console.log(
@@ -2288,9 +1962,9 @@ async function registerCommands() {
   }
 }
 
-// ==================================================
-// Ready
-// ==================================================
+// =====================================================
+// READY
+// =====================================================
 
 client.once(
   "ready",
@@ -2325,18 +1999,17 @@ client.once(
   }
 );
 
-// ==================================================
-// Interactions
-// ==================================================
+// =====================================================
+// INTERACTIONS
+// =====================================================
 
 client.on(
   "interactionCreate",
   async interaction => {
     try {
-
-      // ==================================================
-      // OWNER COMMAND
-      // ==================================================
+      // =================================================
+      // OWNER
+      // =================================================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2357,9 +2030,9 @@ client.on(
         }
       }
 
-      // ==================================================
-      // MANAGE NICKNAMES CHECK
-      // ==================================================
+      // =================================================
+      // PERMISSIONS
+      // =================================================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2386,24 +2059,19 @@ client.on(
             ephemeral: true
           });
 
-          setTimeout(
-            () => {
-              interaction
-                .deleteReply()
-                .catch(
-                  () => {}
-                );
-            },
-            2000
-          );
+          setTimeout(() => {
+            interaction
+              .deleteReply()
+              .catch(() => {});
+          }, 2000);
 
           return;
         }
       }
 
-      // ==================================================
-      // /panel
-      // ==================================================
+      // =================================================
+      // PANEL
+      // =================================================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2437,13 +2105,7 @@ client.on(
                 )
             );
 
-        /*
-          Defer ephemeral, then delete it.
-
-          This means /panel itself doesn't
-          remain as a visible bot reply.
-        */
-
+        // NO VISIBLE SLASH COMMAND REPLY
         await interaction.deferReply({
           ephemeral: true
         });
@@ -2462,9 +2124,9 @@ client.on(
         return;
       }
 
-      // ==================================================
-      // /scanchannel
-      // ==================================================
+      // =================================================
+      // SCAN CHANNEL
+      // =================================================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2494,10 +2156,6 @@ client.on(
           ephemeral: true
         });
 
-        console.log(
-          `🔎 Starting TXT scan in #${channel.name} (${channel.id})...`
-        );
-
         try {
           const result =
             await scanChannel(
@@ -2512,13 +2170,9 @@ client.on(
               `♻️ Duplicates skipped: **${result.duplicateFiles}**\n` +
               `💬 Messages scanned: **${result.totalMessages}**\n` +
               `📌 Channel: <#${channel.id}>\n\n` +
-              `🚫 Images, .lua and other file types were skipped.\n` +
-              `🔢 Leading numbers from **2-10 digits** were cleaned.`
+              `🚫 Only \`.txt\` files are scanned.`
           });
 
-          console.log(
-            `✅ Scan complete: ${result.totalFiles} TXT files in #${channel.name}.`
-          );
         } catch (error) {
           console.error(
             "❌ Channel scan error:",
@@ -2527,16 +2181,23 @@ client.on(
 
           await interaction.editReply({
             content:
-              "❌ I couldn't scan that channel. Make sure the bot can **View Channel** and **Read Message History**."
+              "❌ I couldn't scan that channel. Make sure the bot has **View Channel** and **Read Message History**."
           });
         }
+
+        // Remove the command response after showing it briefly
+        setTimeout(() => {
+          interaction
+            .deleteReply()
+            .catch(() => {});
+        }, 2500);
 
         return;
       }
 
-      // ==================================================
-      // /remove
-      // ==================================================
+      // =================================================
+      // REMOVE
+      // =================================================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2554,31 +2215,26 @@ client.on(
             name
           );
 
-        if (
-          result.removed ===
-          0
-        ) {
-          await interaction.reply({
-            content:
-              `❌ No TXT file named \`${name}\` was found in the library.`,
-            ephemeral: true
-          });
-
-          return;
-        }
-
         await interaction.reply({
           content:
-            `✅ Removed **${result.removed}** file(s) named \`${name}\` from the Source Finder library.`,
+            result.removed === 0
+              ? `❌ No file named \`${name}\` was found in the library.`
+              : `✅ Removed **${result.removed}** file(s) named \`${name}\`.`,
           ephemeral: true
         });
+
+        setTimeout(() => {
+          interaction
+            .deleteReply()
+            .catch(() => {});
+        }, 2000);
 
         return;
       }
 
-      // ==================================================
-      // /logs
-      // ==================================================
+      // =================================================
+      // LOGS
+      // =================================================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2616,12 +2272,18 @@ client.on(
           ephemeral: true
         });
 
+        setTimeout(() => {
+          interaction
+            .deleteReply()
+            .catch(() => {});
+        }, 2000);
+
         return;
       }
 
-      // ==================================================
-      // /serverlist
-      // ==================================================
+      // =================================================
+      // SERVER LIST
+      // =================================================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2705,17 +2367,21 @@ client.on(
             });
 
         await interaction.editReply({
-          embeds: [
-            embed
-          ]
+          embeds: [embed]
         });
+
+        setTimeout(() => {
+          interaction
+            .deleteReply()
+            .catch(() => {});
+        }, 3000);
 
         return;
       }
 
-      // ==================================================
-      // /guessnumber
-      // ==================================================
+      // =================================================
+      // GUESS NUMBER
+      // =================================================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2738,16 +2404,11 @@ client.on(
             ephemeral: true
           });
 
-          setTimeout(
-            () => {
-              interaction
-                .deleteReply()
-                .catch(
-                  () => {}
-                );
-            },
-            1500
-          );
+          setTimeout(() => {
+            interaction
+              .deleteReply()
+              .catch(() => {});
+          }, 1500);
 
           return;
         }
@@ -2837,9 +2498,9 @@ client.on(
         return;
       }
 
-      // ==================================================
-      // /embed
-      // ==================================================
+      // =================================================
+      // EMBED
+      // =================================================
 
       if (
         interaction.isChatInputCommand() &&
@@ -2870,9 +2531,7 @@ client.on(
             });
 
         if (title) {
-          embed.setTitle(
-            title
-          );
+          embed.setTitle(title);
         }
 
         await interaction.deferReply({
@@ -2890,9 +2549,9 @@ client.on(
         return;
       }
 
-      // ==================================================
+      // =================================================
       // SEARCH BUTTON
-      // ==================================================
+      // =================================================
 
       if (
         interaction.isButton() &&
@@ -2922,21 +2581,13 @@ client.on(
             .setStyle(
               TextInputStyle.Short
             )
-            .setRequired(
-              true
-            )
-            .setMaxLength(
-              100
-            );
-
-        const row =
-          new ActionRowBuilder()
-            .addComponents(
-              input
-            );
+            .setRequired(true)
+            .setMaxLength(100);
 
         modal.addComponents(
-          row
+          new ActionRowBuilder().addComponents(
+            input
+          )
         );
 
         await interaction.showModal(
@@ -2946,9 +2597,9 @@ client.on(
         return;
       }
 
-      // ==================================================
-      // SEARCH MODAL
-      // ==================================================
+      // =================================================
+      // SEARCH
+      // =================================================
 
       if (
         interaction.isModalSubmit() &&
@@ -2984,18 +2635,23 @@ client.on(
           results
         );
 
-        if (
-          results.length ===
-          0
-        ) {
+        // =================================================
+        // NO RESULTS
+        // =================================================
+
+        if (!results.length) {
           await interaction.reply({
             content:
-              `❌ No file found for \`${query}\`.`,
+              `❌ No matching TXT file found for \`${query}\`.`,
             ephemeral: true
           });
 
           return;
         }
+
+        // =================================================
+        // CREATE SESSION
+        // =================================================
 
         const sessionId =
           `${interaction.user.id}-${Date.now()}-${Math.random()
@@ -3020,7 +2676,7 @@ client.on(
           session
         );
 
-        // Remove expired sessions
+        // Cleanup old sessions
         for (
           const [
             id,
@@ -3030,7 +2686,7 @@ client.on(
           if (
             Date.now() -
               oldSession.createdAt >
-            SEARCH_SESSION_TIME
+            10 * 60 * 1000
           ) {
             searchSessions.delete(
               id
@@ -3042,11 +2698,9 @@ client.on(
           ephemeral: true
         });
 
-        /*
-          Start downloading first file.
-          At the same time start prefetching
-          nearby files.
-        */
+        // =================================================
+        // PRELOAD FIRST + NEARBY
+        // =================================================
 
         prefetchNearby(
           session,
@@ -3062,9 +2716,9 @@ client.on(
         return;
       }
 
-      // ==================================================
+      // =================================================
       // PREVIOUS
-      // ==================================================
+      // =================================================
 
       if (
         interaction.isButton() &&
@@ -3111,18 +2765,25 @@ client.on(
             session.page - 1
           );
 
+        if (
+          newPage ===
+          session.page
+        ) {
+          return;
+        }
+
         session.page =
           newPage;
 
-        /*
-          deferUpdate immediately acknowledges
-          the button click.
-
-          If the file was prefetched,
-          downloadFile returns immediately.
-        */
+        // =================================================
+        // RESPOND IMMEDIATELY
+        // =================================================
 
         await interaction.deferUpdate();
+
+        // =================================================
+        // SHOW FILE + NUMBER IN SAME EDIT
+        // =================================================
 
         await showSearchResult(
           interaction,
@@ -3133,9 +2794,9 @@ client.on(
         return;
       }
 
-      // ==================================================
+      // =================================================
       // NEXT
-      // ==================================================
+      // =================================================
 
       if (
         interaction.isButton() &&
@@ -3178,10 +2839,16 @@ client.on(
 
         const newPage =
           Math.min(
-            session.results.length -
-              1,
+            session.results.length - 1,
             session.page + 1
           );
+
+        if (
+          newPage ===
+          session.page
+        ) {
+          return;
+        }
 
         session.page =
           newPage;
@@ -3197,9 +2864,9 @@ client.on(
         return;
       }
 
-      // ==================================================
-      // START BUTTON
-      // ==================================================
+      // =================================================
+      // GUESS START
+      // =================================================
 
       if (
         interaction.isButton() &&
@@ -3254,24 +2921,19 @@ client.on(
           return;
         }
 
-        game.active =
-          true;
+        game.active = true;
 
         if (
           interaction.guild &&
           interaction.channel &&
-          interaction.channel
-            .permissionOverwrites
+          interaction.channel.permissionOverwrites
         ) {
           try {
             await interaction.channel
               .permissionOverwrites.edit(
-                interaction.guild
-                  .roles
-                  .everyone,
+                interaction.guild.roles.everyone,
                 {
-                  SendMessages:
-                    true
+                  SendMessages: true
                 }
               );
           } catch (error) {
@@ -3302,7 +2964,6 @@ client.on(
 
         return;
       }
-
     } catch (error) {
       console.error(
         "❌ Interaction error:",
@@ -3313,21 +2974,19 @@ client.on(
         !interaction.replied &&
         !interaction.deferred
       ) {
-        await interaction
-          .reply({
-            content:
-              "❌ An error occurred.",
-            ephemeral: true
-          })
-          .catch(() => {});
+        await interaction.reply({
+          content:
+            "❌ An error occurred.",
+          ephemeral: true
+        }).catch(() => {});
       }
     }
   }
 );
 
-// ==================================================
-// Messages
-// ==================================================
+// =====================================================
+// MESSAGES
+// =====================================================
 
 client.on(
   "messageCreate",
@@ -3337,9 +2996,9 @@ client.on(
         return;
       }
 
-      // ==================================================
-      // GUESS NUMBER
-      // ==================================================
+      // =================================================
+      // GUESS GAME
+      // =================================================
 
       const game =
         games.get(
@@ -3385,18 +3044,14 @@ client.on(
 
             if (
               message.guild &&
-              message.channel
-                .permissionOverwrites
+              message.channel.permissionOverwrites
             ) {
               try {
                 await message.channel
                   .permissionOverwrites.edit(
-                    message.guild
-                      .roles
-                      .everyone,
+                    message.guild.roles.everyone,
                     {
-                      SendMessages:
-                        false
+                      SendMessages: false
                     }
                   );
               } catch (error) {
@@ -3418,14 +3073,11 @@ client.on(
         }
       }
 
-      // ==================================================
+      // =================================================
       // AI
-      // ==================================================
+      // =================================================
 
-      if (
-        !groq &&
-        !openrouter
-      ) {
+      if (!groq && !openrouter) {
         return;
       }
 
@@ -3451,18 +3103,15 @@ client.on(
         try {
           referencedMessage =
             await message.channel.messages.fetch(
-              message.reference
-                .messageId
+              message.reference.messageId
             );
 
           if (
             referencedMessage &&
-            referencedMessage.author
-              .id ===
+            referencedMessage.author.id ===
               client.user.id
           ) {
-            repliedToBot =
-              true;
+            repliedToBot = true;
           }
         } catch {}
       }
@@ -3562,16 +3211,13 @@ Understand the user's new message in the context of your previous message.`;
         !result.success ||
         !result.text
       ) {
-        await message
-          .reply({
-            content:
-              "💀 Both AI providers failed right now. Try again later.",
-            allowedMentions: {
-              repliedUser:
-                false
-            }
-          })
-          .catch(() => {});
+        await message.reply({
+          content:
+            "💀 Both AI providers failed right now. Try again later.",
+          allowedMentions: {
+            repliedUser: false
+          }
+        }).catch(() => {});
 
         return;
       }
@@ -3592,11 +3238,9 @@ Understand the user's new message in the context of your previous message.`;
         content:
           result.text,
         allowedMentions: {
-          repliedUser:
-            false
+          repliedUser: false
         }
       });
-
     } catch (error) {
       console.error(
         "❌ Message handler error:",
@@ -3606,9 +3250,9 @@ Understand the user's new message in the context of your previous message.`;
   }
 );
 
-// ==================================================
-// Discord Errors
-// ==================================================
+// =====================================================
+// ERRORS
+// =====================================================
 
 client.on(
   "error",
@@ -3630,10 +3274,6 @@ client.on(
   }
 );
 
-// ==================================================
-// Process Errors
-// ==================================================
-
 process.on(
   "unhandledRejection",
   error => {
@@ -3654,21 +3294,21 @@ process.on(
   }
 );
 
-// ==================================================
-// Login
-// ==================================================
+// =====================================================
+// LOGIN
+// =====================================================
 
 console.log(
   "🔑 Logging into Discord..."
 );
 
-client
-  .login(TOKEN)
-  .catch(error => {
+client.login(TOKEN).catch(
+  error => {
     console.error(
       "❌ Discord login failed:",
       error
     );
 
     process.exit(1);
-  });
+  }
+);
