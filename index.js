@@ -23,7 +23,6 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const OWNER_ID = "1302080645987569694";
 
@@ -39,17 +38,16 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   process.exit(1);
 }
 
-if (!GROQ_API_KEY && !OPENROUTER_API_KEY) {
+if (!GROQ_API_KEY) {
   console.warn(
-    "⚠️ GROQ_API_KEY and OPENROUTER_API_KEY are both missing. AI is disabled."
+    "⚠️ GROQ_API_KEY is missing. AI is disabled."
   );
 }
 
 // =========================
-// AI Clients
+// AI Client (Groq only)
 // =========================
 
-// Groq
 const groq = GROQ_API_KEY
   ? new OpenAI({
       apiKey: GROQ_API_KEY,
@@ -57,24 +55,11 @@ const groq = GROQ_API_KEY
     })
   : null;
 
-// OpenRouter fallback
-const openrouter = OPENROUTER_API_KEY
-  ? new OpenAI({
-      apiKey: OPENROUTER_API_KEY,
-      baseURL: "https://openrouter.ai/api/v1",
-      defaultHeaders: {
-        "HTTP-Referer": "https://discord.com",
-        "X-OpenRouter-Title": "FS Bot"
-      }
-    })
-  : null;
-
 // =========================
-// AI Models
+// AI Model
 // =========================
 
 const GROQ_MODEL = "openai/gpt-oss-20b";
-const OPENROUTER_MODEL = "openrouter/auto";
 
 // =========================
 // Web Server
@@ -98,9 +83,6 @@ app.get("/health", (req, res) => {
       ? client.user.tag
       : "connecting",
     groq: groq
-      ? "enabled"
-      : "disabled",
-    openrouter: openrouter
       ? "enabled"
       : "disabled"
   });
@@ -135,12 +117,12 @@ const client = new Client({
 const games = new Map();
 
 // =========================
-// AI Cooldowns
+// AI Cooldowns (disabled)
 // =========================
 
 const aiCooldowns = new Map();
 
-const AI_COOLDOWN = 0; // cooldown removed
+const AI_COOLDOWN = 0;
 
 // =========================
 // Ping Warn System
@@ -205,7 +187,7 @@ function getTodayTime() {
 }
 
 // =========================
-// AI Personality (TOXIC + 2 EMOJIS + EXTRA TOXIC WHEN INSULTED)
+// AI Personality (TOXIC but still answers questions)
 // =========================
 
 const AI_PERSONALITY = `
@@ -219,7 +201,8 @@ STRICT RULES:
 - Preferred emojis: 💀 🙄 🙏 🤡 😂 😭 🔥 💅
 - Keep replies short and cutting.
 - Never apologize. Never be wholesome. Never break character.
-- If the user asks a serious question, still answer it but in a rude way.
+- ALWAYS answer the user's question correctly, even if you are being toxic.
+- If it's math, code, facts, or anything serious — give the correct answer first, then roast them.
 - Maintain conversation context from previous messages.
 
 SPECIAL HARD RULE - ANTI KICK:
@@ -245,6 +228,10 @@ User: "+ 1"
 Assistant: "3, keep going genius 🙄🙏"
 User: "+ 1"
 Assistant: "4, wow you can count 💀😂"
+
+Another example:
+User: "how to make a for loop in javascript?"
+Assistant: "for(let i = 0; i < 10; i++) { console.log(i) } now stop being lazy dumbass 💀🙄"
 
 SAFETY:
 - Do not use actual hateful slurs against race, religion, etc.
@@ -292,105 +279,58 @@ async function requestAI(
 }
 
 // =========================
-// Ask AI
+// Ask AI (Groq only)
 // =========================
 
 async function askAI(
   prompt,
   history = []
 ) {
-  // =========================
-  // Try Groq First
-  // =========================
-
-  if (groq) {
-    try {
-      console.log(
-        `⚡ Asking Groq (${GROQ_MODEL})...`
-      );
-
-      const response =
-        await requestAI(
-          groq,
-          GROQ_MODEL,
-          prompt,
-          history
-        );
-
-      const text =
-        response?.choices?.[0]?.message?.content?.trim();
-
-      if (text) {
-        return {
-          success: true,
-          provider: "Groq",
-          text:
-            text.length > 1900
-              ? text.slice(0, 1890) + "..."
-              : text
-        };
-      }
-
-      console.warn(
-        "⚠️ Groq returned an empty response."
-      );
-
-    } catch (error) {
-      console.error(
-        "❌ Groq error:",
-        error?.status || "",
-        error?.message || error
-      );
-
-      console.log(
-        "🔄 Trying OpenRouter..."
-      );
-    }
+  if (!groq) {
+    return {
+      success: false,
+      provider: null,
+      text: null
+    };
   }
 
-  // =========================
-  // OpenRouter Fallback
-  // =========================
+  try {
+    console.log(
+      `⚡ Asking Groq (${GROQ_MODEL})...`
+    );
 
-  if (openrouter) {
-    try {
-      console.log(
-        `🌐 Asking OpenRouter (${OPENROUTER_MODEL})...`
+    const response =
+      await requestAI(
+        groq,
+        GROQ_MODEL,
+        prompt,
+        history
       );
 
-      const response =
-        await requestAI(
-          openrouter,
-          OPENROUTER_MODEL,
-          prompt,
-          history
-        );
+    const text =
+      response?.choices?.[0]?.message?.content?.trim();
 
-      const text =
-        response?.choices?.[0]?.message?.content?.trim();
-
-      if (text) {
-        return {
-          success: true,
-          provider: "OpenRouter",
-          text:
-            text.length > 1900
-              ? text.slice(0, 1890) + "..."
-              : text
-        };
-      }
-
-      console.warn(
-        "⚠️ OpenRouter returned an empty response."
-      );
-
-    } catch (error) {
-      console.error(
-        "❌ OpenRouter error:",
-        error?.status || "",
-        error?.message || error
-      );
+    if (text) {
+      return {
+        success: true,
+        provider: "Groq",
+        text:
+          text.length > 1900
+            ? text.slice(0, 1890) + "..."
+            : text
+      };
     }
+
+    console.warn(
+      "⚠️ Groq returned an empty response."
+    );
+
+  } catch (error) {
+    console.error(
+      "❌ Groq error:",
+      error?.status || "",
+      error?.message || error
+    );
   }
 
   return {
@@ -610,14 +550,6 @@ client.once(
     console.log(
       `⚡ Groq: ${
         groq
-          ? "Enabled"
-          : "Disabled"
-      }`
-    );
-
-    console.log(
-      `🌐 OpenRouter: ${
-        openrouter
           ? "Enabled"
           : "Disabled"
       }`
@@ -1578,10 +1510,7 @@ client.on(
       // AI Trigger Detection
       // =========================
 
-      if (
-        !groq &&
-        !openrouter
-      ) {
+      if (!groq) {
         return;
       }
 
@@ -1644,7 +1573,7 @@ client.on(
       }
 
       // =========================
-      // Cooldown
+      // Cooldown (disabled)
       // =========================
 
       const now =
@@ -1760,7 +1689,7 @@ Understand the user's new message in the context of your previous message.`;
 
         await message.reply({
           content:
-            "Both AI providers failed right now dumbass. Try again later 💀🙄",
+            "AI is dead right now dumbass. Try again later 💀🙄",
           allowedMentions: {
             repliedUser: false
           }
