@@ -60,7 +60,12 @@ const groq = GROQ_API_KEY
 // AI Model
 // =========================
 
-const GROQ_MODEL = "llama-3.1-8b-instant"; // fast + reliable
+// Try these models in order until one works
+const GROQ_MODELS = [
+  "llama-3.1-8b-instant",
+  "openai/gpt-oss-20b",
+  "llama-3.3-70b-versatile"
+];
 
 // =========================
 // Web Server
@@ -86,7 +91,7 @@ app.get("/health", (req, res) => {
     groq: groq
       ? "enabled"
       : "disabled",
-    model: GROQ_MODEL
+    models: GROQ_MODELS
   });
 });
 
@@ -282,7 +287,7 @@ async function requestAI(
 }
 
 // =========================
-// Ask AI (Groq only) - improved error handling
+// Ask AI (Groq only) - tries multiple models
 // =========================
 
 async function askAI(
@@ -298,50 +303,48 @@ async function askAI(
     };
   }
 
-  try {
-    console.log(
-      `⚡ Asking Groq (${GROQ_MODEL})...`
-    );
+  for (const model of GROQ_MODELS) {
+    try {
+      console.log(`⚡ Trying Groq model: ${model}`);
 
-    const response =
-      await requestAI(
+      const response = await requestAI(
         groq,
-        GROQ_MODEL,
+        model,
         prompt,
         history
       );
 
-    const text =
-      response?.choices?.[0]?.message?.content?.trim();
+      const text =
+        response?.choices?.[0]?.message?.content?.trim();
 
-    if (text) {
-      return {
-        success: true,
-        provider: "Groq",
-        text:
-          text.length > 1900
-            ? text.slice(0, 1890) + "..."
-            : text
-      };
-    }
+      if (text) {
+        console.log(`✅ Success with model: ${model}`);
+        return {
+          success: true,
+          provider: `Groq (${model})`,
+          text:
+            text.length > 1900
+              ? text.slice(0, 1890) + "..."
+              : text
+        };
+      }
 
-    console.warn(
-      "⚠️ Groq returned empty content:",
-      JSON.stringify(response, null, 2)
-    );
+      console.warn(`⚠️ ${model} returned empty content`);
+    } catch (error) {
+      console.error(
+        `❌ ${model} failed:`,
+        error?.status || "",
+        error?.message || error
+      );
 
-  } catch (error) {
-    console.error(
-      "❌ Groq full error:",
-      error?.status || "",
-      error?.message || error
-    );
-
-    if (error?.error) {
-      console.error("❌ Groq API error details:", error.error);
+      if (error?.error) {
+        console.error("   details:", JSON.stringify(error.error));
+      }
+      // try next model
     }
   }
 
+  console.error("❌ All Groq models failed");
   return {
     success: false,
     provider: null,
@@ -573,7 +576,7 @@ client.once(
         groq
           ? "Enabled"
           : "Disabled"
-      } | Model: ${GROQ_MODEL}`
+      } | Models: ${GROQ_MODELS.join(", ")}`
     );
 
     await registerCommands();
