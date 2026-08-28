@@ -9,7 +9,8 @@ const {
   ButtonBuilder,
   ButtonStyle,
   PermissionFlagsBits,
-  ChannelType
+  ChannelType,
+  AuditLogEvent
 } = require("discord.js");
 
 const OpenAI = require("openai");
@@ -23,7 +24,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
 
 const OWNER_ID = "1302080645987569694";
 
@@ -43,6 +44,10 @@ if (!OPENAI_API_KEY) {
   console.warn(
     "⚠️ OPENAI_API_KEY is missing. AI is disabled."
   );
+} else {
+  console.log(
+    `🔑 OPENAI_API_KEY loaded (starts with: ${OPENAI_API_KEY.slice(0, 7)}...)`
+  );
 }
 
 // =========================
@@ -56,10 +61,14 @@ const openai = OPENAI_API_KEY
   : null;
 
 // =========================
-// AI Model
+// AI Models (fallback list)
 // =========================
 
-const OPENAI_MODEL = "gpt-4o-mini"; // cheap + reliable + good at following instructions
+const OPENAI_MODELS = [
+  "gpt-4o-mini",
+  "gpt-4o",
+  "gpt-3.5-turbo"
+];
 
 // =========================
 // Web Server
@@ -85,7 +94,7 @@ app.get("/health", (req, res) => {
     openai: openai
       ? "enabled"
       : "disabled",
-    model: OPENAI_MODEL
+    models: OPENAI_MODELS
   });
 });
 
@@ -140,6 +149,17 @@ const TEN_HOURS = 10 * 60 * 60 * 1000;
 
 // Map: guildId -> categoryId
 const aiTalkCategories = new Map();
+
+// =========================
+// Anti-Nuke / Anti-Raid
+// =========================
+
+// Map: guildId -> boolean
+const antiNukeEnabled = new Map();
+const antiRaidEnabled = new Map();
+
+// Track recent actions for anti-nuke (guildId -> { userId -> count })
+const recentNukeActions = new Map();
 
 // =========================
 // AI Conversation Memory
@@ -454,6 +474,52 @@ const commands = [
         )
         .setRequired(true)
         .addChannelTypes(ChannelType.GuildCategory)
+    ),
+
+  // =========================
+  // /antinuke
+  // =========================
+
+  new SlashCommandBuilder()
+    .setName("antinuke")
+    .setDescription(
+      "Turn Anti-Nuke protection ON or OFF (blocks mass channel/role delete and mass bans)."
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator.toString()
+    )
+    .addStringOption(option =>
+      option
+        .setName("mode")
+        .setDescription("ON or OFF")
+        .setRequired(true)
+        .addChoices(
+          { name: "ON", value: "on" },
+          { name: "OFF", value: "off" }
+        )
+    ),
+
+  // =========================
+  // /antiraid
+  // =========================
+
+  new SlashCommandBuilder()
+    .setName("antiraid")
+    .setDescription(
+      "Turn Anti-Raid ON or OFF (turns off external apps/emojis/stickers in all channels)."
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator.toString()
+    )
+    .addStringOption(option =>
+      option
+        .setName("mode")
+        .setDescription("ON or OFF")
+        .setRequired(true)
+        .addChoices(
+          { name: "ON", value: "on" },
+          { name: "OFF", value: "off" }
+        )
     )
 
 ].map(command =>
@@ -546,7 +612,7 @@ client.once(
         openai
           ? "Enabled"
           : "Disabled"
-      } | Model: ${OPENAI_MODEL}`
+      } | Models: ${OPENAI_MODELS.join(", ")}`
     );
 
     await registerCommands();
@@ -1295,6 +1361,180 @@ client.on(
       }
 
       // =========================
+      // /antinuke
+      // =========================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "antinuke"
+      ) {
+
+        if (
+          !interaction.memberPermissions ||
+          !interaction.memberPermissions.has(
+            PermissionFlagsBits.Administrator
+          )
+        ) {
+          await interaction.reply({
+            content:
+              "❌ You need **Administrator** permission to use this command.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const mode =
+          interaction.options.getString(
+            "mode"
+          );
+
+        if (mode === "on") {
+          antiNukeEnabled.set(
+            interaction.guildId,
+            true
+          );
+          await interaction.reply({
+            content:
+              "✅ **Anti-Nuke is now ON**.\n" +
+              "The bot will try to stop mass channel/role deletes and mass bans.",
+            ephemeral: true
+          });
+        } else {
+          antiNukeEnabled.set(
+            interaction.guildId,
+            false
+          );
+          await interaction.reply({
+            content:
+              "✅ **Anti-Nuke is now OFF**.",
+            ephemeral: true
+          });
+        }
+
+        return;
+      }
+
+      // =========================
+      // /antiraid
+      // =========================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "antiraid"
+      ) {
+
+        if (
+          !interaction.memberPermissions ||
+          !interaction.memberPermissions.has(
+            PermissionFlagsBits.Administrator
+          )
+        ) {
+          await interaction.reply({
+            content:
+              "❌ You need **Administrator** permission to use this command.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const mode =
+          interaction.options.getString(
+            "mode"
+          );
+
+        await interaction.deferReply({
+          ephemeral: true
+        });
+
+        const guild =
+          interaction.guild;
+
+        if (mode === "on") {
+          antiRaidEnabled.set(
+            guild.id,
+            true
+          );
+
+          let updated = 0;
+
+          for (const channel of guild.channels.cache.values()) {
+            if (
+              !channel.isTextBased() ||
+              !channel.permissionOverwrites
+            ) {
+              continue;
+            }
+
+            try {
+              await channel.permissionOverwrites.edit(
+                guild.roles.everyone,
+                {
+                  UseExternalEmojis: false,
+                  UseExternalStickers: false
+                },
+                {
+                  reason:
+                    "Anti-Raid ON - disabled external apps/emojis/stickers"
+                }
+              );
+              updated++;
+            } catch (err) {
+              // skip channels we can't edit
+            }
+          }
+
+          await interaction.editReply({
+            content:
+              `✅ **Anti-Raid is now ON**.\n` +
+              `External apps / emojis / stickers have been turned **OFF** in **${updated}** channels.`
+          });
+        } else {
+          antiRaidEnabled.set(
+            guild.id,
+            false
+          );
+
+          let updated = 0;
+
+          for (const channel of guild.channels.cache.values()) {
+            if (
+              !channel.isTextBased() ||
+              !channel.permissionOverwrites
+            ) {
+              continue;
+            }
+
+            try {
+              await channel.permissionOverwrites.edit(
+                guild.roles.everyone,
+                {
+                  UseExternalEmojis: null,
+                  UseExternalStickers: null
+                },
+                {
+                  reason:
+                    "Anti-Raid OFF - restored external apps/emojis/stickers"
+                }
+              );
+              updated++;
+            } catch (err) {
+              // skip
+            }
+          }
+
+          await interaction.editReply({
+            content:
+              `✅ **Anti-Raid is now OFF**.\n` +
+              `External apps / emojis / stickers permissions restored in **${updated}** channels.`
+          });
+        }
+
+        return;
+      }
+
+      // =========================
       // START BUTTON
       // =========================
 
@@ -1420,6 +1660,147 @@ client.on(
         }).catch(() => {});
       }
     }
+  }
+);
+
+// =========================
+// Anti-Nuke Protection
+// =========================
+
+async function handlePossibleNuke(guild, actionType) {
+  if (!antiNukeEnabled.get(guild.id)) return;
+
+  try {
+    const logs = await guild.fetchAuditLogs({
+      limit: 1,
+      type: actionType
+    });
+
+    const entry = logs.entries.first();
+    if (!entry) return;
+
+    const executor = entry.executor;
+    if (
+      !executor ||
+      executor.bot ||
+      executor.id === OWNER_ID ||
+      executor.id === client.user.id
+    ) {
+      return;
+    }
+
+    // Count recent actions by this user
+    if (!recentNukeActions.has(guild.id)) {
+      recentNukeActions.set(guild.id, new Map());
+    }
+
+    const guildMap = recentNukeActions.get(guild.id);
+    const now = Date.now();
+    const key = executor.id;
+
+    let data = guildMap.get(key) || {
+      count: 0,
+      first: now
+    };
+
+    // Reset if more than 15 seconds passed
+    if (now - data.first > 15000) {
+      data = { count: 0, first: now };
+    }
+
+    data.count++;
+    guildMap.set(key, data);
+
+    // If 3+ dangerous actions in 15 seconds → ban
+    if (data.count >= 3) {
+      try {
+        const member = await guild.members
+          .fetch(executor.id)
+          .catch(() => null);
+
+        if (
+          member &&
+          member.bannable
+        ) {
+          await member.ban({
+            reason:
+              `Anti-Nuke: mass ${actionType} detected`
+          });
+
+          const logChannel =
+            guild.systemChannel ||
+            guild.channels.cache.find(
+              c =>
+                c.isTextBased() &&
+                c
+                  .permissionsFor(
+                    guild.members.me
+                  )
+                  ?.has(
+                    PermissionFlagsBits.SendMessages
+                  )
+            );
+
+          if (logChannel) {
+            await logChannel
+              .send({
+                content:
+                  `🛡️ **Anti-Nuke** banned <@${executor.id}> for mass actions (\`${actionType}\`).`
+              })
+              .catch(() => {});
+          }
+
+          console.log(
+            `🛡️ Anti-Nuke banned ${executor.tag} in ${guild.name}`
+          );
+        }
+      } catch (err) {
+        console.error(
+          "❌ Anti-Nuke ban failed:",
+          err
+        );
+      }
+
+      // Reset counter after ban
+      guildMap.delete(key);
+    }
+  } catch (err) {
+    // Missing View Audit Log or other error
+    console.error(
+      "❌ Anti-Nuke audit log error:",
+      err.message
+    );
+  }
+}
+
+client.on(
+  "channelDelete",
+  async channel => {
+    if (!channel.guild) return;
+    await handlePossibleNuke(
+      channel.guild,
+      AuditLogEvent.ChannelDelete
+    );
+  }
+);
+
+client.on(
+  "roleDelete",
+  async role => {
+    await handlePossibleNuke(
+      role.guild,
+      AuditLogEvent.RoleDelete
+    );
+  }
+);
+
+client.on(
+  "guildBanAdd",
+  async ban => {
+    await handlePossibleNuke(
+      ban.guild,
+      AuditLogEvent.MemberBanAdd
+    );
   }
 );
 
