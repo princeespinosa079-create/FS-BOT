@@ -1122,11 +1122,17 @@ client.on(
           "spylist"
       ) {
 
-        await interaction.deferReply();
+        // Silent acknowledge (no visible reply to the user)
+        await interaction.deferReply({
+          ephemeral: true
+        });
 
         try {
           // Fetch all members
           await interaction.guild.members.fetch();
+
+          const twentyDaysAgo =
+            Date.now() - 20 * 24 * 60 * 60 * 1000;
 
           const members =
             interaction.guild.members.cache.filter(
@@ -1142,44 +1148,59 @@ client.on(
                     (member.user.globalName || "")
                   ).toLowerCase();
 
-                return (
+                const isAltOrSpy =
                   name.includes("alt") ||
-                  name.includes("spy")
-                );
+                  name.includes("spy");
+
+                const isNewAccount =
+                  member.user.createdTimestamp >=
+                  twentyDaysAgo;
+
+                return isAltOrSpy || isNewAccount;
               }
             );
 
           if (members.size === 0) {
             const embed =
               new EmbedBuilder()
-                .setTitle("SPY / ALT LIST")
+                .setTitle("SPY / ALT / NEW LIST")
                 .setDescription(
-                  "No members found with **alt** or **spy** in their name/nickname."
+                  "No members found with **alt/spy** in name or account created in the last **20 days**."
                 )
                 .setColor(0x808080)
                 .setFooter({
                   text: `Today at ${getTodayTime()}`
                 });
 
-            await interaction.editReply({
+            // Send as normal channel message (not a reply)
+            await interaction.channel.send({
               embeds: [embed]
             });
+
+            await interaction.deleteReply().catch(() => {});
             return;
           }
 
           const list = [
             ...members.values()
           ]
-            .map(
-              (m, i) =>
-                `**${i + 1}.** <@${m.id}> \`${m.user.tag}\``
-            )
+            .map((m, i) => {
+              const daysOld = Math.floor(
+                (Date.now() - m.user.createdTimestamp) /
+                  (1000 * 60 * 60 * 24)
+              );
+              const isNew = daysOld <= 20;
+              const tag = isNew
+                ? ` \`NEW ${daysOld}d\``
+                : "";
+              return `**${i + 1}.** <@${m.id}> \`${m.user.tag}\`${tag}`;
+            })
             .join("\n");
 
           const embed =
             new EmbedBuilder()
               .setTitle(
-                `SPY / ALT LIST (${members.size})`
+                `SPY / ALT / NEW LIST (${members.size})`
               )
               .setDescription(
                 list.slice(0, 4000)
@@ -1189,15 +1210,17 @@ client.on(
                 text: `Today at ${getTodayTime()}`
               });
 
-          // Only mentions inside the embed (no content outside)
-          await interaction.editReply({
+          // Send as normal channel message (no reply to command user)
+          // Mentions only inside the embed
+          await interaction.channel.send({
             embeds: [embed],
             allowedMentions: {
-              users: [
-                ...members.keys()
-              ]
+              users: [...members.keys()]
             }
           });
+
+          // Delete the ephemeral "thinking" reply so it doesn't reply to the user
+          await interaction.deleteReply().catch(() => {});
 
         } catch (error) {
           console.error(
@@ -1208,7 +1231,7 @@ client.on(
           await interaction.editReply({
             content:
               "❌ Failed to fetch members. Make sure the bot has **Server Members Intent** enabled."
-          });
+          }).catch(() => {});
         }
 
         return;
@@ -1837,7 +1860,7 @@ Understand the user's new message in the context of your previous message.`;
 
         await message.reply({
           content:
-            "AI died for a second dumbass, try again 💀🙄",
+            "AI is down dumbass. Check OPENAI_API_KEY on Render 💀🙄",
           allowedMentions: {
             repliedUser: false
           }
