@@ -21,6 +21,7 @@ const express = require("express");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID; // optional — only used to clear old guild commands
 
 const OWNER_ID = "1302080645987569694";
 
@@ -283,11 +284,35 @@ async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
   try {
-    console.log("🧹 Registering global slash commands...");
+    // Delete old guild-only commands (if GUILD_ID still set)
+    if (GUILD_ID) {
+      console.log("🗑️ Clearing old guild-only commands...");
+      await rest.put(
+        Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+        { body: [] }
+      );
+      console.log("✅ Old guild commands deleted.");
+    }
+
+    // Also try clear guild commands for every server the bot is in
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        await rest.put(
+          Routes.applicationGuildCommands(CLIENT_ID, guild.id),
+          { body: [] }
+        );
+      } catch {
+        // ignore per-guild failures
+      }
+    }
+    console.log("🗑️ Cleared guild commands in all joined servers.");
+
+    // Register GLOBAL commands only
+    console.log("🌍 Registering global slash commands...");
     await rest.put(Routes.applicationCommands(CLIENT_ID), {
       body: commands
     });
-    console.log("✅ Registered global slash commands.");
+    console.log("✅ Global slash commands registered.");
   } catch (error) {
     console.error("❌ Command registration error:", error);
   }
