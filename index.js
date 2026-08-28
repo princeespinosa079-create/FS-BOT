@@ -23,7 +23,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const OWNER_ID = "1302080645987569694";
 
@@ -39,20 +39,19 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   process.exit(1);
 }
 
-if (!GROQ_API_KEY) {
+if (!OPENAI_API_KEY) {
   console.warn(
-    "⚠️ GROQ_API_KEY is missing. AI is disabled."
+    "⚠️ OPENAI_API_KEY is missing. AI is disabled."
   );
 }
 
 // =========================
-// AI Client (Groq only)
+// AI Client (OpenAI)
 // =========================
 
-const groq = GROQ_API_KEY
+const openai = OPENAI_API_KEY
   ? new OpenAI({
-      apiKey: GROQ_API_KEY,
-      baseURL: "https://api.groq.com/openai/v1"
+      apiKey: OPENAI_API_KEY
     })
   : null;
 
@@ -60,12 +59,7 @@ const groq = GROQ_API_KEY
 // AI Model
 // =========================
 
-// Try these models in order until one works
-const GROQ_MODELS = [
-  "llama-3.1-8b-instant",
-  "openai/gpt-oss-20b",
-  "llama-3.3-70b-versatile"
-];
+const OPENAI_MODEL = "gpt-4o-mini"; // cheap + reliable + good at following instructions
 
 // =========================
 // Web Server
@@ -88,10 +82,10 @@ app.get("/health", (req, res) => {
     bot: client.user
       ? client.user.tag
       : "connecting",
-    groq: groq
+    openai: openai
       ? "enabled"
       : "disabled",
-    models: GROQ_MODELS
+    model: OPENAI_MODEL
   });
 });
 
@@ -255,47 +249,15 @@ STYLE EXAMPLES:
 `;
 
 // =========================
-// AI Request
-// =========================
-
-async function requestAI(
-  clientInstance,
-  model,
-  prompt,
-  history
-) {
-  const input = [
-    {
-      role: "system",
-      content: AI_PERSONALITY
-    },
-    ...history,
-    {
-      role: "user",
-      content: prompt
-    }
-  ];
-
-  return await clientInstance.chat.completions.create(
-    {
-      model,
-      messages: input,
-      max_tokens: 300,
-      temperature: 0.85
-    }
-  );
-}
-
-// =========================
-// Ask AI (Groq only) - tries multiple models
+// Ask AI (OpenAI)
 // =========================
 
 async function askAI(
   prompt,
   history = []
 ) {
-  if (!groq) {
-    console.error("❌ Groq client is null (missing GROQ_API_KEY)");
+  if (!openai) {
+    console.error("❌ OpenAI client is null (missing OPENAI_API_KEY)");
     return {
       success: false,
       provider: null,
@@ -303,48 +265,56 @@ async function askAI(
     };
   }
 
-  for (const model of GROQ_MODELS) {
-    try {
-      console.log(`⚡ Trying Groq model: ${model}`);
+  try {
+    console.log(`⚡ Asking OpenAI (${OPENAI_MODEL})...`);
 
-      const response = await requestAI(
-        groq,
-        model,
-        prompt,
-        history
-      );
-
-      const text =
-        response?.choices?.[0]?.message?.content?.trim();
-
-      if (text) {
-        console.log(`✅ Success with model: ${model}`);
-        return {
-          success: true,
-          provider: `Groq (${model})`,
-          text:
-            text.length > 1900
-              ? text.slice(0, 1890) + "..."
-              : text
-        };
+    const input = [
+      {
+        role: "system",
+        content: AI_PERSONALITY
+      },
+      ...history,
+      {
+        role: "user",
+        content: prompt
       }
+    ];
 
-      console.warn(`⚠️ ${model} returned empty content`);
-    } catch (error) {
-      console.error(
-        `❌ ${model} failed:`,
-        error?.status || "",
-        error?.message || error
-      );
+    const response = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      messages: input,
+      max_tokens: 300,
+      temperature: 0.85
+    });
 
-      if (error?.error) {
-        console.error("   details:", JSON.stringify(error.error));
-      }
-      // try next model
+    const text =
+      response?.choices?.[0]?.message?.content?.trim();
+
+    if (text) {
+      console.log(`✅ OpenAI success`);
+      return {
+        success: true,
+        provider: "OpenAI",
+        text:
+          text.length > 1900
+            ? text.slice(0, 1890) + "..."
+            : text
+      };
+    }
+
+    console.warn("⚠️ OpenAI returned empty content");
+  } catch (error) {
+    console.error(
+      "❌ OpenAI error:",
+      error?.status || "",
+      error?.message || error
+    );
+
+    if (error?.error) {
+      console.error("   details:", JSON.stringify(error.error));
     }
   }
 
-  console.error("❌ All Groq models failed");
   return {
     success: false,
     provider: null,
@@ -572,11 +542,11 @@ client.once(
     );
 
     console.log(
-      `⚡ Groq: ${
-        groq
+      `⚡ OpenAI: ${
+        openai
           ? "Enabled"
           : "Disabled"
-      } | Models: ${GROQ_MODELS.join(", ")}`
+      } | Model: ${OPENAI_MODEL}`
     );
 
     await registerCommands();
@@ -1197,12 +1167,6 @@ client.on(
             return;
           }
 
-          const mentions = [
-            ...members.values()
-          ]
-            .map(m => `<@${m.id}>`)
-            .join(" ");
-
           const list = [
             ...members.values()
           ]
@@ -1225,11 +1189,8 @@ client.on(
                 text: `Today at ${getTodayTime()}`
               });
 
+          // Only mentions inside the embed (no content outside)
           await interaction.editReply({
-            content:
-              mentions.length < 1900
-                ? mentions
-                : undefined,
             embeds: [embed],
             allowedMentions: {
               users: [
@@ -1679,7 +1640,7 @@ client.on(
       // AI Trigger Detection
       // =========================
 
-      if (!groq) {
+      if (!openai) {
         return;
       }
 
