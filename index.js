@@ -8,7 +8,8 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  ChannelType
 } = require("discord.js");
 
 const OpenAI = require("openai");
@@ -133,6 +134,13 @@ const AI_COOLDOWN = 0;
 const pingWarnRoles = new Map();
 
 const TEN_HOURS = 10 * 60 * 60 * 1000;
+
+// =========================
+// AI Talk (Ticket Category)
+// =========================
+
+// Map: guildId -> categoryId
+const aiTalkCategories = new Map();
 
 // =========================
 // AI Conversation Memory
@@ -451,6 +459,28 @@ const commands = [
     )
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageNicknames.toString()
+    ),
+
+  // =========================
+  // /aitalk
+  // =========================
+
+  new SlashCommandBuilder()
+    .setName("aitalk")
+    .setDescription(
+      "Set a category so the AI auto-replies in every ticket/channel under it (no mention needed)."
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageChannels.toString()
+    )
+    .addChannelOption(option =>
+      option
+        .setName("category")
+        .setDescription(
+          "The ticket category (from Ticket King Bot or any category)."
+        )
+        .setRequired(true)
+        .addChannelTypes(ChannelType.GuildCategory)
     )
 
 ].map(command =>
@@ -1221,6 +1251,63 @@ client.on(
       }
 
       // =========================
+      // /aitalk
+      // =========================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "aitalk"
+      ) {
+
+        if (
+          !interaction.memberPermissions ||
+          !interaction.memberPermissions.has(
+            PermissionFlagsBits.ManageChannels
+          )
+        ) {
+          await interaction.reply({
+            content:
+              "❌ You need the **Manage Channels** permission to use this command.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const category =
+          interaction.options.getChannel(
+            "category"
+          );
+
+        if (
+          !category ||
+          category.type !==
+            ChannelType.GuildCategory
+        ) {
+          await interaction.reply({
+            content:
+              "❌ Please select a valid **category**.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        aiTalkCategories.set(
+          interaction.guildId,
+          category.id
+        );
+
+        await interaction.reply({
+          content:
+            `✅ AI Talk enabled for category **${category.name}**.\n` +
+            `The bot will now auto-reply to every message in tickets/channels under this category (no need to ping).`,
+          ephemeral: true
+        });
+
+        return;
+      }
+
+      // =========================
       // START BUTTON
       // =========================
 
@@ -1637,10 +1724,38 @@ client.on(
         }
       }
 
+      // Check if this channel is under an AI Talk category (ticket support)
+      let inAiTalkCategory = false;
+
+      if (
+        message.guild &&
+        message.channel &&
+        message.channel.parentId
+      ) {
+        const setCategoryId =
+          aiTalkCategories.get(
+            message.guildId
+          );
+
+        if (
+          setCategoryId &&
+          message.channel.parentId ===
+            setCategoryId
+        ) {
+          inAiTalkCategory = true;
+        }
+      }
+
+      // Only respond to:
+      // - mention
+      // - @everyone/@here
+      // - reply to bot
+      // - messages inside AI Talk category (tickets)
       if (
         !botMentioned &&
         !massMention &&
-        !repliedToBot
+        !repliedToBot &&
+        !inAiTalkCategory
       ) {
         return;
       }
