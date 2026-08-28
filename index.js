@@ -95,6 +95,9 @@ const antiNukeIgnoreRole = new Map();
 const antiRaidEnabled = new Map();
 const recentNukeCreates = new Map();
 
+// webhookId -> { count, first, channelId, guildId }
+const webhookSpamTracker = new Map();
+
 // =========================
 // Role Mass Add Jobs
 // =========================
@@ -978,21 +981,22 @@ client.on("interactionCreate", async interaction => {
         }
 
         const finalJob = roleJobs.get(interaction.guildId);
-        await interaction.message
-          .edit({
-            embeds: [
-              new EmbedBuilder()
-                .setTitle(
-                  finalJob?.stopped ? "ROLE ALL — STOPPED" : "ROLE ALL — DONE"
-                )
-                .setDescription(
-                  `> **Role:** ${role}\n> **Added:** \`${finalJob?.added || 0} / ${finalJob?.total || 0}\``
-                )
-                .setColor(0x808080)
-            ],
-            components: []
-          })
-          .catch(() => {});
+        // If Stop was pressed, panel was already deleted — skip edit
+        if (finalJob && !finalJob.stopped) {
+          await interaction.message
+            .edit({
+              embeds: [
+                new EmbedBuilder()
+                  .setTitle("ROLE ALL — DONE")
+                  .setDescription(
+                    `> **Role:** ${role}\n> **Added:** \`${finalJob.added || 0} / ${finalJob.total || 0}\``
+                  )
+                  .setColor(0x808080)
+              ],
+              components: []
+            })
+            .catch(() => {});
+        }
         roleJobs.delete(interaction.guildId);
         return;
       }
@@ -1010,13 +1014,17 @@ client.on("interactionCreate", async interaction => {
         const job = roleJobs.get(interaction.guildId);
         if (job && job.running) {
           job.stopped = true;
+          // Delete the panel message
+          await interaction.message.delete().catch(() => {});
           await interaction.reply({
-            content: "🛑 Stopping...",
+            content: "🛑 Stopped and panel deleted.",
             ephemeral: true
           });
         } else {
+          // No job — still delete panel if they click Stop
+          await interaction.message.delete().catch(() => {});
           await interaction.reply({
-            content: "⚠️ No running job.",
+            content: "🗑️ Panel deleted.",
             ephemeral: true
           });
         }
@@ -1176,6 +1184,48 @@ client.on("roleCreate", async role => {
 
 client.on("messageCreate", async message => {
   try {
+    // =========================
+    // Anti-Raid: webhook spam (3 msgs in 2s → delete webhook)
+    // =========================
+    if (
+      message.webhookId &&
+      message.guild &&
+      antiRaidEnabled.get(message.guildId)
+    ) {
+      const wid = message.webhookId;
+      const now = Date.now();
+      let data = webhookSpamTracker.get(wid);
+
+      if (!data || now - data.first > 2000) {
+        data = { count: 0, first: now, channelId: message.channelId, guildId: message.guildId };
+      }
+
+      data.count++;
+      webhookSpamTracker.set(wid, data);
+
+      if (data.count >= 3) {
+        try {
+          const webhooks = await message.channel.fetchWebhooks();
+          const hook = webhooks.get(wid);
+          if (hook) {
+            await hook.delete("Anti-Raid: webhook spam (3 messages in 2 seconds)");
+            await message.channel
+              .send({
+                content: `🛡️ **Anti-Raid** deleted a spam webhook (\`${hook.name}\`).`
+              })
+              .catch(() => {});
+            console.log(
+              `🛡️ Anti-Raid deleted webhook ${hook.name} (${wid}) in ${message.guild.name}`
+            );
+          }
+        } catch (err) {
+          console.error("❌ Failed to delete spam webhook:", err.message);
+        }
+        webhookSpamTracker.delete(wid);
+      }
+    }
+
+    // Ignore bots (but webhook handling already ran above)
     if (message.author.bot) return;
 
     // Ping Warn
