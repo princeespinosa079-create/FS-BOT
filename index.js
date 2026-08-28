@@ -140,7 +140,7 @@ const games = new Map();
 
 const aiCooldowns = new Map();
 
-const AI_COOLDOWN = 2000;
+const AI_COOLDOWN = 0; // cooldown removed
 
 // =========================
 // Ping Warn System
@@ -1760,7 +1760,7 @@ Understand the user's new message in the context of your previous message.`;
 
         await message.reply({
           content:
-            "💀 Both AI providers failed right now. Try again later. 🙄",
+            "Both AI providers failed right now dumbass. Try again later 💀🙄",
           allowedMentions: {
             repliedUser: false
           }
