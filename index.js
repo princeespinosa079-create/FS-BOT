@@ -143,6 +143,15 @@ const aiCooldowns = new Map();
 const AI_COOLDOWN = 2000;
 
 // =========================
+// Ping Warn System
+// =========================
+
+// Map: roleId -> { enabled: boolean, timeout: NodeJS.Timeout | null, guildId: string }
+const pingWarnRoles = new Map();
+
+const TEN_HOURS = 10 * 60 * 60 * 1000; // 10 hours in ms
+
+// =========================
 // AI Conversation Memory
 // =========================
 
@@ -196,7 +205,7 @@ function getTodayTime() {
 }
 
 // =========================
-// AI Personality (TOXIC + 2 EMOJIS)
+// AI Personality (TOXIC + 2 EMOJIS + EXTRA TOXIC WHEN INSULTED)
 // =========================
 
 const AI_PERSONALITY = `
@@ -213,10 +222,18 @@ STRICT RULES:
 - If the user asks a serious question, still answer it but in a rude way.
 - Maintain conversation context from previous messages.
 
-SPECIAL HARD RULE:
+SPECIAL HARD RULE - ANTI KICK:
 If the user asks for anti-kick hacks, anti kick, kick protection, anti-kick script, or anything similar related to anti-kick hacks:
 Reply EXACTLY with this message and nothing else:
 I’m not gonna answer that, dumbass. 💀🙏
+
+SPECIAL HARD RULE - WHEN INSULTED:
+If the user insults you (calls you stupid, dumb, useless, trash, gay, shit bot, etc.):
+Roast them HARDER than usual. Be extra toxic, extra rude, extra mocking. Make them regret it.
+Example responses when insulted:
+"Aww the little bitch is mad 💀😂"
+"Cry more dumbass, your insults are weaker than your wifi 🙄🙏"
+"stfu loser, at least I don't have to beg for attention 💀🔥"
 
 CONVERSATION CONTEXT:
 If the user replies to one of your previous messages, understand what your previous message meant.
@@ -465,6 +482,39 @@ const commands = [
         .setName("server-id")
         .setDescription(
           "The ID of the server to leave."
+        )
+        .setRequired(true)
+    ),
+
+  // =========================
+  // /pingwarn
+  // =========================
+
+  new SlashCommandBuilder()
+    .setName("pingwarn")
+    .setDescription(
+      "When a role pings @everyone/@here, temporarily remove their ping permission for 10 hours."
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageRoles.toString()
+    )
+    .addStringOption(option =>
+      option
+        .setName("mode")
+        .setDescription(
+          "Turn the system ON or OFF for the role."
+        )
+        .setRequired(true)
+        .addChoices(
+          { name: "ON", value: "on" },
+          { name: "OFF", value: "off" }
+        )
+    )
+    .addRoleOption(option =>
+      option
+        .setName("role")
+        .setDescription(
+          "The role that will be punished when it pings @everyone or @here."
         )
         .setRequired(true)
     )
@@ -1011,6 +1061,140 @@ client.on(
       }
 
       // =========================
+      // /pingwarn
+      // =========================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "pingwarn"
+      ) {
+
+        if (
+          !interaction.memberPermissions ||
+          !interaction.memberPermissions.has(
+            PermissionFlagsBits.ManageRoles
+          )
+        ) {
+          await interaction.reply({
+            content:
+              "❌ You need the **Manage Roles** permission to use this command.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const mode =
+          interaction.options.getString(
+            "mode"
+          );
+
+        const role =
+          interaction.options.getRole(
+            "role"
+          );
+
+        if (!role) {
+          await interaction.reply({
+            content:
+              "❌ Role not found.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        // Check if bot can manage this role
+        const botMember =
+          interaction.guild.members.me;
+
+        if (
+          !botMember ||
+          role.position >=
+            botMember.roles.highest.position
+        ) {
+          await interaction.reply({
+            content:
+              "❌ I cannot manage that role. Move my role higher than it.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        if (mode === "on") {
+          // Clear any existing timeout
+          const existing =
+            pingWarnRoles.get(
+              role.id
+            );
+
+          if (
+            existing &&
+            existing.timeout
+          ) {
+            clearTimeout(
+              existing.timeout
+            );
+          }
+
+          pingWarnRoles.set(
+            role.id,
+            {
+              enabled: true,
+              timeout: null,
+              guildId:
+                interaction.guildId
+            }
+          );
+
+          await interaction.reply({
+            content:
+              `✅ Ping Warn **ON** for role **${role.name}**.\n` +
+              `If someone with this role uses @everyone or @here, their ping permission will be removed for **10 hours**.`,
+            ephemeral: true
+          });
+        } else {
+          // OFF
+          const existing =
+            pingWarnRoles.get(
+              role.id
+            );
+
+          if (
+            existing &&
+            existing.timeout
+          ) {
+            clearTimeout(
+              existing.timeout
+            );
+          }
+
+          pingWarnRoles.delete(
+            role.id
+          );
+
+          // Try to restore permission just in case
+          try {
+            await role.setPermissions(
+              role.permissions.add(
+                PermissionFlagsBits.MentionEveryone
+              ),
+              "PingWarn turned OFF - restoring permission"
+            );
+          } catch (err) {
+            // ignore if already has it or fails
+          }
+
+          await interaction.reply({
+            content:
+              `✅ Ping Warn **OFF** for role **${role.name}**.`,
+            ephemeral: true
+          });
+        }
+
+        return;
+      }
+
+      // =========================
       // START BUTTON
       // =========================
 
@@ -1153,6 +1337,155 @@ client.on(
       // Ignore bots
       if (message.author.bot) {
         return;
+      }
+
+      // =========================
+      // Ping Warn System
+      // =========================
+
+      if (
+        message.guild &&
+        (message.mentions.everyone ||
+          message.content.includes(
+            "@here"
+          ))
+      ) {
+        // Check if any of the author's roles are in pingWarnRoles
+        const member = message.member;
+
+        if (member) {
+          for (const [
+            roleId,
+            data
+          ] of pingWarnRoles) {
+            if (
+              !data.enabled ||
+              data.guildId !==
+                message.guildId
+            ) {
+              continue;
+            }
+
+            if (
+              member.roles.cache.has(
+                roleId
+              )
+            ) {
+              const role =
+                message.guild.roles.cache.get(
+                  roleId
+                );
+
+              if (!role) continue;
+
+              // Check if role currently has MentionEveryone
+              if (
+                role.permissions.has(
+                  PermissionFlagsBits.MentionEveryone
+                )
+              ) {
+                try {
+                  // Remove the permission
+                  await role.setPermissions(
+                    role.permissions.remove(
+                      PermissionFlagsBits.MentionEveryone
+                    ),
+                    `PingWarn: ${message.author.tag} used @everyone/@here`
+                  );
+
+                  // Clear previous timeout if any
+                  if (data.timeout) {
+                    clearTimeout(
+                      data.timeout
+                    );
+                  }
+
+                  // Schedule restore after 10 hours
+                  const timeout =
+                    setTimeout(
+                      async () => {
+                        try {
+                          const currentRole =
+                            message.guild.roles.cache.get(
+                              roleId
+                            );
+
+                          if (
+                            currentRole
+                          ) {
+                            await currentRole.setPermissions(
+                              currentRole.permissions.add(
+                                PermissionFlagsBits.MentionEveryone
+                              ),
+                              "PingWarn: 10 hours passed - restoring ping permission"
+                            );
+
+                            console.log(
+                              `✅ Restored MentionEveryone for role ${currentRole.name}`
+                            );
+                          }
+                        } catch (err) {
+                          console.error(
+                            "❌ Failed to restore MentionEveryone:",
+                            err
+                          );
+                        }
+
+                        // Clean up
+                        const current =
+                          pingWarnRoles.get(
+                            roleId
+                          );
+                        if (current) {
+                          current.timeout =
+                            null;
+                        }
+                      },
+                      TEN_HOURS
+                    );
+
+                  // Save timeout
+                  data.timeout =
+                    timeout;
+                  pingWarnRoles.set(
+                    roleId,
+                    data
+                  );
+
+                  // Notify in channel
+                  await message.channel
+                    .send({
+                      content:
+                        `⚠️ **Ping Warn**\n` +
+                        `Role **${role.name}** lost @everyone/@here permission for **10 hours** because <@${message.author.id}> used a mass ping.`,
+                      allowedMentions: {
+                        users: [
+                          message
+                            .author
+                            .id
+                        ]
+                      }
+                    })
+                    .catch(
+                      () => {}
+                    );
+
+                  console.log(
+                    `⚠️ PingWarn triggered on role ${role.name} by ${message.author.tag}`
+                  );
+                } catch (err) {
+                  console.error(
+                    "❌ Failed to remove MentionEveryone:",
+                    err
+                  );
+                }
+              }
+
+              // Only punish once per message
+              break;
+            }
+          }
+        }
       }
 
       // =========================
