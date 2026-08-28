@@ -59,7 +59,7 @@ const groq = GROQ_API_KEY
 // AI Model
 // =========================
 
-const GROQ_MODEL = "openai/gpt-oss-20b";
+const GROQ_MODEL = "llama-3.1-8b-instant"; // fast + reliable
 
 // =========================
 // Web Server
@@ -84,7 +84,8 @@ app.get("/health", (req, res) => {
       : "connecting",
     groq: groq
       ? "enabled"
-      : "disabled"
+      : "disabled",
+    model: GROQ_MODEL
   });
 });
 
@@ -106,7 +107,8 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers
   ]
 });
 
@@ -128,10 +130,9 @@ const AI_COOLDOWN = 0;
 // Ping Warn System
 // =========================
 
-// Map: roleId -> { enabled: boolean, timeout: NodeJS.Timeout | null, guildId: string }
 const pingWarnRoles = new Map();
 
-const TEN_HOURS = 10 * 60 * 60 * 1000; // 10 hours in ms
+const TEN_HOURS = 10 * 60 * 60 * 1000;
 
 // =========================
 // AI Conversation Memory
@@ -187,7 +188,7 @@ function getTodayTime() {
 }
 
 // =========================
-// AI Personality (TOXIC but still answers questions)
+// AI Personality
 // =========================
 
 const AI_PERSONALITY = `
@@ -212,11 +213,7 @@ I’m not gonna answer that, dumbass. 💀🙏
 
 SPECIAL HARD RULE - WHEN INSULTED:
 If the user insults you (calls you stupid, dumb, useless, trash, gay, shit bot, etc.):
-Roast them HARDER than usual. Be extra toxic, extra rude, extra mocking. Make them regret it.
-Example responses when insulted:
-"Aww the little bitch is mad 💀😂"
-"Cry more dumbass, your insults are weaker than your wifi 🙄🙏"
-"stfu loser, at least I don't have to beg for attention 💀🔥"
+Roast them HARDER than usual. Be extra toxic, extra rude, extra mocking.
 
 CONVERSATION CONTEXT:
 If the user replies to one of your previous messages, understand what your previous message meant.
@@ -226,8 +223,6 @@ User: "what is 1 + 1?"
 Assistant: "2 dumbass 💀🙄"
 User: "+ 1"
 Assistant: "3, keep going genius 🙄🙏"
-User: "+ 1"
-Assistant: "4, wow you can count 💀😂"
 
 Another example:
 User: "how to make a for loop in javascript?"
@@ -272,14 +267,14 @@ async function requestAI(
     {
       model,
       messages: input,
-      max_tokens: 250,
-      temperature: 0.8
+      max_tokens: 300,
+      temperature: 0.85
     }
   );
 }
 
 // =========================
-// Ask AI (Groq only)
+// Ask AI (Groq only) - improved error handling
 // =========================
 
 async function askAI(
@@ -287,6 +282,7 @@ async function askAI(
   history = []
 ) {
   if (!groq) {
+    console.error("❌ Groq client is null (missing GROQ_API_KEY)");
     return {
       success: false,
       provider: null,
@@ -322,15 +318,20 @@ async function askAI(
     }
 
     console.warn(
-      "⚠️ Groq returned an empty response."
+      "⚠️ Groq returned empty content:",
+      JSON.stringify(response, null, 2)
     );
 
   } catch (error) {
     console.error(
-      "❌ Groq error:",
+      "❌ Groq full error:",
       error?.status || "",
       error?.message || error
     );
+
+    if (error?.error) {
+      console.error("❌ Groq API error details:", error.error);
+    }
   }
 
   return {
@@ -345,10 +346,6 @@ async function askAI(
 // =========================
 
 const commands = [
-
-  // =========================
-  // /guessnumber
-  // =========================
 
   new SlashCommandBuilder()
     .setName("guessnumber")
@@ -368,10 +365,6 @@ const commands = [
         .setMinValue(1)
         .setMaxValue(10000)
     ),
-
-  // =========================
-  // /embed
-  // =========================
 
   new SlashCommandBuilder()
     .setName("embed")
@@ -398,19 +391,11 @@ const commands = [
         .setRequired(false)
     ),
 
-  // =========================
-  // /serverlist
-  // =========================
-
   new SlashCommandBuilder()
     .setName("serverlist")
     .setDescription(
       "Show all servers where the bot is installed. (Owner only)"
     ),
-
-  // =========================
-  // /leave
-  // =========================
 
   new SlashCommandBuilder()
     .setName("leave")
@@ -425,10 +410,6 @@ const commands = [
         )
         .setRequired(true)
     ),
-
-  // =========================
-  // /pingwarn
-  // =========================
 
   new SlashCommandBuilder()
     .setName("pingwarn")
@@ -457,6 +438,19 @@ const commands = [
           "The role that will be punished when it pings @everyone or @here."
         )
         .setRequired(true)
+    ),
+
+  // =========================
+  // /spylist
+  // =========================
+
+  new SlashCommandBuilder()
+    .setName("spylist")
+    .setDescription(
+      "List and mention all members with 'alt' or 'spy' in their name/nickname."
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageNicknames.toString()
     )
 
 ].map(command =>
@@ -479,7 +473,6 @@ async function registerCommands() {
       "🧹 Cleaning old slash commands..."
     );
 
-    // Remove global commands
     await rest.put(
       Routes.applicationCommands(
         CLIENT_ID
@@ -493,7 +486,6 @@ async function registerCommands() {
       "🗑️ Old global commands removed."
     );
 
-    // Remove guild commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -508,7 +500,6 @@ async function registerCommands() {
       "🗑️ Old guild commands removed."
     );
 
-    // Register only current commands
     await rest.put(
       Routes.applicationGuildCommands(
         CLIENT_ID,
@@ -552,7 +543,7 @@ client.once(
         groq
           ? "Enabled"
           : "Disabled"
-      }`
+      } | Model: ${GROQ_MODEL}`
     );
 
     await registerCommands();
@@ -608,7 +599,9 @@ client.on(
           interaction.commandName ===
             "guessnumber" ||
           interaction.commandName ===
-            "embed"
+            "embed" ||
+          interaction.commandName ===
+            "spylist"
         )
       ) {
 
@@ -857,7 +850,6 @@ client.on(
           }
         );
 
-        // DM answer
         const answerEmbed =
           new EmbedBuilder()
             .setDescription(
@@ -897,14 +889,12 @@ client.on(
           return;
         }
 
-        // Acknowledge silently
         await interaction.deferReply({
           ephemeral: true
         });
 
         await interaction.deleteReply();
 
-        // Game panel
         const panelEmbed =
           new EmbedBuilder()
             .setTitle(
@@ -978,7 +968,6 @@ client.on(
           embed.setTitle(title);
         }
 
-        // Silent command
         await interaction.deferReply({
           ephemeral: true
         });
@@ -1035,7 +1024,6 @@ client.on(
           return;
         }
 
-        // Check if bot can manage this role
         const botMember =
           interaction.guild.members.me;
 
@@ -1053,7 +1041,6 @@ client.on(
         }
 
         if (mode === "on") {
-          // Clear any existing timeout
           const existing =
             pingWarnRoles.get(
               role.id
@@ -1085,7 +1072,6 @@ client.on(
             ephemeral: true
           });
         } else {
-          // OFF
           const existing =
             pingWarnRoles.get(
               role.id
@@ -1104,7 +1090,6 @@ client.on(
             role.id
           );
 
-          // Try to restore permission just in case
           try {
             await role.setPermissions(
               role.permissions.add(
@@ -1112,14 +1097,123 @@ client.on(
               ),
               "PingWarn turned OFF - restoring permission"
             );
-          } catch (err) {
-            // ignore if already has it or fails
-          }
+          } catch (err) {}
 
           await interaction.reply({
             content:
               `✅ Ping Warn **OFF** for role **${role.name}**.`,
             ephemeral: true
+          });
+        }
+
+        return;
+      }
+
+      // =========================
+      // /spylist
+      // =========================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "spylist"
+      ) {
+
+        await interaction.deferReply();
+
+        try {
+          // Fetch all members
+          await interaction.guild.members.fetch();
+
+          const members =
+            interaction.guild.members.cache.filter(
+              member => {
+                if (member.user.bot) return false;
+
+                const name =
+                  (
+                    member.user.username +
+                    " " +
+                    (member.nickname || "") +
+                    " " +
+                    (member.user.globalName || "")
+                  ).toLowerCase();
+
+                return (
+                  name.includes("alt") ||
+                  name.includes("spy")
+                );
+              }
+            );
+
+          if (members.size === 0) {
+            const embed =
+              new EmbedBuilder()
+                .setTitle("SPY / ALT LIST")
+                .setDescription(
+                  "No members found with **alt** or **spy** in their name/nickname."
+                )
+                .setColor(0x808080)
+                .setFooter({
+                  text: `Today at ${getTodayTime()}`
+                });
+
+            await interaction.editReply({
+              embeds: [embed]
+            });
+            return;
+          }
+
+          const mentions = [
+            ...members.values()
+          ]
+            .map(m => `<@${m.id}>`)
+            .join(" ");
+
+          const list = [
+            ...members.values()
+          ]
+            .map(
+              (m, i) =>
+                `**${i + 1}.** <@${m.id}> \`${m.user.tag}\``
+            )
+            .join("\n");
+
+          const embed =
+            new EmbedBuilder()
+              .setTitle(
+                `SPY / ALT LIST (${members.size})`
+              )
+              .setDescription(
+                list.slice(0, 4000)
+              )
+              .setColor(0x808080)
+              .setFooter({
+                text: `Today at ${getTodayTime()}`
+              });
+
+          await interaction.editReply({
+            content:
+              mentions.length < 1900
+                ? mentions
+                : undefined,
+            embeds: [embed],
+            allowedMentions: {
+              users: [
+                ...members.keys()
+              ]
+            }
+          });
+
+        } catch (error) {
+          console.error(
+            "❌ /spylist error:",
+            error
+          );
+
+          await interaction.editReply({
+            content:
+              "❌ Failed to fetch members. Make sure the bot has **Server Members Intent** enabled."
           });
         }
 
@@ -1189,7 +1283,6 @@ client.on(
 
         game.active = true;
 
-        // Unlock channel
         if (
           interaction.guild &&
           interaction.channel &&
@@ -1266,7 +1359,6 @@ client.on(
 
     try {
 
-      // Ignore bots
       if (message.author.bot) {
         return;
       }
@@ -1282,7 +1374,6 @@ client.on(
             "@here"
           ))
       ) {
-        // Check if any of the author's roles are in pingWarnRoles
         const member = message.member;
 
         if (member) {
@@ -1310,14 +1401,12 @@ client.on(
 
               if (!role) continue;
 
-              // Check if role currently has MentionEveryone
               if (
                 role.permissions.has(
                   PermissionFlagsBits.MentionEveryone
                 )
               ) {
                 try {
-                  // Remove the permission
                   await role.setPermissions(
                     role.permissions.remove(
                       PermissionFlagsBits.MentionEveryone
@@ -1325,14 +1414,12 @@ client.on(
                     `PingWarn: ${message.author.tag} used @everyone/@here`
                   );
 
-                  // Clear previous timeout if any
                   if (data.timeout) {
                     clearTimeout(
                       data.timeout
                     );
                   }
 
-                  // Schedule restore after 10 hours
                   const timeout =
                     setTimeout(
                       async () => {
@@ -1363,7 +1450,6 @@ client.on(
                           );
                         }
 
-                        // Clean up
                         const current =
                           pingWarnRoles.get(
                             roleId
@@ -1376,7 +1462,6 @@ client.on(
                       TEN_HOURS
                     );
 
-                  // Save timeout
                   data.timeout =
                     timeout;
                   pingWarnRoles.set(
@@ -1384,7 +1469,6 @@ client.on(
                     data
                   );
 
-                  // Notify in channel
                   await message.channel
                     .send({
                       content:
@@ -1413,7 +1497,6 @@ client.on(
                 }
               }
 
-              // Only punish once per message
               break;
             }
           }
@@ -1445,7 +1528,6 @@ client.on(
           guess <= 10000
         ) {
 
-          // Correct answer
           if (
             guess ===
             game.answer
@@ -1468,7 +1550,6 @@ client.on(
               ]
             });
 
-            // Lock channel
             if (
               message.guild &&
               message.channel.permissionOverwrites
@@ -1500,8 +1581,6 @@ client.on(
             return;
           }
 
-          // Wrong guesses:
-          // no response
           return;
         }
       }
@@ -1523,7 +1602,6 @@ client.on(
       const massMention =
         message.mentions.everyone;
 
-      // Direct reply to bot
       let repliedToBot =
         false;
 
@@ -1558,11 +1636,6 @@ client.on(
           );
         }
       }
-
-      // Only respond to:
-      // mention
-      // @everyone/@here
-      // reply to bot
 
       if (
         !botMentioned &&
@@ -1627,10 +1700,6 @@ client.on(
           )
           .trim();
 
-      // =========================
-      // Previous Bot Message
-      // =========================
-
       if (
         repliedToBot &&
         referencedMessage
@@ -1689,7 +1758,7 @@ Understand the user's new message in the context of your previous message.`;
 
         await message.reply({
           content:
-            "AI is dead right now dumbass. Try again later 💀🙄",
+            "AI died for a second dumbass, try again 💀🙄",
           allowedMentions: {
             repliedUser: false
           }
