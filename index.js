@@ -22,9 +22,10 @@ const path = require("path");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID; // optional — clear old guild cmds
+const GUILD_ID = process.env.GUILD_ID;
 
 const OWNER_ID = "1302080645987569694";
+const PREFIX = "."; // Command prefix
 
 if (!TOKEN || !CLIENT_ID) {
   console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID.");
@@ -35,7 +36,6 @@ if (!TOKEN || !CLIENT_ID) {
 // Persist settings across redeploy
 // =========================
 
-// /data = Render persistent disk mount (recommended). Fallback = app folder.
 const DATA_DIR =
   process.env.DATA_DIR || (fs.existsSync("/data") ? "/data" : __dirname);
 const DATA_FILE = path.join(DATA_DIR, "bot-data.json");
@@ -166,7 +166,6 @@ function getTodayTime() {
 function parseDuration(str) {
   if (!str || !str.trim()) return null;
   const s = str.trim().toLowerCase();
-  // support "1h", "30m", "1h 30m", "90m"
   let total = 0;
   const parts = s.match(/(\d+)\s*(s|m|h|d)/g);
   if (!parts) return null;
@@ -191,6 +190,44 @@ function formatDuration(ms) {
   if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
   const d = Math.floor(h / 24);
   return `${d}d`;
+}
+
+// Generate random 10-letter filename
+function randomFilename(ext = "lua") {
+  const chars = "abcdefghijklmnopqrstuvwxyz";
+  let name = "";
+  for (let i = 0; i < 10; i++) {
+    name += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return `${name}.${ext}`;
+}
+
+// URL validation
+function isValidUrl(string) {
+  try {
+    new URL(string);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Extract URL from message or replied message
+async function extractUrl(message) {
+  // Check current message content first
+  const directMatch = message.content.match(/https?:\/\/[^\s]+/);
+  if (directMatch) return directMatch[0];
+
+  // Check replied message
+  if (message.reference) {
+    try {
+      const replied = await message.channel.messages.fetch(message.reference.messageId);
+      const replyMatch = replied.content.match(/https?:\/\/[^\s]+/);
+      if (replyMatch) return replyMatch[0];
+    } catch {}
+  }
+
+  return null;
 }
 
 // Public profile URL builders + stats fetchers
@@ -293,7 +330,7 @@ async function fetchPlatformStats(key, username) {
   const profileUrl = platform.url(username);
   let followers = null;
   let posts = null;
-  let active = null; // true / false / null
+  let active = null;
   let extra = null;
 
   try {
@@ -329,7 +366,6 @@ async function fetchPlatformStats(key, username) {
         active = false;
       }
     } else {
-      // Soft existence check via GET (many sites block bots → unknown)
       const res = await fetch(profileUrl, {
         method: "GET",
         redirect: "follow",
@@ -346,9 +382,7 @@ async function fetchPlatformStats(key, username) {
         else active = null;
       }
     }
-  } catch {
-    // leave nulls
-  }
+  } catch {}
 
   return { followers, posts, active, extra, profileUrl, platform };
 }
@@ -366,7 +400,7 @@ function activeText(active) {
 }
 
 // =========================
-// Slash Commands (GLOBAL)
+// Slash Commands (GLOBAL) — NO /get anymore
 // =========================
 
 const commands = [
@@ -588,7 +622,7 @@ client.once("ready", async () => {
 });
 
 // =========================
-// Interactions
+// Interactions (Slash Commands + Buttons)
 // =========================
 
 client.on("interactionCreate", async interaction => {
@@ -720,7 +754,6 @@ client.on("interactionCreate", async interaction => {
       const nukeOn = !!antiNukeEnabled.get(gid);
       const raidOn = !!antiRaidEnabled.get(gid);
 
-      // Any pingwarn role for this guild?
       let pingOn = false;
       for (const [, v] of pingWarnRoles) {
         if (v.enabled && v.guildId === gid) {
@@ -764,7 +797,6 @@ client.on("interactionCreate", async interaction => {
             parse: mention === "everyone" ? ["everyone"] : ["everyone"]
           }
         });
-        // Delete instantly (ghost)
         await msg.delete().catch(() => {});
       } catch (err) {
         console.error("❌ Ghostping failed:", err.message);
@@ -798,7 +830,6 @@ client.on("interactionCreate", async interaction => {
         keys.filter(k => MEDIA_PLATFORMS[k]).map(k => fetchPlatformStats(k, username))
       );
 
-      // Discord embeds max 25 fields — batch if "all"
       const embeds = [];
       const chunkSize = 6;
       for (let i = 0; i < results.length; i += chunkSize) {
@@ -955,7 +986,7 @@ client.on("interactionCreate", async interaction => {
           enabled: true,
           timeout: null,
           guildId: interaction.guildId,
-          durationMs // null = permanent
+          durationMs
         });
         saveData();
 
@@ -984,7 +1015,7 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /spylist — newest accounts first; spy/alt + new in embeds
+    // /spylist
     if (
       interaction.isChatInputCommand() &&
       interaction.commandName === "spylist"
@@ -1011,14 +1042,12 @@ client.on("interactionCreate", async interaction => {
           }
         }
 
-        // Newest account first (highest createdTimestamp)
         newAccounts.sort(
           (a, b) => b.user.createdTimestamp - a.user.createdTimestamp
         );
 
         const embeds = [];
 
-        // SPY / ALT embed (includes note if also new)
         if (spyAlt.length === 0) {
           embeds.push(
             new EmbedBuilder()
@@ -1049,7 +1078,6 @@ client.on("interactionCreate", async interaction => {
           );
         }
 
-        // NEW ACCOUNT LIST — newest at top
         if (newAccounts.length === 0) {
           embeds.push(
             new EmbedBuilder()
@@ -1537,12 +1565,121 @@ client.on("roleCreate", async role => {
 });
 
 // =========================
-// Messages
+// Messages (Prefix Commands + Other Handlers)
 // =========================
 
 client.on("messageCreate", async message => {
   try {
-    // Anti-Raid: webhook spam — 2 messages in 1.5s → delete spam msgs + webhook
+    // Ignore bots
+    if (message.author.bot) return;
+
+    // =========================
+    // PREFIX COMMAND HANDLER
+    // =========================
+    if (message.content.startsWith(PREFIX)) {
+      const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+      const command = args.shift().toLowerCase();
+
+      // ========== .get COMMAND ==========
+      if (command === "get") {
+        // Log usage to console
+        console.log(`[.get] User: ${message.author.tag} (${message.author.id}) | Guild: ${message.guild?.name} (${message.guildId}) | Channel: #${message.channel.name}`);
+
+        const targetUrl = await extractUrl(message);
+
+        if (!targetUrl || !isValidUrl(targetUrl)) {
+          return message.reply({
+            content: "**Enter a valid URL or reply to the URL or forward.**"
+          });
+        }
+
+        // Send "Fetching" embed
+        const fetchEmbed = new EmbedBuilder()
+          .setTitle("Fetching URL...")
+          .setDescription(`<${targetUrl}>`)
+          .setColor(0x808080)
+          .setFooter({ text: `Today at ${getTodayTime()}` });
+
+        const statusMsg = await message.reply({ embeds: [fetchEmbed] });
+
+        try {
+          // Fetch content
+          const res = await fetch(targetUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            },
+            signal: AbortSignal.timeout(15000)
+          });
+
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+          const content = await res.text();
+          const fileName = randomFilename("lua");
+          const filePath = path.join(DATA_DIR, fileName);
+
+          fs.writeFileSync(filePath, content, "utf8");
+
+          // Send success + file
+          const successEmbed = new EmbedBuilder()
+            .setTitle("✅ Fetched Successfully")
+            .setDescription(`**URL:** <${targetUrl}>\n**File:** \`${fileName}\`\n**Size:** \`${content.length} bytes\``)
+            .setColor(0x808080)
+            .setFooter({ text: `Today at ${getTodayTime()}` });
+
+          await statusMsg.edit({
+            embeds: [successEmbed],
+            files: [{ attachment: filePath, name: fileName }]
+          });
+
+          // Clean up temp file
+          fs.unlinkSync(filePath);
+
+        } catch (err) {
+          console.error(`[.get] Fetch failed: ${err.message}`);
+          await statusMsg.edit({
+            content: `❌ Failed to fetch URL: \`${err.message}\``,
+            embeds: []
+          });
+        }
+        return;
+      }
+
+      // ========== .l COMMAND (Logger) ==========
+      if (command === "l") {
+        // Log detailed info to console
+        const logInfo = {
+          timestamp: new Date().toISOString(),
+          user: {
+            tag: message.author.tag,
+            id: message.author.id
+          },
+          guild: message.guild ? {
+            name: message.guild.name,
+            id: message.guildId
+          } : "DM",
+          channel: {
+            name: message.channel.name || "dm",
+            id: message.channelId
+          },
+          message: {
+            content: message.content,
+            id: message.id
+          }
+        };
+
+        console.log(`[.l LOGGER] ${JSON.stringify(logInfo, null, 2)}`);
+
+        // Confirm to user
+        await message.reply({
+          content: "✅ Logged to console."
+        });
+        return;
+      }
+    }
+
+    // =========================
+    // Anti-Raid: webhook spam
+    // =========================
     if (
       message.webhookId &&
       message.guild &&
@@ -1561,7 +1698,6 @@ client.on("messageCreate", async message => {
       if (data.count >= 2) {
         webhookSpamTracker.delete(wid);
         try {
-          // 1) Delete webhook spam messages FIRST
           try {
             await message.channel.bulkDelete(data.msgIds, true);
           } catch {
@@ -1570,7 +1706,6 @@ client.on("messageCreate", async message => {
             }
           }
 
-          // 2) Fetch webhook + predict raider
           const webhooks = await message.channel.fetchWebhooks();
           const hook = webhooks.get(wid);
 
@@ -1595,14 +1730,12 @@ client.on("messageCreate", async message => {
 
           const hookName = hook?.name || "Unknown";
 
-          // 3) Delete the webhook
           if (hook) {
             await hook.delete(
               "Anti-Raid: webhook spam (2 msgs in 1.5s)"
             );
           }
 
-          // 4) Send notice — KEEP it (do not auto-delete)
           await message.channel
             .send({
               content:
@@ -1621,9 +1754,9 @@ client.on("messageCreate", async message => {
       }
     }
 
-    if (message.author.bot) return;
-
+    // =========================
     // Ping Warn
+    // =========================
     if (
       message.guild &&
       (message.mentions.everyone || message.content.includes("@here"))
@@ -1646,7 +1779,6 @@ client.on("messageCreate", async message => {
 
             if (data.timeout) clearTimeout(data.timeout);
 
-            // Only auto-restore if duration was set
             if (data.durationMs) {
               data.timeout = setTimeout(async () => {
                 try {
@@ -1678,7 +1810,6 @@ client.on("messageCreate", async message => {
               })
               .catch(() => null);
 
-            // Remove ping warn notice after 10 seconds
             if (warnMsg) {
               setTimeout(() => {
                 warnMsg.delete().catch(() => {});
@@ -1690,7 +1821,9 @@ client.on("messageCreate", async message => {
       }
     }
 
+    // =========================
     // Guess game
+    // =========================
     const game = games.get(message.channelId);
     if (game?.active) {
       const guess = Number(message.content.trim());
