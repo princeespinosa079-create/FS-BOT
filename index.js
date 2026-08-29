@@ -25,7 +25,7 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
 const OWNER_ID = "1302080645987569694";
-const PREFIX = "."; // Command prefix
+const PREFIX = ".";
 
 if (!TOKEN || !CLIENT_ID) {
   console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID.");
@@ -212,22 +212,68 @@ function isValidUrl(string) {
   }
 }
 
-// Extract URL from message or replied message
-async function extractUrl(message) {
-  // Check current message content first
-  const directMatch = message.content.match(/https?:\/\/[^\s]+/);
-  if (directMatch) return directMatch[0];
+// Extract ALL URLs from message or replied message
+async function extractAllUrls(message) {
+  const urls = new Set();
+
+  // Check current message
+  const currentMatches = message.content.match(/https?:\/\/[^\s<>"']+/g);
+  if (currentMatches) {
+    currentMatches.forEach(u => {
+      if (isValidUrl(u)) urls.add(u);
+    });
+  }
 
   // Check replied message
   if (message.reference) {
     try {
       const replied = await message.channel.messages.fetch(message.reference.messageId);
-      const replyMatch = replied.content.match(/https?:\/\/[^\s]+/);
-      if (replyMatch) return replyMatch[0];
+      const replyMatches = replied.content.match(/https?:\/\/[^\s<>"']+/g);
+      if (replyMatches) {
+        replyMatches.forEach(u => {
+          if (isValidUrl(u)) urls.add(u);
+        });
+      }
     } catch {}
   }
 
-  return null;
+  return [...urls];
+}
+
+// Format table/object for logging (like the Roblox script)
+function tblformat(tbl, depth) {
+  const depth = depth || 0;
+  let res = "";
+  let first = true;
+  if (depth > 5) return "too big to display";
+  if (typeof tbl !== "object" || tbl === null) {
+    res = `"${String(tbl)}"`;
+    if (res === `"null"` || res === `"undefined"`) res = "";
+    return res;
+  }
+  for (const [i, v] of Object.entries(tbl)) {
+    if (!first) res += ", ";
+    first = false;
+    if (typeof i === "string") res += `${i} = `;
+    if (typeof v === "object" && v !== null) {
+      res += tblformat(v, depth + 1);
+    } else {
+      res += String(v);
+    }
+  }
+  return res;
+}
+
+// Format log text (like the Roblox script's formatlog)
+function formatlog(text) {
+  if (typeof text !== "string") return String(text);
+  return text
+    .replace(/table: /g, "")
+    .replace(/function: /g, "")
+    .replace(/\n/g, "")
+    .replace(/\s\s+/g, ";")
+    .replace(/""/g, "")
+    .replace(/"/g, "'");
 }
 
 // Public profile URL builders + stats fetchers
@@ -400,7 +446,7 @@ function activeText(active) {
 }
 
 // =========================
-// Slash Commands (GLOBAL) — NO /get anymore
+// Slash Commands (GLOBAL)
 // =========================
 
 const commands = [
@@ -622,7 +668,7 @@ client.once("ready", async () => {
 });
 
 // =========================
-// Interactions (Slash Commands + Buttons)
+// Interactions
 // =========================
 
 client.on("interactionCreate", async interaction => {
@@ -1565,7 +1611,7 @@ client.on("roleCreate", async role => {
 });
 
 // =========================
-// Messages (Prefix Commands + Other Handlers)
+// Messages (Prefix Commands + Handlers)
 // =========================
 
 client.on("messageCreate", async message => {
@@ -1580,99 +1626,249 @@ client.on("messageCreate", async message => {
       const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
       const command = args.shift().toLowerCase();
 
-      // ========== .get COMMAND ==========
+      // ========== .get COMMAND — Fetches ALL URLs ==========
       if (command === "get") {
-        // Log usage to console
+        // Log usage
         console.log(`[.get] User: ${message.author.tag} (${message.author.id}) | Guild: ${message.guild?.name} (${message.guildId}) | Channel: #${message.channel.name}`);
 
-        const targetUrl = await extractUrl(message);
+        const allUrls = await extractAllUrls(message);
 
-        if (!targetUrl || !isValidUrl(targetUrl)) {
+        if (allUrls.length === 0) {
           return message.reply({
-            content: "**Enter a valid URL or reply to the URL or forward.**"
+            content: "Enter a valid URL or reply to the URL or forward URL."
           });
         }
 
-        // Send "Fetching" embed
+        // Send "Fetching" embed with ALL URLs
         const fetchEmbed = new EmbedBuilder()
           .setTitle("Fetching URL...")
-          .setDescription(`<${targetUrl}>`)
+          .setDescription(allUrls.map(u => `<${u}>`).join("\n"))
           .setColor(0x808080)
           .setFooter({ text: `Today at ${getTodayTime()}` });
 
         const statusMsg = await message.reply({ embeds: [fetchEmbed] });
 
-        try {
-          // Fetch content
-          const res = await fetch(targetUrl, {
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            },
-            signal: AbortSignal.timeout(15000)
-          });
+        const files = [];
+        const results = [];
 
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        for (const url of allUrls) {
+          try {
+            const res = await fetch(url, {
+              headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+              },
+              signal: AbortSignal.timeout(15000)
+            });
 
-          const content = await res.text();
-          const fileName = randomFilename("lua");
-          const filePath = path.join(DATA_DIR, fileName);
+            if (!res.ok) {
+              results.push(`❌ <${url}> — HTTP ${res.status}`);
+              continue;
+            }
 
-          fs.writeFileSync(filePath, content, "utf8");
+            const content = await res.text();
+            const fileName = randomFilename("lua");
+            const filePath = path.join(DATA_DIR, fileName);
 
-          // Send success + file
-          const successEmbed = new EmbedBuilder()
-            .setTitle("✅ Fetched Successfully")
-            .setDescription(`**URL:** <${targetUrl}>\n**File:** \`${fileName}\`\n**Size:** \`${content.length} bytes\``)
-            .setColor(0x808080)
-            .setFooter({ text: `Today at ${getTodayTime()}` });
+            fs.writeFileSync(filePath, content, "utf8");
+            files.push({ attachment: filePath, name: fileName });
+            results.push(`✅ <${url}> → \`${fileName}\` (${content.length} bytes)`);
 
-          await statusMsg.edit({
-            embeds: [successEmbed],
-            files: [{ attachment: filePath, name: fileName }]
-          });
-
-          // Clean up temp file
-          fs.unlinkSync(filePath);
-
-        } catch (err) {
-          console.error(`[.get] Fetch failed: ${err.message}`);
-          await statusMsg.edit({
-            content: `❌ Failed to fetch URL: \`${err.message}\``,
-            embeds: []
-          });
+          } catch (err) {
+            console.error(`[.get] Fetch failed for ${url}: ${err.message}`);
+            results.push(`❌ <${url}> — ${err.message}`);
+          }
         }
+
+        // Send results
+        const successEmbed = new EmbedBuilder()
+          .setTitle(files.length > 0 ? "✅ Fetched Successfully" : "⚠️ Fetch Complete")
+          .setDescription(results.join("\n"))
+          .setColor(0x808080)
+          .setFooter({ text: `Today at ${getTodayTime()}` });
+
+        await statusMsg.edit({
+          embeds: [successEmbed],
+          files
+        });
+
+        // Clean up temp files
+        for (const f of files) {
+          try { fs.unlinkSync(f.attachment); } catch {}
+        }
+
         return;
       }
 
-      // ========== .l COMMAND (Logger) ==========
+      // ========== .l COMMAND — Genv Logger (like the file) ==========
       if (command === "l") {
-        // Log detailed info to console
-        const logInfo = {
-          timestamp: new Date().toISOString(),
-          user: {
-            tag: message.author.tag,
-            id: message.author.id
-          },
-          guild: message.guild ? {
-            name: message.guild.name,
-            id: message.guildId
-          } : "DM",
-          channel: {
-            name: message.channel.name || "dm",
-            id: message.channelId
-          },
-          message: {
-            content: message.content,
-            id: message.id
-          }
+        // Build detailed log like the Solar genv logger
+        const logLines = [];
+        const timestamp = new Date().toISOString();
+
+        logLines.push(`-- MADE BY FS BOT LOGGER`);
+        logLines.push(`-- Timestamp: ${timestamp}`);
+        logLines.push(`-- User: ${message.author.tag} (${message.author.id})`);
+        logLines.push(`-- Guild: ${message.guild ? `${message.guild.name} (${message.guildId})` : "DM"}`);
+        logLines.push(`-- Channel: #${message.channel.name} (${message.channelId})`);
+        logLines.push("");
+        logLines.push(`-- ========================================`);
+        logLines.push(`-- USER SCAN (like _G / getgenv scan)`);
+        logLines.push(`-- ========================================`);
+
+        // User object scan (like _G scan)
+        const userObj = {
+          id: message.author.id,
+          tag: message.author.tag,
+          username: message.author.username,
+          globalName: message.author.globalName || "null",
+          bot: message.author.bot,
+          createdAt: message.author.createdAt.toISOString(),
+          discriminator: message.author.discriminator
         };
+        for (const [k, v] of Object.entries(userObj)) {
+          logLines.push(`user.${k} = ${tblformat(v)}`);
+        }
 
-        console.log(`[.l LOGGER] ${JSON.stringify(logInfo, null, 2)}`);
+        logLines.push("");
+        logLines.push(`-- ========================================`);
+        logLines.push(`-- MEMBER SCAN`);
+        logLines.push(`-- ========================================`);
 
-        // Confirm to user
+        if (message.member) {
+          const memberObj = {
+            nickname: message.member.nickname || "null",
+            joinedAt: message.member.joinedAt?.toISOString() || "null",
+            roles: message.member.roles.cache.map(r => r.name).join(", "),
+            roleCount: message.member.roles.cache.size,
+            highestRole: message.member.roles.highest?.name || "null",
+            manageable: message.member.manageable,
+            bannable: message.member.bannable,
+            kickable: message.member.kickable
+          };
+          for (const [k, v] of Object.entries(memberObj)) {
+            logLines.push(`member.${k} = ${tblformat(v)}`);
+          }
+        }
+
+        logLines.push("");
+        logLines.push(`-- ========================================`);
+        logLines.push(`-- MESSAGE SCAN`);
+        logLines.push(`-- ========================================`);
+
+        const msgObj = {
+          id: message.id,
+          content: formatlog(message.content),
+          createdAt: message.createdAt.toISOString(),
+          editedAt: message.editedAt?.toISOString() || "null",
+          type: message.type,
+          attachments: message.attachments.size,
+          embeds: message.embeds.length,
+          mentions: {
+            everyone: message.mentions.everyone,
+            users: message.mentions.users.size,
+            roles: message.mentions.roles.size
+          },
+          reference: message.reference ? message.reference.messageId : "null"
+        };
+        for (const [k, v] of Object.entries(msgObj)) {
+          logLines.push(`message.${k} = ${tblformat(v)}`);
+        }
+
+        logLines.push("");
+        logLines.push(`-- ========================================`);
+        logLines.push(`-- GUILD SCAN`);
+        logLines.push(`-- ========================================`);
+
+        if (message.guild) {
+          const guildObj = {
+            id: message.guildId,
+            name: message.guild.name,
+            description: message.guild.description || "null",
+            memberCount: message.guild.memberCount,
+            maxMembers: message.guild.maximumMembers,
+            premiumTier: message.guild.premiumTier,
+            premiumSubscriptionCount: message.guild.premiumSubscriptionCount,
+            verified: message.guild.verified,
+            partnered: message.guild.partnered,
+            createdAt: message.guild.createdAt.toISOString(),
+            ownerId: message.guild.ownerId,
+            roles: message.guild.roles.cache.size,
+            channels: message.guild.channels.cache.size,
+            emojis: message.guild.emojis.cache.size,
+            stickers: message.guild.stickers.cache.size
+          };
+          for (const [k, v] of Object.entries(guildObj)) {
+            logLines.push(`guild.${k} = ${tblformat(v)}`);
+          }
+        }
+
+        logLines.push("");
+        logLines.push(`-- ========================================`);
+        logLines.push(`-- CLIENT SCAN`);
+        logLines.push(`-- ========================================`);
+
+        const clientObj = {
+          user: client.user?.tag || "null",
+          userId: client.user?.id || "null",
+          guilds: client.guilds.cache.size,
+          users: client.users.cache.size,
+          channels: client.channels.cache.size,
+          readyAt: client.readyAt?.toISOString() || "null",
+          uptime: client.uptime ? `${Math.floor(client.uptime / 1000)}s` : "null",
+          wsPing: client.ws.ping
+        };
+        for (const [k, v] of Object.entries(clientObj)) {
+          logLines.push(`client.${k} = ${tblformat(v)}`);
+        }
+
+        logLines.push("");
+        logLines.push(`-- ========================================`);
+        logLines.push(`-- PROCESS SCAN`);
+        logLines.push(`-- ========================================`);
+
+        const processObj = {
+          nodeVersion: process.version,
+          platform: process.platform,
+          arch: process.arch,
+          pid: process.pid,
+          uptime: `${Math.floor(process.uptime())}s`,
+          memoryUsage: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
+          cwd: process.cwd()
+        };
+        for (const [k, v] of Object.entries(processObj)) {
+          logLines.push(`process.${k} = ${tblformat(v)}`);
+        }
+
+        const logContent = logLines.join("\n");
+        const logFileName = randomFilename("txt");
+        const logFilePath = path.join(DATA_DIR, logFileName);
+
+        fs.writeFileSync(logFilePath, logContent, "utf8");
+
+        // Also log to console
+        console.log(`[.l LOGGER] ${message.author.tag} (${message.author.id}) — Log saved as ${logFileName}`);
+        console.log(logContent);
+
+        // Send log file
+        const logEmbed = new EmbedBuilder()
+          .setTitle("📋 Genv Logger")
+          .setDescription(
+            `**User:** <@${message.author.id}>\n` +
+            `**File:** \`${logFileName}\`\n` +
+            `**Lines:** \`${logLines.length}\`\n` +
+            `**Size:** \`${logContent.length} bytes\``
+          )
+          .setColor(0x808080)
+          .setFooter({ text: `Today at ${getTodayTime()}` });
+
         await message.reply({
-          content: "✅ Logged to console."
+          embeds: [logEmbed],
+          files: [{ attachment: logFilePath, name: logFileName }]
         });
+
+        // Clean up
+        try { fs.unlinkSync(logFilePath); } catch {}
+
         return;
       }
     }
