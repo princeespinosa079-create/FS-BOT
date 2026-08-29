@@ -193,65 +193,177 @@ function formatDuration(ms) {
   return `${d}d`;
 }
 
-// Public profile URL builders (username search)
+// Public profile URL builders + stats fetchers
 const MEDIA_PLATFORMS = {
   tiktok: {
     name: "TikTok",
+    emoji: "🎵",
+    labels: { followers: "Followers", posts: "Posts" },
     url: u => `https://www.tiktok.com/@${u}`
   },
   instagram: {
     name: "Instagram",
+    emoji: "📸",
+    labels: { followers: "Followers", posts: "Posts" },
     url: u => `https://www.instagram.com/${u}`
   },
   roblox: {
     name: "Roblox",
+    emoji: "🎮",
+    labels: { followers: "Friends", posts: "Place visits" },
     url: u => `https://www.roblox.com/search/users?keyword=${encodeURIComponent(u)}`
   },
   x: {
     name: "X (Twitter)",
+    emoji: "🐦",
+    labels: { followers: "Followers", posts: "Posts" },
     url: u => `https://x.com/${u}`
   },
   youtube: {
     name: "YouTube",
+    emoji: "▶️",
+    labels: { followers: "Subscribers", posts: "Videos" },
     url: u => `https://www.youtube.com/@${u}`
   },
   twitch: {
     name: "Twitch",
+    emoji: "🟣",
+    labels: { followers: "Followers", posts: "Views" },
     url: u => `https://www.twitch.tv/${u}`
   },
   reddit: {
     name: "Reddit",
+    emoji: "🟠",
+    labels: { followers: "Karma", posts: "Post karma" },
     url: u => `https://www.reddit.com/user/${u}`
   },
   github: {
     name: "GitHub",
+    emoji: "💻",
+    labels: { followers: "Followers", posts: "Repos" },
     url: u => `https://github.com/${u}`
   },
   steam: {
     name: "Steam",
+    emoji: "🎯",
+    labels: { followers: "Level", posts: "Games" },
     url: u => `https://steamcommunity.com/id/${u}`
   },
   facebook: {
     name: "Facebook",
+    emoji: "📘",
+    labels: { followers: "Followers", posts: "Posts" },
     url: u => `https://www.facebook.com/${u}`
   },
   snapchat: {
     name: "Snapchat",
+    emoji: "👻",
+    labels: { followers: "Score", posts: "Snaps" },
     url: u => `https://www.snapchat.com/add/${u}`
   },
   pinterest: {
     name: "Pinterest",
+    emoji: "📌",
+    labels: { followers: "Followers", posts: "Pins" },
     url: u => `https://www.pinterest.com/${u}`
   },
   spotify: {
     name: "Spotify",
+    emoji: "🎧",
+    labels: { followers: "Followers", posts: "Playlists" },
     url: u => `https://open.spotify.com/search/${encodeURIComponent(u)}`
   },
   linkedin: {
     name: "LinkedIn",
+    emoji: "💼",
+    labels: { followers: "Connections", posts: "Posts" },
     url: u => `https://www.linkedin.com/in/${u}`
   }
 };
+
+function formatCount(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
+  return String(n);
+}
+
+async function fetchPlatformStats(key, username) {
+  const platform = MEDIA_PLATFORMS[key];
+  const profileUrl = platform.url(username);
+  let followers = null;
+  let posts = null;
+  let active = null; // true / false / null
+  let extra = null;
+
+  try {
+    if (key === "github") {
+      const res = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}`, {
+        headers: { "User-Agent": "FSBot", Accept: "application/vnd.github+json" },
+        signal: AbortSignal.timeout(6000)
+      });
+      if (res.ok) {
+        const j = await res.json();
+        followers = j.followers ?? null;
+        posts = j.public_repos ?? null;
+        active = true;
+        if (j.bio) extra = j.bio.slice(0, 80);
+      } else if (res.status === 404) {
+        active = false;
+      }
+    } else if (key === "reddit") {
+      const res = await fetch(
+        `https://www.reddit.com/user/${encodeURIComponent(username)}/about.json`,
+        {
+          headers: { "User-Agent": "FSBot/1.0" },
+          signal: AbortSignal.timeout(6000)
+        }
+      );
+      if (res.ok) {
+        const j = await res.json();
+        const d = j.data || {};
+        followers = d.total_karma ?? d.link_karma ?? null;
+        posts = d.link_karma ?? null;
+        active = !d.is_suspended;
+      } else if (res.status === 404) {
+        active = false;
+      }
+    } else {
+      // Soft existence check via GET (many sites block bots → unknown)
+      const res = await fetch(profileUrl, {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (compatible; FSBot/1.0; +https://discord.com)"
+        },
+        signal: AbortSignal.timeout(5000)
+      }).catch(() => null);
+
+      if (res) {
+        if (res.status === 404) active = false;
+        else if (res.status >= 200 && res.status < 400) active = true;
+        else active = null;
+      }
+    }
+  } catch {
+    // leave nulls
+  }
+
+  return { followers, posts, active, extra, profileUrl, platform };
+}
+
+function activeEmoji(active) {
+  if (active === true) return "🟢";
+  if (active === false) return "🔴";
+  return "⚪";
+}
+
+function activeText(active) {
+  if (active === true) return "Active / Found";
+  if (active === false) return "Not found";
+  return "Unknown";
+}
 
 // =========================
 // Slash Commands (GLOBAL)
@@ -666,7 +778,6 @@ client.on("interactionCreate", async interaction => {
       interaction.commandName === "searchmedia"
     ) {
       let username = interaction.options.getString("username").trim();
-      // strip leading @
       if (username.startsWith("@")) username = username.slice(1);
       const app = interaction.options.getString("apps");
 
@@ -678,30 +789,59 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
+      await interaction.deferReply();
+
       const keys =
         app === "all" ? Object.keys(MEDIA_PLATFORMS) : [app];
 
-      const lines = keys
-        .filter(k => MEDIA_PLATFORMS[k])
-        .map(k => {
-          const p = MEDIA_PLATFORMS[k];
-          return `**${p.name}**\n[Open profile](${p.url(username)})`;
-        })
-        .join("\n\n");
+      const results = await Promise.all(
+        keys.filter(k => MEDIA_PLATFORMS[k]).map(k => fetchPlatformStats(k, username))
+      );
 
-      const embed = new EmbedBuilder()
-        .setTitle(`MEDIA SEARCH — @${username}`)
-        .setDescription(
-          (app === "all"
-            ? `Results for **all apps**:\n\n`
-            : `Result for **${MEDIA_PLATFORMS[app]?.name || app}**:\n\n`) +
-            lines +
-            `\n\n*Links only — profile may or may not exist.*`
-        )
-        .setColor(0x808080)
-        .setFooter({ text: `Today at ${getTodayTime()}` });
+      // Discord embeds max 25 fields — batch if "all"
+      const embeds = [];
+      const chunkSize = 6;
+      for (let i = 0; i < results.length; i += chunkSize) {
+        const chunk = results.slice(i, i + chunkSize);
+        const embed = new EmbedBuilder()
+          .setTitle(
+            i === 0
+              ? `🔍 MEDIA SEARCH — @${username}`
+              : `🔍 MEDIA SEARCH — @${username} (cont.)`
+          )
+          .setColor(0x808080)
+          .setFooter({
+            text: `Premium lookup · Today at ${getTodayTime()}`
+          });
 
-      await interaction.reply({ embeds: [embed] });
+        if (i === 0) {
+          embed.setDescription(
+            `Username: **\`${username}\`**\n` +
+              `Apps: **${app === "all" ? "All platforms" : MEDIA_PLATFORMS[app]?.name}**\n` +
+              `🟢 Found · 🔴 Not found · ⚪ Unknown`
+          );
+        }
+
+        for (const r of chunk) {
+          const lab = r.platform.labels;
+          const value =
+            `**${lab.followers}:** \`${formatCount(r.followers)}\`\n` +
+            `**${lab.posts}:** \`${formatCount(r.posts)}\`\n` +
+            `**Active:** ${activeEmoji(r.active)} ${activeText(r.active)}\n` +
+            (r.extra ? `**Bio:** ${r.extra}\n` : "") +
+            `[Open profile](${r.profileUrl})`;
+
+          embed.addFields({
+            name: `${r.platform.emoji} ${r.platform.name}`,
+            value,
+            inline: true
+          });
+        }
+
+        embeds.push(embed);
+      }
+
+      await interaction.editReply({ embeds: embeds.slice(0, 10) });
       return;
     }
 
@@ -1354,8 +1494,6 @@ async function handleNukeCreate(guild, auditType) {
 
     if (data.count >= 2) {
       const member = await guild.members.fetch(executor.id).catch(() => null);
-      // Confidence: 2 actions in 1s from audit log = high
-      const confidence = Math.min(99, 70 + data.count * 10);
 
       if (member?.bannable) {
         await member.ban({
@@ -1376,10 +1514,9 @@ async function handleNukeCreate(guild, auditType) {
         await logCh
           .send({
             content:
-              `🛡️ **Anti-Nuke** — mass create stopped.\n` +
-              `**Nuke by:** <@${executor.id}> (**${confidence}%**)` +
-              (member?.bannable ? `\nBanned.` : `\nCould not ban (role hierarchy).`),
-            allowedMentions: { users: [executor.id] }
+              `🛡️ **Anti-Nuke** — mass create stopped.` +
+              (member?.bannable ? ` User banned.` : ` Could not ban (role hierarchy).`),
+            allowedMentions: { parse: [] }
           })
           .catch(() => {});
       }
