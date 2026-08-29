@@ -219,6 +219,21 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString()),
 
   new SlashCommandBuilder()
+    .setName("ghostping")
+    .setDescription("Ghost ping @everyone or @here (sends then deletes instantly).")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString())
+    .addStringOption(o =>
+      o
+        .setName("mention")
+        .setDescription("@everyone or @here")
+        .setRequired(true)
+        .addChoices(
+          { name: "@everyone", value: "everyone" },
+          { name: "@here", value: "here" }
+        )
+    ),
+
+  new SlashCommandBuilder()
     .setName("pingwarn")
     .setDescription(
       "When a role pings @everyone/@here, temporarily remove their ping permission."
@@ -388,6 +403,7 @@ client.on("interactionCreate", async interaction => {
         guessnumber: PermissionFlagsBits.ManageMessages,
         embed: PermissionFlagsBits.ManageMessages,
         status: PermissionFlagsBits.ManageMessages,
+        ghostping: PermissionFlagsBits.ManageMessages,
         pingwarn: PermissionFlagsBits.ManageRoles,
         role: PermissionFlagsBits.ManageRoles,
         spylist: PermissionFlagsBits.Administrator,
@@ -510,6 +526,35 @@ client.on("interactionCreate", async interaction => {
         .setFooter({ text: `Today at ${getTodayTime()}` });
 
       await interaction.reply({ embeds: [embed] });
+      return;
+    }
+
+    // /ghostping
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === "ghostping"
+    ) {
+      const mention = interaction.options.getString("mention");
+      const content =
+        mention === "everyone" ? "@everyone" : "@here";
+
+      await interaction.reply({
+        content: "✅ Ghost ping sent.",
+        ephemeral: true
+      });
+
+      try {
+        const msg = await interaction.channel.send({
+          content,
+          allowedMentions: {
+            parse: mention === "everyone" ? ["everyone"] : ["everyone"]
+          }
+        });
+        // Delete instantly (ghost)
+        await msg.delete().catch(() => {});
+      } catch (err) {
+        console.error("❌ Ghostping failed:", err.message);
+      }
       return;
     }
 
@@ -1162,26 +1207,34 @@ async function handleNukeCreate(guild, auditType) {
 
     if (data.count >= 2) {
       const member = await guild.members.fetch(executor.id).catch(() => null);
+      // Confidence: 2 actions in 1s from audit log = high
+      const confidence = Math.min(99, 70 + data.count * 10);
+
       if (member?.bannable) {
         await member.ban({
           reason: "Anti-Nuke: 2 creates in 1s"
         });
-        const logCh =
-          guild.systemChannel ||
-          guild.channels.cache.find(
-            c =>
-              c.isTextBased() &&
-              c.permissionsFor(guild.members.me)?.has(
-                PermissionFlagsBits.SendMessages
-              )
-          );
-        if (logCh) {
-          await logCh
-            .send({
-              content: `🛡️ **Anti-Nuke** banned <@${executor.id}> (mass create).`
-            })
-            .catch(() => {});
-        }
+      }
+
+      const logCh =
+        guild.systemChannel ||
+        guild.channels.cache.find(
+          c =>
+            c.isTextBased() &&
+            c.permissionsFor(guild.members.me)?.has(
+              PermissionFlagsBits.SendMessages
+            )
+        );
+      if (logCh) {
+        await logCh
+          .send({
+            content:
+              `🛡️ **Anti-Nuke** — mass create stopped.\n` +
+              `**Nuke by:** <@${executor.id}> (**${confidence}%**)` +
+              (member?.bannable ? `\nBanned.` : `\nCould not ban (role hierarchy).`),
+            allowedMentions: { users: [executor.id] }
+          })
+          .catch(() => {});
       }
       guildMap.delete(executor.id);
     }
@@ -1205,7 +1258,7 @@ client.on("roleCreate", async role => {
 
 client.on("messageCreate", async message => {
   try {
-    // Anti-Raid: webhook spam — 2 messages in 1.5s → delete webhook FAST
+    // Anti-Raid: webhook spam — 2 messages in 1.5s → delete spam msgs + webhook
     if (
       message.webhookId &&
       message.guild &&
@@ -1215,28 +1268,80 @@ client.on("messageCreate", async message => {
       const now = Date.now();
       let data = webhookSpamTracker.get(wid);
       if (!data || now - data.first > 1500) {
-        data = { count: 0, first: now };
+        data = { count: 0, first: now, msgIds: [] };
       }
       data.count++;
+      data.msgIds.push(message.id);
       webhookSpamTracker.set(wid, data);
 
       if (data.count >= 2) {
         webhookSpamTracker.delete(wid);
         try {
+          // Delete spam messages (webhook chat)
+          if (message.channel.bulkDelete) {
+            await message.channel
+              .bulkDelete(data.msgIds, true)
+              .catch(async () => {
+                for (const id of data.msgIds) {
+                  await message.channel.messages
+                    .delete(id)
+                    .catch(() => {});
+                }
+              });
+          }
+
           const webhooks = await message.channel.fetchWebhooks();
           const hook = webhooks.get(wid);
+
+          // Predict raider: webhook owner, or audit log WebhookCreate
+          let raiderId = hook?.owner?.id || null;
+          let confidence = raiderId ? 85 : 40;
+
+          if (!raiderId) {
+            try {
+              const logs = await message.guild.fetchAuditLogs({
+                limit: 5,
+                type: AuditLogEvent.WebhookCreate
+              });
+              const entry = logs.entries.find(
+                e => e.target?.id === wid || e.targetId === wid
+              );
+              if (entry?.executor) {
+                raiderId = entry.executor.id;
+                confidence = 90;
+              }
+            } catch {}
+          }
+
           if (hook) {
             await hook.delete(
               "Anti-Raid: webhook spam (2 msgs in 1.5s)"
             );
-            message.channel
-              .send({
-                content: `🛡️ **Anti-Raid** deleted spam webhook \`${hook.name}\`.`
-              })
-              .catch(() => {});
+          }
+
+          const notice = await message.channel
+            .send({
+              content:
+                `🛡️ **Anti-Raid** — spam webhook removed` +
+                (hook ? ` (\`${hook.name}\`)` : "") +
+                `.\n` +
+                (raiderId
+                  ? `**Raid by:** <@${raiderId}> (**${confidence}%**)`
+                  : `**Raid by:** Unknown (**${confidence}%**)`),
+              allowedMentions: raiderId
+                ? { users: [raiderId] }
+                : { parse: [] }
+            })
+            .catch(() => null);
+
+          // Delete bot notice after 8s so chat stays clean
+          if (notice) {
+            setTimeout(() => {
+              notice.delete().catch(() => {});
+            }, 8000);
           }
         } catch (err) {
-          console.error("❌ Webhook delete:", err.message);
+          console.error("❌ Webhook anti-raid:", err.message);
         }
       }
     }
