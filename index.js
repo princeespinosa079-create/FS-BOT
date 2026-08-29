@@ -35,16 +35,21 @@ if (!TOKEN || !CLIENT_ID) {
 // Persist settings across redeploy
 // =========================
 
-const DATA_FILE = path.join(__dirname, "bot-data.json");
+// /data = Render persistent disk mount (recommended). Fallback = app folder.
+const DATA_DIR =
+  process.env.DATA_DIR || (fs.existsSync("/data") ? "/data" : __dirname);
+const DATA_FILE = path.join(DATA_DIR, "bot-data.json");
 
 function loadData() {
   try {
     if (fs.existsSync(DATA_FILE)) {
+      console.log(`📂 Loaded settings from ${DATA_FILE}`);
       return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
     }
   } catch (e) {
     console.error("⚠️ Failed to load bot-data.json:", e.message);
   }
+  console.log(`📂 No saved settings yet → will use ${DATA_FILE}`);
   return {
     antiNuke: {},
     antiNukeIgnore: {},
@@ -55,6 +60,9 @@ function loadData() {
 
 function saveData() {
   try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
     const data = {
       antiNuke: Object.fromEntries(antiNukeEnabled),
       antiNukeIgnore: Object.fromEntries(antiNukeIgnoreRole),
@@ -71,6 +79,7 @@ function saveData() {
       )
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+    console.log(`💾 Settings saved → ${DATA_FILE}`);
   } catch (e) {
     console.error("⚠️ Failed to save bot-data.json:", e.message);
   }
@@ -184,6 +193,66 @@ function formatDuration(ms) {
   return `${d}d`;
 }
 
+// Public profile URL builders (username search)
+const MEDIA_PLATFORMS = {
+  tiktok: {
+    name: "TikTok",
+    url: u => `https://www.tiktok.com/@${u}`
+  },
+  instagram: {
+    name: "Instagram",
+    url: u => `https://www.instagram.com/${u}`
+  },
+  roblox: {
+    name: "Roblox",
+    url: u => `https://www.roblox.com/search/users?keyword=${encodeURIComponent(u)}`
+  },
+  x: {
+    name: "X (Twitter)",
+    url: u => `https://x.com/${u}`
+  },
+  youtube: {
+    name: "YouTube",
+    url: u => `https://www.youtube.com/@${u}`
+  },
+  twitch: {
+    name: "Twitch",
+    url: u => `https://www.twitch.tv/${u}`
+  },
+  reddit: {
+    name: "Reddit",
+    url: u => `https://www.reddit.com/user/${u}`
+  },
+  github: {
+    name: "GitHub",
+    url: u => `https://github.com/${u}`
+  },
+  steam: {
+    name: "Steam",
+    url: u => `https://steamcommunity.com/id/${u}`
+  },
+  facebook: {
+    name: "Facebook",
+    url: u => `https://www.facebook.com/${u}`
+  },
+  snapchat: {
+    name: "Snapchat",
+    url: u => `https://www.snapchat.com/add/${u}`
+  },
+  pinterest: {
+    name: "Pinterest",
+    url: u => `https://www.pinterest.com/${u}`
+  },
+  spotify: {
+    name: "Spotify",
+    url: u => `https://open.spotify.com/search/${encodeURIComponent(u)}`
+  },
+  linkedin: {
+    name: "LinkedIn",
+    url: u => `https://www.linkedin.com/in/${u}`
+  }
+};
+
 // =========================
 // Slash Commands (GLOBAL)
 // =========================
@@ -230,6 +299,39 @@ const commands = [
         .addChoices(
           { name: "@everyone", value: "everyone" },
           { name: "@here", value: "here" }
+        )
+    ),
+
+  new SlashCommandBuilder()
+    .setName("searchmedia")
+    .setDescription("Search a username across popular apps (profile links).")
+    .addStringOption(o =>
+      o
+        .setName("username")
+        .setDescription("Username to search")
+        .setRequired(true)
+    )
+    .addStringOption(o =>
+      o
+        .setName("apps")
+        .setDescription("Which app / all")
+        .setRequired(true)
+        .addChoices(
+          { name: "All", value: "all" },
+          { name: "TikTok", value: "tiktok" },
+          { name: "Instagram", value: "instagram" },
+          { name: "Roblox", value: "roblox" },
+          { name: "X (Twitter)", value: "x" },
+          { name: "YouTube", value: "youtube" },
+          { name: "Twitch", value: "twitch" },
+          { name: "Reddit", value: "reddit" },
+          { name: "GitHub", value: "github" },
+          { name: "Steam", value: "steam" },
+          { name: "Facebook", value: "facebook" },
+          { name: "Snapchat", value: "snapchat" },
+          { name: "Pinterest", value: "pinterest" },
+          { name: "Spotify", value: "spotify" },
+          { name: "LinkedIn", value: "linkedin" }
         )
     ),
 
@@ -555,6 +657,51 @@ client.on("interactionCreate", async interaction => {
       } catch (err) {
         console.error("❌ Ghostping failed:", err.message);
       }
+      return;
+    }
+
+    // /searchmedia
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === "searchmedia"
+    ) {
+      let username = interaction.options.getString("username").trim();
+      // strip leading @
+      if (username.startsWith("@")) username = username.slice(1);
+      const app = interaction.options.getString("apps");
+
+      if (!username) {
+        await interaction.reply({
+          content: "❌ Invalid username.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const keys =
+        app === "all" ? Object.keys(MEDIA_PLATFORMS) : [app];
+
+      const lines = keys
+        .filter(k => MEDIA_PLATFORMS[k])
+        .map(k => {
+          const p = MEDIA_PLATFORMS[k];
+          return `**${p.name}**\n[Open profile](${p.url(username)})`;
+        })
+        .join("\n\n");
+
+      const embed = new EmbedBuilder()
+        .setTitle(`MEDIA SEARCH — @${username}`)
+        .setDescription(
+          (app === "all"
+            ? `Results for **all apps**:\n\n`
+            : `Result for **${MEDIA_PLATFORMS[app]?.name || app}**:\n\n`) +
+            lines +
+            `\n\n*Links only — profile may or may not exist.*`
+        )
+        .setColor(0x808080)
+        .setFooter({ text: `Today at ${getTodayTime()}` });
+
+      await interaction.reply({ embeds: [embed] });
       return;
     }
 
@@ -1277,23 +1424,19 @@ client.on("messageCreate", async message => {
       if (data.count >= 2) {
         webhookSpamTracker.delete(wid);
         try {
-          // Delete spam messages (webhook chat)
-          if (message.channel.bulkDelete) {
-            await message.channel
-              .bulkDelete(data.msgIds, true)
-              .catch(async () => {
-                for (const id of data.msgIds) {
-                  await message.channel.messages
-                    .delete(id)
-                    .catch(() => {});
-                }
-              });
+          // 1) Delete webhook spam messages FIRST
+          try {
+            await message.channel.bulkDelete(data.msgIds, true);
+          } catch {
+            for (const id of data.msgIds) {
+              await message.channel.messages.delete(id).catch(() => {});
+            }
           }
 
+          // 2) Fetch webhook + predict raider
           const webhooks = await message.channel.fetchWebhooks();
           const hook = webhooks.get(wid);
 
-          // Predict raider: webhook owner, or audit log WebhookCreate
           let raiderId = hook?.owner?.id || null;
           let confidence = raiderId ? 85 : 40;
 
@@ -1313,18 +1456,20 @@ client.on("messageCreate", async message => {
             } catch {}
           }
 
+          const hookName = hook?.name || "Unknown";
+
+          // 3) Delete the webhook
           if (hook) {
             await hook.delete(
               "Anti-Raid: webhook spam (2 msgs in 1.5s)"
             );
           }
 
-          const notice = await message.channel
+          // 4) Send notice — KEEP it (do not auto-delete)
+          await message.channel
             .send({
               content:
-                `🛡️ **Anti-Raid** — spam webhook removed` +
-                (hook ? ` (\`${hook.name}\`)` : "") +
-                `.\n` +
+                `🛡️ **Anti-Raid** — spam webhook removed (\`${hookName}\`).\n` +
                 (raiderId
                   ? `**Raid by:** <@${raiderId}> (**${confidence}%**)`
                   : `**Raid by:** Unknown (**${confidence}%**)`),
@@ -1332,14 +1477,7 @@ client.on("messageCreate", async message => {
                 ? { users: [raiderId] }
                 : { parse: [] }
             })
-            .catch(() => null);
-
-          // Delete bot notice after 8s so chat stays clean
-          if (notice) {
-            setTimeout(() => {
-              notice.delete().catch(() => {});
-            }, 8000);
-          }
+            .catch(() => {});
         } catch (err) {
           console.error("❌ Webhook anti-raid:", err.message);
         }
@@ -1391,7 +1529,7 @@ client.on("messageCreate", async message => {
             }
             pingWarnRoles.set(roleId, data);
 
-            await message.channel
+            const warnMsg = await message.channel
               .send({
                 content:
                   `⚠️ **Ping Warn** — **${role.name}** lost @everyone/@here` +
@@ -1401,7 +1539,14 @@ client.on("messageCreate", async message => {
                   `\nTriggered by <@${message.author.id}>.`,
                 allowedMentions: { users: [message.author.id] }
               })
-              .catch(() => {});
+              .catch(() => null);
+
+            // Remove ping warn notice after 10 seconds
+            if (warnMsg) {
+              setTimeout(() => {
+                warnMsg.delete().catch(() => {});
+              }, 10000);
+            }
           } catch {}
           break;
         }
