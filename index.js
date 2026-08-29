@@ -33,7 +33,7 @@ if (!TOKEN || !CLIENT_ID) {
 }
 
 // =========================
-// Persist settings across redeploy
+// Persist settings
 // =========================
 
 const DATA_DIR =
@@ -50,31 +50,19 @@ function loadData() {
     console.error("⚠️ Failed to load bot-data.json:", e.message);
   }
   console.log(`📂 No saved settings yet → will use ${DATA_FILE}`);
-  return {
-    antiNuke: {},
-    antiNukeIgnore: {},
-    antiRaid: {},
-    pingWarn: {}
-  };
+  return { antiNuke: {}, antiNukeIgnore: {}, antiRaid: {}, pingWarn: {} };
 }
 
 function saveData() {
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     const data = {
       antiNuke: Object.fromEntries(antiNukeEnabled),
       antiNukeIgnore: Object.fromEntries(antiNukeIgnoreRole),
       antiRaid: Object.fromEntries(antiRaidEnabled),
       pingWarn: Object.fromEntries(
         [...pingWarnRoles.entries()].map(([k, v]) => [
-          k,
-          {
-            enabled: v.enabled,
-            guildId: v.guildId,
-            durationMs: v.durationMs
-          }
+          k, { enabled: v.enabled, guildId: v.guildId, durationMs: v.durationMs }
         ])
       )
     };
@@ -94,17 +82,12 @@ const saved = loadData();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get("/", (req, res) => {
-  res.status(200).send("FS Bot is online.");
-});
-
-app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "online",
-    bot: client.user ? client.user.tag : "connecting",
-    guilds: client.guilds?.cache?.size || 0
-  });
-});
+app.get("/", (req, res) => res.status(200).send("FS Bot is online."));
+app.get("/health", (req, res) => res.status(200).json({
+  status: "online",
+  bot: client.user ? client.user.tag : "connecting",
+  guilds: client.guilds?.cache?.size || 0
+}));
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Web server running on port ${PORT}`);
@@ -129,23 +112,14 @@ const client = new Client({
 // =========================
 
 const games = new Map();
-
 const pingWarnRoles = new Map(
   Object.entries(saved.pingWarn || {}).map(([k, v]) => [
-    k,
-    { enabled: v.enabled, timeout: null, guildId: v.guildId, durationMs: v.durationMs ?? null }
+    k, { enabled: v.enabled, timeout: null, guildId: v.guildId, durationMs: v.durationMs ?? null }
   ])
 );
-
-const antiNukeEnabled = new Map(
-  Object.entries(saved.antiNuke || {}).map(([k, v]) => [k, !!v])
-);
-const antiNukeIgnoreRole = new Map(
-  Object.entries(saved.antiNukeIgnore || {})
-);
-const antiRaidEnabled = new Map(
-  Object.entries(saved.antiRaid || {}).map(([k, v]) => [k, !!v])
-);
+const antiNukeEnabled = new Map(Object.entries(saved.antiNuke || {}).map(([k, v]) => [k, !!v]));
+const antiNukeIgnoreRole = new Map(Object.entries(saved.antiNukeIgnore || {}));
+const antiRaidEnabled = new Map(Object.entries(saved.antiRaid || {}).map(([k, v]) => [k, !!v]));
 const recentNukeCreates = new Map();
 const webhookSpamTracker = new Map();
 const roleJobs = new Map();
@@ -156,10 +130,7 @@ const roleJobs = new Map();
 
 function getTodayTime() {
   return new Date().toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Asia/Manila"
+    hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila"
   });
 }
 
@@ -188,57 +159,34 @@ function formatDuration(ms) {
   const h = Math.floor(m / 60);
   const rm = m % 60;
   if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
-  const d = Math.floor(h / 24);
-  return `${d}d`;
+  return `${Math.floor(h / 24)}d`;
 }
 
-// Generate random 10-letter filename
 function randomFilename(ext = "lua") {
   const chars = "abcdefghijklmnopqrstuvwxyz";
   let name = "";
-  for (let i = 0; i < 10; i++) {
-    name += chars[Math.floor(Math.random() * chars.length)];
-  }
+  for (let i = 0; i < 10; i++) name += chars[Math.floor(Math.random() * chars.length)];
   return `${name}.${ext}`;
 }
 
-// URL validation
 function isValidUrl(string) {
-  try {
-    new URL(string);
-    return true;
-  } catch (_) {
-    return false;
-  }
+  try { new URL(string); return true; } catch (_) { return false; }
 }
 
-// Extract ALL URLs from message or replied message
 async function extractAllUrls(message) {
   const urls = new Set();
-
-  const currentMatches = message.content.match(/https?:\/\/[^\s<>"']+/g);
-  if (currentMatches) {
-    currentMatches.forEach(u => {
-      if (isValidUrl(u)) urls.add(u);
-    });
-  }
-
+  const currentMatches = message.content.match(/https?:\/\/[^\s<>"')]+/g);
+  if (currentMatches) currentMatches.forEach(u => { if (isValidUrl(u)) urls.add(u); });
   if (message.reference) {
     try {
       const replied = await message.channel.messages.fetch(message.reference.messageId);
-      const replyMatches = replied.content.match(/https?:\/\/[^\s<>"']+/g);
-      if (replyMatches) {
-        replyMatches.forEach(u => {
-          if (isValidUrl(u)) urls.add(u);
-        });
-      }
+      const replyMatches = replied.content.match(/https?:\/\/[^\s<>"')]+/g);
+      if (replyMatches) replyMatches.forEach(u => { if (isValidUrl(u)) urls.add(u); });
     } catch {}
   }
-
   return [...urls];
 }
 
-// ✅ FIXED: tblformat — no duplicate const depth
 function tblformat(tbl, depth) {
   depth = depth || 0;
   let res = "";
@@ -253,24 +201,171 @@ function tblformat(tbl, depth) {
     if (!first) res += ", ";
     first = false;
     if (typeof i === "string") res += `${i} = `;
-    if (typeof v === "object" && v !== null) {
-      res += tblformat(v, depth + 1);
-    } else {
-      res += String(v);
-    }
+    if (typeof v === "object" && v !== null) res += tblformat(v, depth + 1);
+    else res += String(v);
   }
   return res;
 }
 
-function formatlog(text) {
-  if (typeof text !== "string") return String(text);
-  return text
-    .replace(/table: /g, "")
-    .replace(/function: /g, "")
-    .replace(/\n/g, "")
-    .replace(/\s\s+/g, ";")
-    .replace(/""/g, "")
-    .replace(/"/g, "'");
+// =========================
+// ✨ NEW: Extract loadstring URLs recursively
+// =========================
+
+function extractLoadstringUrl(content) {
+  // Match patterns like:
+  // loadstring(game:HttpGet("URL"))()
+  // loadstring(game:HttpGet('URL'))()
+  // loadstring(game:HttpGet(URL))()
+  const patterns = [
+    /loadstring\s*\(\s*game\s*:\s*HttpGet\s*\(\s*["']([^"']+)["']\s*\)\s*\)/i,
+    /loadstring\s*\(\s*game\s*:\s*HttpGet\s*\(\s*([https?:][^\s,)]+)\s*\)/i,
+    /loadstring\s*\(\s*HttpGet\s*\(\s*["']([^"']+)["']\s*\)\s*\)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = content.match(pattern);
+    if (match && isValidUrl(match[1])) return match[1];
+  }
+  return null;
+}
+
+// Fetch URL and follow loadstring redirects recursively (up to 5 levels)
+async function fetchWithLoadstringFollow(url, maxDepth = 5) {
+  let currentUrl = url;
+  let depth = 0;
+  let finalContent = "";
+  const history = [];
+
+  while (depth < maxDepth) {
+    history.push(currentUrl);
+    console.log(`[.get] Fetching (depth ${depth}): ${currentUrl}`);
+
+    const res = await fetch(currentUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status} at ${currentUrl}`);
+
+    let content = await res.text();
+
+    // If content is HTML page (like Luarmor browser page), extract the Lua source from it
+    if (content.trim().startsWith("<!doctype") || content.trim().startsWith("<html")) {
+      const luaMatch = content.match(/const\s+luaSource\s*=\s*`([^`]+)`/);
+      if (luaMatch) {
+        content = luaMatch[1].trim();
+      }
+    }
+
+    finalContent = content;
+
+    // Check if this is a loadstring wrapper
+    const innerUrl = extractLoadstringUrl(content);
+    if (innerUrl && !history.includes(innerUrl)) {
+      currentUrl = innerUrl;
+      depth++;
+      continue;
+    }
+
+    break;
+  }
+
+  return { content: finalContent, depth, history };
+}
+
+// =========================
+// ✨ NEW: Obfuscator Detection
+// =========================
+
+function detectObfuscator(content) {
+  const detections = [];
+  const lower = content.toLowerCase();
+
+  // Luarmor
+  if (
+    lower.includes("luarmor") ||
+    lower.includes("_bsdata") ||
+    lower.includes("cdn.luarmor.net") ||
+    lower.includes("api.luarmor.net") ||
+    lower.includes("static_content_") ||
+    content.match(/_bsdata\d+\s*=/) ||
+    lower.includes("v4_init_")
+  ) {
+    detections.push({ name: "Luarmor", confidence: 95, color: 0xff6b6b });
+  }
+
+  // 25ms Obfuscator
+  if (
+    lower.includes("25ms") ||
+    lower.includes("25ms obfuscator") ||
+    content.match(/\\\d{3}/g)?.length > 50 && lower.includes("getfenv") ||
+    lower.includes("__25ms")
+  ) {
+    detections.push({ name: "25ms Obfuscator", confidence: 85, color: 0xffd93d });
+  }
+
+  // IronBrew / Synapse Xen
+  if (
+    lower.includes("ironbrew") ||
+    lower.includes("synapse xen") ||
+    lower.includes("xenobfuscate") ||
+    content.match(/L\d_\d+/g)?.length > 20 ||
+    lower.includes("\\x") && lower.includes("getfenv") && lower.includes("setfenv")
+  ) {
+    detections.push({ name: "IronBrew / Synapse Xen", confidence: 80, color: 0x6bcb77 });
+  }
+
+  // MoonSec
+  if (
+    lower.includes("moonsec") ||
+    lower.includes("moonsec obfuscator") ||
+    lower.includes("moonsec loader")
+  ) {
+    detections.push({ name: "MoonSec", confidence: 90, color: 0x4d96ff });
+  }
+
+  // DarkLua
+  if (
+    lower.includes("darklua") ||
+    lower.includes("darklua obfuscator")
+  ) {
+    detections.push({ name: "DarkLua", confidence: 85, color: 0x9b59b6 });
+  }
+
+  // PSU Obfuscator
+  if (
+    lower.includes("psu") && lower.includes("obfuscator") ||
+    lower.includes("psu obfuscator")
+  ) {
+    detections.push({ name: "PSU Obfuscator", confidence: 80, color: 0xe67e22 });
+  }
+
+  // Luraph
+  if (
+    lower.includes("luraph") ||
+    lower.includes("luraph obfuscator") ||
+    content.match(/L\w{10,}/g)?.length > 30 && lower.includes("setmetatable")
+  ) {
+    detections.push({ name: "Luraph", confidence: 75, color: 0x1abc9c });
+  }
+
+  // Unobfuscated check
+  const hasComments = content.includes("--");
+  const hasReadableVars = content.match(/\b(local|function|if|then|else|end|for|while)\s+[a-zA-Z_]\w{2,}/g)?.length > 5;
+  const hasLowEncoding = !content.match(/\\\d{3}/g) || content.match(/\\\d{3}/g)?.length < 10;
+
+  if (detections.length === 0) {
+    if (hasComments && hasReadableVars && hasLowEncoding) {
+      detections.push({ name: "Unobfuscated", confidence: 90, color: 0x95a5a6 });
+    } else {
+      detections.push({ name: "Unknown / Custom Obfuscator", confidence: 50, color: 0x7f8c8d });
+    }
+  }
+
+  // Sort by confidence
+  detections.sort((a, b) => b.confidence - a.confidence);
+  return detections;
 }
 
 // =========================
@@ -305,7 +400,6 @@ async function fetchPlatformStats(key, username) {
   const platform = MEDIA_PLATFORMS[key];
   const profileUrl = platform.url(username);
   let followers = null, posts = null, active = null, extra = null;
-
   try {
     if (key === "github") {
       const res = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}`, {
@@ -439,7 +533,6 @@ client.once("ready", async () => {
 
 client.on("interactionCreate", async interaction => {
   try {
-    // Owner check
     if (interaction.isChatInputCommand() && (interaction.commandName === "serverlist" || interaction.commandName === "leave")) {
       if (interaction.user.id !== OWNER_ID) {
         await interaction.reply({ content: "❌ Owner only.", ephemeral: true });
@@ -447,7 +540,6 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
-    // Permission checks
     if (interaction.isChatInputCommand()) {
       const name = interaction.commandName;
       const perms = interaction.memberPermissions;
@@ -473,7 +565,6 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
-    // /serverlist
     if (interaction.isChatInputCommand() && interaction.commandName === "serverlist") {
       await interaction.deferReply({ ephemeral: true });
       const guilds = [...client.guilds.cache.values()];
@@ -493,7 +584,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /leave
     if (interaction.isChatInputCommand() && interaction.commandName === "leave") {
       const serverId = interaction.options.getString("server-id").trim();
       const guild = client.guilds.cache.get(serverId);
@@ -504,7 +594,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /status
     if (interaction.isChatInputCommand() && interaction.commandName === "status") {
       const gid = interaction.guildId;
       const nukeOn = !!antiNukeEnabled.get(gid);
@@ -519,7 +608,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /ghostping
     if (interaction.isChatInputCommand() && interaction.commandName === "ghostping") {
       const mention = interaction.options.getString("mention");
       const content = mention === "everyone" ? "@everyone" : "@here";
@@ -531,7 +619,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /searchmedia
     if (interaction.isChatInputCommand() && interaction.commandName === "searchmedia") {
       let username = interaction.options.getString("username").trim();
       if (username.startsWith("@")) username = username.slice(1);
@@ -559,7 +646,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /guessnumber
     if (interaction.isChatInputCommand() && interaction.commandName === "guessnumber") {
       const answer = interaction.options.getInteger("answer");
       if (games.has(interaction.channelId)) { await interaction.reply({ content: "⚠️ Game already in this channel.", ephemeral: true }); return; }
@@ -575,7 +661,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /embed
     if (interaction.isChatInputCommand() && interaction.commandName === "embed") {
       const description = interaction.options.getString("description");
       const title = interaction.options.getString("title");
@@ -587,7 +672,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /pingwarn
     if (interaction.isChatInputCommand() && interaction.commandName === "pingwarn") {
       const mode = interaction.options.getString("mode");
       const role = interaction.options.getRole("role");
@@ -613,7 +697,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /spylist
     if (interaction.isChatInputCommand() && interaction.commandName === "spylist") {
       await interaction.deferReply({ ephemeral: true });
       try {
@@ -657,7 +740,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /antinuke
     if (interaction.isChatInputCommand() && interaction.commandName === "antinuke") {
       const mode = interaction.options.getString("mode");
       const ignoreRole = interaction.options.getRole("role");
@@ -676,7 +758,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /antiraid
     if (interaction.isChatInputCommand() && interaction.commandName === "antiraid") {
       const mode = interaction.options.getString("mode");
       await interaction.deferReply({ ephemeral: true });
@@ -702,7 +783,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /role add
     if (interaction.isChatInputCommand() && interaction.commandName === "role" && interaction.options.getSubcommand() === "add") {
       const user = interaction.options.getUser("user");
       const role = interaction.options.getRole("role");
@@ -724,7 +804,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /role all
     if (interaction.isChatInputCommand() && interaction.commandName === "role" && interaction.options.getSubcommand() === "all") {
       const role = interaction.options.getRole("role");
       const botMember = interaction.guild.members.me;
@@ -748,11 +827,9 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // Buttons
     if (interaction.isButton()) {
       const id = interaction.customId;
 
-      // roleall_start
       if (id.startsWith("roleall_start_")) {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)) {
           await interaction.reply({ content: "❌ Manage Roles required.", ephemeral: true }); return;
@@ -783,7 +860,6 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      // roleall_stop
       if (id.startsWith("roleall_stop_")) {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)) {
           await interaction.reply({ content: "❌ Manage Roles required.", ephemeral: true }); return;
@@ -795,7 +871,6 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      // guess_start
       if (id === "guess_start") {
         const game = games.get(interaction.channelId);
         if (!game) { await interaction.reply({ content: "❌ No game.", ephemeral: true }); return; }
@@ -872,154 +947,131 @@ client.on("messageCreate", async message => {
       const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
       const command = args.shift().toLowerCase();
 
-      // ========== .get ==========
+      // ========== .get — NOW FOLLOWS LOADSTRING URLs ==========
       if (command === "get") {
         console.log(`[.get] User: ${message.author.tag} (${message.author.id}) | Guild: ${message.guild?.name} (${message.guildId}) | Channel: #${message.channel.name}`);
         const allUrls = await extractAllUrls(message);
         if (allUrls.length === 0) {
           return message.reply({ content: "Enter a valid URL or reply to the URL or forward URL." });
         }
+
+        // Send "Fetching URL..." embed
         const fetchEmbed = new EmbedBuilder()
           .setTitle("Fetching URL...")
           .setDescription(allUrls.map(u => `<${u}>`).join("\n"))
           .setColor(0x808080).setFooter({ text: `Today at ${getTodayTime()}` });
         const statusMsg = await message.reply({ embeds: [fetchEmbed] });
+
         const files = [];
-        const results = [];
+
         for (const url of allUrls) {
           try {
-            const res = await fetch(url, {
-              headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
-              signal: AbortSignal.timeout(15000)
-            });
-            if (!res.ok) { results.push(`❌ <${url}> — HTTP ${res.status}`); continue; }
-            const content = await res.text();
+            const { content, depth, history } = await fetchWithLoadstringFollow(url);
             const fileName = randomFilename("lua");
             const filePath = path.join(DATA_DIR, fileName);
             fs.writeFileSync(filePath, content, "utf8");
             files.push({ attachment: filePath, name: fileName });
-            results.push(`✅ <${url}> → \`${fileName}\` (${content.length} bytes)`);
+            console.log(`[.get] Done: ${url} → followed ${depth} loadstring(s) → ${fileName}`);
           } catch (err) {
             console.error(`[.get] Fetch failed for ${url}: ${err.message}`);
-            results.push(`❌ <${url}> — ${err.message}`);
           }
         }
-        const successEmbed = new EmbedBuilder()
-          .setTitle(files.length > 0 ? "✅ Fetched Successfully" : "⚠️ Fetch Complete")
-          .setDescription(results.join("\n"))
-          .setColor(0x808080).setFooter({ text: `Today at ${getTodayTime()}` });
-        await statusMsg.edit({ embeds: [successEmbed], files });
+
+        // ✅ Just send the file directly — NO success embed
+        if (files.length > 0) {
+          await statusMsg.edit({
+            content: `📥 Fetched **${files.length}** file(s)`,
+            embeds: [],
+            files
+          });
+        } else {
+          await statusMsg.edit({ content: "❌ Failed to fetch any URLs.", embeds: [] });
+        }
+
+        // Clean up temp files
         for (const f of files) { try { fs.unlinkSync(f.attachment); } catch {} }
         return;
       }
 
-      // ========== .l — Genv Logger ==========
-      if (command === "l") {
-        const logLines = [];
-        const timestamp = new Date().toISOString();
-        logLines.push(`-- MADE BY FS BOT LOGGER`);
-        logLines.push(`-- Timestamp: ${timestamp}`);
-        logLines.push(`-- User: ${message.author.tag} (${message.author.id})`);
-        logLines.push(`-- Guild: ${message.guild ? `${message.guild.name} (${message.guildId})` : "DM"}`);
-        logLines.push(`-- Channel: #${message.channel.name} (${message.channelId})`);
-        logLines.push("");
-        logLines.push(`-- ========================================`);
-        logLines.push(`-- USER SCAN`);
-        logLines.push(`-- ========================================`);
-        const userObj = {
-          id: message.author.id, tag: message.author.tag, username: message.author.username,
-          globalName: message.author.globalName || "null", bot: message.author.bot,
-          createdAt: message.author.createdAt.toISOString(), discriminator: message.author.discriminator
-        };
-        for (const [k, v] of Object.entries(userObj)) logLines.push(`user.${k} = ${tblformat(v)}`);
-        logLines.push("");
-        logLines.push(`-- ========================================`);
-        logLines.push(`-- MEMBER SCAN`);
-        logLines.push(`-- ========================================`);
-        if (message.member) {
-          const memberObj = {
-            nickname: message.member.nickname || "null",
-            joinedAt: message.member.joinedAt?.toISOString() || "null",
-            roles: message.member.roles.cache.map(r => r.name).join(", "),
-            roleCount: message.member.roles.cache.size,
-            highestRole: message.member.roles.highest?.name || "null",
-            manageable: message.member.manageable, bannable: message.member.bannable, kickable: message.member.kickable
-          };
-          for (const [k, v] of Object.entries(memberObj)) logLines.push(`member.${k} = ${tblformat(v)}`);
-        }
-        logLines.push("");
-        logLines.push(`-- ========================================`);
-        logLines.push(`-- MESSAGE SCAN`);
-        logLines.push(`-- ========================================`);
-        const msgObj = {
-          id: message.id, content: formatlog(message.content),
-          createdAt: message.createdAt.toISOString(),
-          editedAt: message.editedAt?.toISOString() || "null",
-          type: message.type, attachments: message.attachments.size,
-          embeds: message.embeds.length,
-          mentions: {
-            everyone: message.mentions.everyone,
-            users: message.mentions.users.size,
-            roles: message.mentions.roles.size
-          },
-          reference: message.reference ? message.reference.messageId : "null"
-        };
-        for (const [k, v] of Object.entries(msgObj)) logLines.push(`message.${k} = ${tblformat(v)}`);
-        logLines.push("");
-        logLines.push(`-- ========================================`);
-        logLines.push(`-- GUILD SCAN`);
-        logLines.push(`-- ========================================`);
-        if (message.guild) {
-          const guildObj = {
-            id: message.guildId, name: message.guild.name,
-            description: message.guild.description || "null",
-            memberCount: message.guild.memberCount, maxMembers: message.guild.maximumMembers,
-            premiumTier: message.guild.premiumTier,
-            premiumSubscriptionCount: message.guild.premiumSubscriptionCount,
-            verified: message.guild.verified, partnered: message.guild.partnered,
-            createdAt: message.guild.createdAt.toISOString(), ownerId: message.guild.ownerId,
-            roles: message.guild.roles.cache.size, channels: message.guild.channels.cache.size,
-            emojis: message.guild.emojis.cache.size, stickers: message.guild.stickers.cache.size
-          };
-          for (const [k, v] of Object.entries(guildObj)) logLines.push(`guild.${k} = ${tblformat(v)}`);
-        }
-        logLines.push("");
-        logLines.push(`-- ========================================`);
-        logLines.push(`-- CLIENT SCAN`);
-        logLines.push(`-- ========================================`);
-        const clientObj = {
-          user: client.user?.tag || "null", userId: client.user?.id || "null",
-          guilds: client.guilds.cache.size, users: client.users.cache.size,
-          channels: client.channels.cache.size,
-          readyAt: client.readyAt?.toISOString() || "null",
-          uptime: client.uptime ? `${Math.floor(client.uptime / 1000)}s` : "null",
-          wsPing: client.ws.ping
-        };
-        for (const [k, v] of Object.entries(clientObj)) logLines.push(`client.${k} = ${tblformat(v)}`);
-        logLines.push("");
-        logLines.push(`-- ========================================`);
-        logLines.push(`-- PROCESS SCAN`);
-        logLines.push(`-- ========================================`);
-        const processObj = {
-          nodeVersion: process.version, platform: process.platform, arch: process.arch,
-          pid: process.pid, uptime: `${Math.floor(process.uptime())}s`,
-          memoryUsage: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
-          cwd: process.cwd()
-        };
-        for (const [k, v] of Object.entries(processObj)) logLines.push(`process.${k} = ${tblformat(v)}`);
+      // ========== .detect — NEW: Obfuscator Detection ==========
+      if (command === "detect") {
+        console.log(`[.detect] User: ${message.author.tag} (${message.author.id})`);
 
-        const logContent = logLines.join("\n");
-        const logFileName = randomFilename("txt");
-        const logFilePath = path.join(DATA_DIR, logFileName);
-        fs.writeFileSync(logFilePath, logContent, "utf8");
-        console.log(`[.l LOGGER] ${message.author.tag} (${message.author.id}) — Log saved as ${logFileName}`);
-        console.log(logContent);
-        const logEmbed = new EmbedBuilder()
-          .setTitle("📋 Genv Logger")
-          .setDescription(`**User:** <@${message.author.id}>\n**File:** \`${logFileName}\`\n**Lines:** \`${logLines.length}\`\n**Size:** \`${logContent.length} bytes\``)
-          .setColor(0x808080).setFooter({ text: `Today at ${getTodayTime()}` });
-        await message.reply({ embeds: [logEmbed], files: [{ attachment: logFilePath, name: logFileName }] });
-        try { fs.unlinkSync(logFilePath); } catch {}
+        let content = "";
+        let sourceName = "";
+
+        // Check for attachment
+        if (message.attachments.size > 0) {
+          const att = message.attachments.first();
+          sourceName = att.name || "attachment";
+          try {
+            const res = await fetch(att.url);
+            content = await res.text();
+          } catch (err) {
+            return message.reply({ content: `❌ Failed to read attachment: ${err.message}` });
+          }
+        } else {
+          // Check for URL
+          const urls = await extractAllUrls(message);
+          if (urls.length > 0) {
+            sourceName = urls[0];
+            try {
+              const result = await fetchWithLoadstringFollow(urls[0]);
+              content = result.content;
+            } catch (err) {
+              return message.reply({ content: `❌ Failed to fetch URL: ${err.message}` });
+            }
+          } else if (message.reference) {
+            // Check replied message for attachment or URL
+            try {
+              const replied = await message.channel.messages.fetch(message.reference.messageId);
+              if (replied.attachments.size > 0) {
+                const att = replied.attachments.first();
+                sourceName = att.name || "attachment";
+                const res = await fetch(att.url);
+                content = await res.text();
+              } else {
+                const replyUrls = replied.content.match(/https?:\/\/[^\s<>"')]+/g);
+                if (replyUrls && replyUrls.length > 0) {
+                  sourceName = replyUrls[0];
+                  const result = await fetchWithLoadstringFollow(replyUrls[0]);
+                  content = result.content;
+                }
+              }
+            } catch {}
+          }
+        }
+
+        if (!content || content.trim().length === 0) {
+          return message.reply({
+            content: "❌ Upload a `.lua` file, paste a URL, or reply to a message with a file/URL."
+          });
+        }
+
+        // Detect obfuscator
+        const detections = detectObfuscator(content);
+        const top = detections[0];
+
+        const lines = content.split("\n").length;
+        const size = content.length;
+        const encodedCount = (content.match(/\\\d{3}/g) || []).length;
+        const hexCount = (content.match(/\\x[0-9a-fA-F]{2}/g) || []).length;
+
+        const detectEmbed = new EmbedBuilder()
+          .setTitle(`🔍 Obfuscator Detection`)
+          .setDescription(`**Source:** \`${sourceName.slice(0, 80)}\`\n**Size:** \`${size} bytes\` | **Lines:** \`${lines}\`\n**Encoded chars:** \\\`${encodedCount}\` | **Hex:** \\\`x${hexCount}\``)
+          .setColor(top.color)
+          .setFooter({ text: `Today at ${getTodayTime()}` });
+
+        for (const d of detections.slice(0, 3)) {
+          detectEmbed.addFields({
+            name: `${d.name}`,
+            value: `**Confidence:** \`${d.confidence}%\`\n${"█".repeat(Math.floor(d.confidence / 10))}${"░".repeat(10 - Math.floor(d.confidence / 10))}`,
+            inline: true
+          });
+        }
+
+        await message.reply({ embeds: [detectEmbed] });
         return;
       }
     }
