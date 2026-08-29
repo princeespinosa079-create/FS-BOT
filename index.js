@@ -9,32 +9,74 @@ const {
   ButtonBuilder,
   ButtonStyle,
   PermissionFlagsBits,
-  ChannelType,
   AuditLogEvent
 } = require("discord.js");
 
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 
 // =========================
-// Environment Variables
+// Environment
 // =========================
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID; // optional — only used to clear old guild commands
+const GUILD_ID = process.env.GUILD_ID; // optional — clear old guild cmds
 
 const OWNER_ID = "1302080645987569694";
 
-// =========================
-// Required Environment Check
-// =========================
-
 if (!TOKEN || !CLIENT_ID) {
-  console.error(
-    "❌ Missing DISCORD_TOKEN or CLIENT_ID."
-  );
+  console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID.");
   process.exit(1);
 }
+
+// =========================
+// Persist settings across redeploy
+// =========================
+
+const DATA_FILE = path.join(__dirname, "bot-data.json");
+
+function loadData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    }
+  } catch (e) {
+    console.error("⚠️ Failed to load bot-data.json:", e.message);
+  }
+  return {
+    antiNuke: {},
+    antiNukeIgnore: {},
+    antiRaid: {},
+    pingWarn: {}
+  };
+}
+
+function saveData() {
+  try {
+    const data = {
+      antiNuke: Object.fromEntries(antiNukeEnabled),
+      antiNukeIgnore: Object.fromEntries(antiNukeIgnoreRole),
+      antiRaid: Object.fromEntries(antiRaidEnabled),
+      pingWarn: Object.fromEntries(
+        [...pingWarnRoles.entries()].map(([k, v]) => [
+          k,
+          {
+            enabled: v.enabled,
+            guildId: v.guildId,
+            durationMs: v.durationMs
+          }
+        ])
+      )
+    };
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.error("⚠️ Failed to save bot-data.json:", e.message);
+  }
+}
+
+const saved = loadData();
 
 // =========================
 // Web Server
@@ -74,38 +116,33 @@ const client = new Client({
 });
 
 // =========================
-// Games
+// State
 // =========================
 
 const games = new Map();
 
-// =========================
-// Ping Warn System
-// =========================
+const pingWarnRoles = new Map(
+  Object.entries(saved.pingWarn || {}).map(([k, v]) => [
+    k,
+    { enabled: v.enabled, timeout: null, guildId: v.guildId, durationMs: v.durationMs ?? null }
+  ])
+);
 
-const pingWarnRoles = new Map();
-const TEN_HOURS = 10 * 60 * 60 * 1000;
-
-// =========================
-// Anti-Nuke / Anti-Raid
-// =========================
-
-const antiNukeEnabled = new Map();
-const antiNukeIgnoreRole = new Map();
-const antiRaidEnabled = new Map();
+const antiNukeEnabled = new Map(
+  Object.entries(saved.antiNuke || {}).map(([k, v]) => [k, !!v])
+);
+const antiNukeIgnoreRole = new Map(
+  Object.entries(saved.antiNukeIgnore || {})
+);
+const antiRaidEnabled = new Map(
+  Object.entries(saved.antiRaid || {}).map(([k, v]) => [k, !!v])
+);
 const recentNukeCreates = new Map();
-
-// webhookId -> { count, first, channelId, guildId }
 const webhookSpamTracker = new Map();
-
-// =========================
-// Role Mass Add Jobs
-// =========================
-
 const roleJobs = new Map();
 
 // =========================
-// Time helpers
+// Helpers
 // =========================
 
 function getTodayTime() {
@@ -120,12 +157,31 @@ function getTodayTime() {
 function parseDuration(str) {
   if (!str || !str.trim()) return null;
   const s = str.trim().toLowerCase();
-  const match = s.match(/^(\d+)\s*(s|m|h|d)$/);
-  if (!match) return null;
-  const n = parseInt(match[1], 10);
-  const unit = match[2];
-  const mult = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
-  return n * mult[unit];
+  // support "1h", "30m", "1h 30m", "90m"
+  let total = 0;
+  const parts = s.match(/(\d+)\s*(s|m|h|d)/g);
+  if (!parts) return null;
+  for (const p of parts) {
+    const m = p.match(/(\d+)\s*(s|m|h|d)/);
+    if (!m) continue;
+    const n = parseInt(m[1], 10);
+    const mult = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+    total += n * mult[m[2]];
+  }
+  return total > 0 ? total : null;
+}
+
+function formatDuration(ms) {
+  if (!ms) return "permanent";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d`;
 }
 
 // =========================
@@ -136,9 +192,9 @@ const commands = [
   new SlashCommandBuilder()
     .setName("guessnumber")
     .setDescription("Create a number guessing game.")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageNicknames.toString())
-    .addIntegerOption(option =>
-      option
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString())
+    .addIntegerOption(o =>
+      o
         .setName("answer")
         .setDescription("Secret answer from 1 to 10000.")
         .setRequired(true)
@@ -149,185 +205,156 @@ const commands = [
   new SlashCommandBuilder()
     .setName("embed")
     .setDescription("Send a gray embed.")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageNicknames.toString())
-    .addStringOption(option =>
-      option
-        .setName("description")
-        .setDescription("Embed description.")
-        .setRequired(true)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString())
+    .addStringOption(o =>
+      o.setName("description").setDescription("Embed description.").setRequired(true)
     )
-    .addStringOption(option =>
-      option
-        .setName("title")
-        .setDescription("Embed title.")
-        .setRequired(false)
+    .addStringOption(o =>
+      o.setName("title").setDescription("Embed title.").setRequired(false)
     ),
+
+  new SlashCommandBuilder()
+    .setName("status")
+    .setDescription("Show Anti-Nuke, Anti-Raid, and Ping Warn status.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString()),
 
   new SlashCommandBuilder()
     .setName("pingwarn")
     .setDescription(
-      "When a role pings @everyone/@here, temporarily remove their ping permission for 10 hours."
+      "When a role pings @everyone/@here, temporarily remove their ping permission."
     )
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString())
-    .addStringOption(option =>
-      option
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles.toString())
+    .addStringOption(o =>
+      o
         .setName("mode")
-        .setDescription("Turn the system ON or OFF for the role.")
+        .setDescription("ON or OFF")
         .setRequired(true)
-        .addChoices(
-          { name: "ON", value: "on" },
-          { name: "OFF", value: "off" }
-        )
+        .addChoices({ name: "ON", value: "on" }, { name: "OFF", value: "off" })
     )
-    .addRoleOption(option =>
-      option
+    .addRoleOption(o =>
+      o
         .setName("role")
-        .setDescription("The role that will be punished when it pings.")
+        .setDescription("Role that gets punished when it mass pings.")
         .setRequired(true)
+    )
+    .addStringOption(o =>
+      o
+        .setName("duration")
+        .setDescription("e.g. 1h, 30m, 1h 30m — leave blank = permanent (no auto restore).")
+        .setRequired(false)
     ),
 
   new SlashCommandBuilder()
     .setName("spylist")
-    .setDescription(
-      "List spies/alts (name) and new accounts (created in last 20 days)."
-    )
+    .setDescription("List spies/alts and new accounts (last 20 days).")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString()),
 
   new SlashCommandBuilder()
     .setName("antinuke")
-    .setDescription(
-      "Turn Anti-Nuke ON/OFF. Optional ignore role will never be banned."
-    )
+    .setDescription("Turn Anti-Nuke ON/OFF. Optional ignore role.")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString())
-    .addStringOption(option =>
-      option
+    .addStringOption(o =>
+      o
         .setName("mode")
         .setDescription("ON or OFF")
         .setRequired(true)
-        .addChoices(
-          { name: "ON", value: "on" },
-          { name: "OFF", value: "off" }
-        )
+        .addChoices({ name: "ON", value: "on" }, { name: "OFF", value: "off" })
     )
-    .addRoleOption(option =>
-      option
+    .addRoleOption(o =>
+      o
         .setName("role")
-        .setDescription("Role to ignore (leave blank = no ignore role).")
+        .setDescription("Role to ignore (leave blank = none).")
         .setRequired(false)
     ),
 
   new SlashCommandBuilder()
     .setName("antiraid")
     .setDescription(
-      "Turn Anti-Raid ON or OFF (turns off external emojis/stickers in all channels)."
+      "Turn Anti-Raid ON/OFF (external emojis off + delete spam webhooks)."
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString())
-    .addStringOption(option =>
-      option
+    .addStringOption(o =>
+      o
         .setName("mode")
         .setDescription("ON or OFF")
         .setRequired(true)
-        .addChoices(
-          { name: "ON", value: "on" },
-          { name: "OFF", value: "off" }
-        )
+        .addChoices({ name: "ON", value: "on" }, { name: "OFF", value: "off" })
     ),
 
   new SlashCommandBuilder()
     .setName("role")
-    .setDescription("Add a role to a user or to everyone with a panel.")
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString())
+    .setDescription("Add a role to a user or to everyone.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles.toString())
     .addSubcommand(sub =>
       sub
         .setName("add")
         .setDescription("Add a role to one user (optional duration).")
         .addUserOption(o =>
-          o.setName("user").setDescription("User to give the role.").setRequired(true)
+          o.setName("user").setDescription("User").setRequired(true)
         )
         .addRoleOption(o =>
-          o.setName("role").setDescription("Role to add.").setRequired(true)
+          o.setName("role").setDescription("Role").setRequired(true)
         )
         .addStringOption(o =>
           o
             .setName("duration")
-            .setDescription("e.g. 1h, 30m, 1d — leave blank for permanent.")
+            .setDescription("e.g. 1h, 30m — blank = permanent.")
             .setRequired(false)
         )
     )
     .addSubcommand(sub =>
       sub
         .setName("all")
-        .setDescription("Add a role to everyone (shows panel with Start/Stop).")
+        .setDescription("Add a role to everyone (panel with Start/Stop).")
         .addRoleOption(o =>
-          o.setName("role").setDescription("Role to add to all members.").setRequired(true)
+          o.setName("role").setDescription("Role for everyone.").setRequired(true)
         )
     ),
 
-  // Owner only — at the bottom
   new SlashCommandBuilder()
     .setName("serverlist")
-    .setDescription("Show all servers where the bot is installed. (Owner only)"),
+    .setDescription("Show all servers. (Owner only)"),
 
   new SlashCommandBuilder()
     .setName("leave")
-    .setDescription("Make the bot leave a server. (Owner only)")
-    .addStringOption(option =>
-      option
-        .setName("server-id")
-        .setDescription("The ID of the server to leave.")
-        .setRequired(true)
+    .setDescription("Leave a server. (Owner only)")
+    .addStringOption(o =>
+      o.setName("server-id").setDescription("Server ID").setRequired(true)
     )
 ].map(c => c.toJSON());
 
 // =========================
-// Register Commands (GLOBAL)
+// Register (global + clear guild)
 // =========================
 
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-
   try {
-    // Delete old guild-only commands (if GUILD_ID still set)
     if (GUILD_ID) {
-      console.log("🗑️ Clearing old guild-only commands...");
-      await rest.put(
-        Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-        { body: [] }
-      );
-      console.log("✅ Old guild commands deleted.");
+      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+        body: []
+      });
+      console.log("🗑️ Cleared old guild commands (GUILD_ID).");
     }
-
-    // Also try clear guild commands for every server the bot is in
     for (const guild of client.guilds.cache.values()) {
       try {
-        await rest.put(
-          Routes.applicationGuildCommands(CLIENT_ID, guild.id),
-          { body: [] }
-        );
-      } catch {
-        // ignore per-guild failures
-      }
+        await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guild.id), {
+          body: []
+        });
+      } catch {}
     }
-    console.log("🗑️ Cleared guild commands in all joined servers.");
+    console.log("🗑️ Cleared guild commands in all servers.");
 
-    // Register GLOBAL commands only
-    console.log("🌍 Registering global slash commands...");
-    await rest.put(Routes.applicationCommands(CLIENT_ID), {
-      body: commands
-    });
-    console.log("✅ Global slash commands registered.");
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log("✅ Global slash commands registered (persist across redeploy).");
   } catch (error) {
     console.error("❌ Command registration error:", error);
   }
 }
 
-// =========================
-// Ready
-// =========================
-
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log(`🏠 Connected to ${client.guilds.cache.size} server(s).`);
+  console.log(`🏠 ${client.guilds.cache.size} server(s).`);
   await registerCommands();
 });
 
@@ -337,7 +364,7 @@ client.once("ready", async () => {
 
 client.on("interactionCreate", async interaction => {
   try {
-    // Owner only
+    // Owner
     if (
       interaction.isChatInputCommand() &&
       (interaction.commandName === "serverlist" ||
@@ -345,47 +372,37 @@ client.on("interactionCreate", async interaction => {
     ) {
       if (interaction.user.id !== OWNER_ID) {
         await interaction.reply({
-          content: "❌ Only the bot owner can use this command.",
+          content: "❌ Owner only.",
           ephemeral: true
         });
         return;
       }
     }
 
-    // Manage Nicknames / Messages
-    if (
-      interaction.isChatInputCommand() &&
-      (interaction.commandName === "guessnumber" ||
-        interaction.commandName === "embed")
-    ) {
-      if (
-        !interaction.memberPermissions ||
-        (!interaction.memberPermissions.has(PermissionFlagsBits.ManageNicknames) &&
-          !interaction.memberPermissions.has(PermissionFlagsBits.ManageMessages))
-      ) {
-        await interaction.reply({
-          content:
-            "❌ You need **Manage Nicknames** or **Manage Messages** to use this command.",
-          ephemeral: true
-        });
-        setTimeout(() => interaction.deleteReply().catch(() => {}), 2000);
-        return;
-      }
-    }
+    // Permission checks by command
+    if (interaction.isChatInputCommand()) {
+      const name = interaction.commandName;
+      const perms = interaction.memberPermissions;
 
-    // Administrator
-    if (
-      interaction.isChatInputCommand() &&
-      ["antinuke", "antiraid", "pingwarn", "spylist", "role"].includes(
-        interaction.commandName
-      )
-    ) {
-      if (
-        !interaction.memberPermissions ||
-        !interaction.memberPermissions.has(PermissionFlagsBits.Administrator)
-      ) {
+      const need = {
+        guessnumber: PermissionFlagsBits.ManageMessages,
+        embed: PermissionFlagsBits.ManageMessages,
+        status: PermissionFlagsBits.ManageMessages,
+        pingwarn: PermissionFlagsBits.ManageRoles,
+        role: PermissionFlagsBits.ManageRoles,
+        spylist: PermissionFlagsBits.Administrator,
+        antinuke: PermissionFlagsBits.Administrator,
+        antiraid: PermissionFlagsBits.Administrator
+      };
+
+      if (need[name] && (!perms || !perms.has(need[name]))) {
+        const labels = {
+          [PermissionFlagsBits.ManageMessages]: "Manage Messages",
+          [PermissionFlagsBits.ManageRoles]: "Manage Roles",
+          [PermissionFlagsBits.Administrator]: "Administrator"
+        };
         await interaction.reply({
-          content: "❌ You need **Administrator** permission.",
+          content: `❌ You need **${labels[need[name]]}**.`,
           ephemeral: true
         });
         return;
@@ -400,44 +417,37 @@ client.on("interactionCreate", async interaction => {
       await interaction.deferReply({ ephemeral: true });
       const guilds = [...client.guilds.cache.values()];
       let description = `**Total Servers:** \`${guilds.length}\`\n\n`;
-      if (guilds.length === 0) description += "No servers found.";
-
       for (let i = 0; i < guilds.length; i++) {
         const guild = guilds[i];
         let inviteLink = "Unavailable";
         try {
-          const channel = guild.channels.cache.find(
-            ch =>
-              ch.isTextBased() &&
-              ch.permissionsFor(guild.members.me)?.has(
+          const ch = guild.channels.cache.find(
+            c =>
+              c.isTextBased() &&
+              c.permissionsFor(guild.members.me)?.has(
                 PermissionFlagsBits.CreateInstantInvite
               )
           );
-          if (channel) {
-            const invite = await channel.createInvite({
+          if (ch) {
+            const inv = await ch.createInvite({
               maxAge: 0,
               maxUses: 0,
-              unique: false,
-              reason: "Server list invite"
+              unique: false
             });
-            inviteLink = invite.url;
+            inviteLink = inv.url;
           }
-        } catch {
-          inviteLink = "Unavailable";
-        }
-        description +=
-          `**${i + 1}. ${guild.name}**\n` +
-          `> **ID:** \`${guild.id}\`\n` +
-          `> **Invite:** ${inviteLink}\n\n`;
+        } catch {}
+        description += `**${i + 1}. ${guild.name}**\n> **ID:** \`${guild.id}\`\n> **Invite:** ${inviteLink}\n\n`;
       }
-
-      const embed = new EmbedBuilder()
-        .setTitle("SERVER LIST 📋")
-        .setDescription(description.slice(0, 4000))
-        .setColor(0x808080)
-        .setFooter({ text: `Today at ${getTodayTime()}` });
-
-      await interaction.editReply({ embeds: [embed] });
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("SERVER LIST 📋")
+            .setDescription(description.slice(0, 4000) || "None")
+            .setColor(0x808080)
+            .setFooter({ text: `Today at ${getTodayTime()}` })
+        ]
+      });
       return;
     }
 
@@ -450,25 +460,56 @@ client.on("interactionCreate", async interaction => {
       const guild = client.guilds.cache.get(serverId);
       if (!guild) {
         await interaction.reply({
-          content: `❌ I am not in a server with ID \`${serverId}\`.`,
+          content: `❌ Not in \`${serverId}\`.`,
           ephemeral: true
         });
         return;
       }
-      const serverName = guild.name;
+      const name = guild.name;
       try {
         await guild.leave();
         await interaction.reply({
-          content: `✅ Successfully left **${serverName}** (\`${serverId}\`).`,
+          content: `✅ Left **${name}**.`,
           ephemeral: true
         });
-      } catch (error) {
-        console.error("❌ Failed to leave server:", error);
+      } catch {
         await interaction.reply({
-          content: `❌ Failed to leave **${serverName}**.`,
+          content: `❌ Failed to leave **${name}**.`,
           ephemeral: true
         });
       }
+      return;
+    }
+
+    // /status
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === "status"
+    ) {
+      const gid = interaction.guildId;
+      const nukeOn = !!antiNukeEnabled.get(gid);
+      const raidOn = !!antiRaidEnabled.get(gid);
+
+      // Any pingwarn role for this guild?
+      let pingOn = false;
+      for (const [, v] of pingWarnRoles) {
+        if (v.enabled && v.guildId === gid) {
+          pingOn = true;
+          break;
+        }
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle("COMMAND STATUS")
+        .setDescription(
+          `**Anti Nuke**\n${nukeOn ? "✅ ON" : "❌ OFF"}\n\n` +
+            `**Anti Raid**\n${raidOn ? "✅ ON" : "❌ OFF"}\n\n` +
+            `**Ping Warn**\n${pingOn ? "✅ ON" : "❌ OFF"}`
+        )
+        .setColor(0x808080)
+        .setFooter({ text: `Today at ${getTodayTime()}` });
+
+      await interaction.reply({ embeds: [embed] });
       return;
     }
 
@@ -480,57 +521,51 @@ client.on("interactionCreate", async interaction => {
       const answer = interaction.options.getInteger("answer");
       if (games.has(interaction.channelId)) {
         await interaction.reply({
-          content: "⚠️ There is already a Guess Game in this channel.",
+          content: "⚠️ Game already in this channel.",
           ephemeral: true
         });
-        setTimeout(() => interaction.deleteReply().catch(() => {}), 1500);
         return;
       }
-
       games.set(interaction.channelId, {
         answer,
         hostId: interaction.user.id,
         active: false
       });
-
-      const answerEmbed = new EmbedBuilder()
-        .setDescription(`🔢 **Answer:** \`${answer}\``)
-        .setColor(0x808080);
-
       try {
-        await interaction.user.send({ embeds: [answerEmbed] });
+        await interaction.user.send({
+          embeds: [
+            new EmbedBuilder()
+              .setDescription(`🔢 **Answer:** \`${answer}\``)
+              .setColor(0x808080)
+          ]
+        });
       } catch {
         games.delete(interaction.channelId);
         await interaction.reply({
-          content:
-            "❌ I couldn't DM you. Please enable your Discord DMs and try again.",
+          content: "❌ Enable DMs.",
           ephemeral: true
         });
-        setTimeout(() => interaction.deleteReply().catch(() => {}), 2000);
         return;
       }
-
       await interaction.deferReply({ ephemeral: true });
       await interaction.deleteReply();
-
-      const panelEmbed = new EmbedBuilder()
-        .setTitle("GAME EVENT 🧧")
-        .setDescription(
-          `> **Host by:** <@${interaction.user.id}>\n` +
-            `> **Click the** \`Start Button\` **to start** \`Guess Game\`.`
-        )
-        .setColor(0x808080);
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("guess_start")
-          .setLabel("Start")
-          .setStyle(ButtonStyle.Success)
-      );
-
       await interaction.channel.send({
-        embeds: [panelEmbed],
-        components: [row]
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("GAME EVENT 🧧")
+            .setDescription(
+              `> **Host by:** <@${interaction.user.id}>\n> **Click Start** to begin Guess Game.`
+            )
+            .setColor(0x808080)
+        ],
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId("guess_start")
+              .setLabel("Start")
+              .setStyle(ButtonStyle.Success)
+          )
+        ]
       });
       return;
     }
@@ -547,7 +582,6 @@ client.on("interactionCreate", async interaction => {
         .setColor(0x808080)
         .setFooter({ text: `Today at ${getTodayTime()}` });
       if (title) embed.setTitle(title);
-
       await interaction.deferReply({ ephemeral: true });
       await interaction.deleteReply();
       await interaction.channel.send({ embeds: [embed] });
@@ -561,15 +595,21 @@ client.on("interactionCreate", async interaction => {
     ) {
       const mode = interaction.options.getString("mode");
       const role = interaction.options.getRole("role");
+      const durationStr = interaction.options.getString("duration");
+      const durationMs = parseDuration(durationStr);
+
       if (!role) {
-        await interaction.reply({ content: "❌ Role not found.", ephemeral: true });
+        await interaction.reply({
+          content: "❌ Role not found.",
+          ephemeral: true
+        });
         return;
       }
 
       const botMember = interaction.guild.members.me;
       if (!botMember || role.position >= botMember.roles.highest.position) {
         await interaction.reply({
-          content: "❌ I cannot manage that role. Move my role higher.",
+          content: "❌ Move my role above that role.",
           ephemeral: true
         });
         return;
@@ -577,22 +617,27 @@ client.on("interactionCreate", async interaction => {
 
       if (mode === "on") {
         const existing = pingWarnRoles.get(role.id);
-        if (existing && existing.timeout) clearTimeout(existing.timeout);
+        if (existing?.timeout) clearTimeout(existing.timeout);
+
         pingWarnRoles.set(role.id, {
           enabled: true,
           timeout: null,
-          guildId: interaction.guildId
+          guildId: interaction.guildId,
+          durationMs // null = permanent
         });
+        saveData();
+
         await interaction.reply({
           content:
             `✅ Ping Warn **ON** for **${role.name}**.\n` +
-            `Mass ping → lose ping permission for 10 hours.`,
+            `Duration after mass ping: **${formatDuration(durationMs)}**.`,
           ephemeral: true
         });
       } else {
         const existing = pingWarnRoles.get(role.id);
-        if (existing && existing.timeout) clearTimeout(existing.timeout);
+        if (existing?.timeout) clearTimeout(existing.timeout);
         pingWarnRoles.delete(role.id);
+        saveData();
         try {
           await role.setPermissions(
             role.permissions.add(PermissionFlagsBits.MentionEveryone),
@@ -607,13 +652,12 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /spylist
+    // /spylist — newest accounts first; spy/alt + new in embeds
     if (
       interaction.isChatInputCommand() &&
       interaction.commandName === "spylist"
     ) {
       await interaction.deferReply({ ephemeral: true });
-
       try {
         await interaction.guild.members.fetch();
         const twentyDaysAgo = Date.now() - 20 * 24 * 60 * 60 * 1000;
@@ -629,25 +673,40 @@ client.on("interactionCreate", async interaction => {
             " " +
             (member.user.globalName || "")
           ).toLowerCase();
-          const isAltOrSpy = name.includes("alt") || name.includes("spy");
-          const isNew = member.user.createdTimestamp >= twentyDaysAgo;
-          if (isAltOrSpy) spyAlt.push(member);
-          if (isNew) newAccounts.push(member);
+          if (name.includes("alt") || name.includes("spy")) spyAlt.push(member);
+          if (member.user.createdTimestamp >= twentyDaysAgo) {
+            newAccounts.push(member);
+          }
         }
+
+        // Newest account first (highest createdTimestamp)
+        newAccounts.sort(
+          (a, b) => b.user.createdTimestamp - a.user.createdTimestamp
+        );
 
         const embeds = [];
 
+        // SPY / ALT embed (includes note if also new)
         if (spyAlt.length === 0) {
           embeds.push(
             new EmbedBuilder()
               .setTitle("SPY / ALT (LIST OF SPY AND ALT)")
-              .setDescription("No members found with **alt** or **spy** in name/nickname.")
+              .setDescription("No members with **alt** or **spy** in name.")
               .setColor(0x808080)
               .setFooter({ text: `Today at ${getTodayTime()}` })
           );
         } else {
           const list = spyAlt
-            .map((m, i) => `**${i + 1}.** <@${m.id}> \`${m.user.tag}\``)
+            .map((m, i) => {
+              const daysOld = Math.floor(
+                (Date.now() - m.user.createdTimestamp) / 86400000
+              );
+              const newTag =
+                m.user.createdTimestamp >= twentyDaysAgo
+                  ? ` \`NEW ${daysOld}d\``
+                  : "";
+              return `**${i + 1}.** <@${m.id}> \`${m.user.tag}\`${newTag}`;
+            })
             .join("\n");
           embeds.push(
             new EmbedBuilder()
@@ -658,6 +717,7 @@ client.on("interactionCreate", async interaction => {
           );
         }
 
+        // NEW ACCOUNT LIST — newest at top
         if (newAccounts.length === 0) {
           embeds.push(
             new EmbedBuilder()
@@ -670,7 +730,7 @@ client.on("interactionCreate", async interaction => {
           const list = newAccounts
             .map((m, i) => {
               const daysOld = Math.floor(
-                (Date.now() - m.user.createdTimestamp) / (1000 * 60 * 60 * 24)
+                (Date.now() - m.user.createdTimestamp) / 86400000
               );
               return `**${i + 1}.** <@${m.id}> \`${m.user.tag}\` \`NEW ${daysOld}d\``;
             })
@@ -680,24 +740,25 @@ client.on("interactionCreate", async interaction => {
               .setTitle(`NEW ACCOUNT LIST — ${newAccounts.length}`)
               .setDescription(list.slice(0, 4000))
               .setColor(0x808080)
-              .setFooter({ text: `Today at ${getTodayTime()}` })
+              .setFooter({
+                text: `Newest at top · Today at ${getTodayTime()}`
+              })
           );
         }
 
         const allIds = [
           ...new Set([...spyAlt, ...newAccounts].map(m => m.id))
         ];
-
         await interaction.channel.send({
           embeds,
           allowedMentions: { users: allIds }
         });
         await interaction.deleteReply().catch(() => {});
       } catch (error) {
-        console.error("❌ /spylist error:", error);
+        console.error("❌ /spylist:", error);
         await interaction
           .editReply({
-            content: "❌ Failed to fetch members. Enable **Server Members Intent**."
+            content: "❌ Failed. Enable **Server Members Intent**."
           })
           .catch(() => {});
       }
@@ -711,7 +772,6 @@ client.on("interactionCreate", async interaction => {
     ) {
       const mode = interaction.options.getString("mode");
       const ignoreRole = interaction.options.getRole("role");
-
       if (mode === "on") {
         antiNukeEnabled.set(interaction.guildId, true);
         if (ignoreRole) {
@@ -719,18 +779,19 @@ client.on("interactionCreate", async interaction => {
         } else {
           antiNukeIgnoreRole.delete(interaction.guildId);
         }
+        saveData();
         await interaction.reply({
           content:
-            `✅ **Anti-Nuke ON**\n` +
-            `2 channel/role/category creates within **1 second** → ban.\n` +
+            `✅ **Anti-Nuke ON**\n2 creates in ~1s → ban.\n` +
             (ignoreRole
-              ? `Ignore role: **${ignoreRole.name}**`
+              ? `Ignore: **${ignoreRole.name}**`
               : `No ignore role.`),
           ephemeral: true
         });
       } else {
         antiNukeEnabled.set(interaction.guildId, false);
         antiNukeIgnoreRole.delete(interaction.guildId);
+        saveData();
         await interaction.reply({
           content: "✅ **Anti-Nuke OFF**.",
           ephemeral: true
@@ -748,9 +809,9 @@ client.on("interactionCreate", async interaction => {
       await interaction.deferReply({ ephemeral: true });
       const guild = interaction.guild;
       let updated = 0;
-
       if (mode === "on") {
         antiRaidEnabled.set(guild.id, true);
+        saveData();
         for (const channel of guild.channels.cache.values()) {
           if (!channel.isTextBased() || !channel.permissionOverwrites) continue;
           try {
@@ -763,10 +824,13 @@ client.on("interactionCreate", async interaction => {
           } catch {}
         }
         await interaction.editReply({
-          content: `✅ **Anti-Raid ON** — external emojis/stickers off in **${updated}** channels.`
+          content:
+            `✅ **Anti-Raid ON**\nExternal emojis/stickers off in **${updated}** channels.\n` +
+            `Webhook spam: **2 messages in 1.5s** → webhook deleted.`
         });
       } else {
         antiRaidEnabled.set(guild.id, false);
+        saveData();
         for (const channel of guild.channels.cache.values()) {
           if (!channel.isTextBased() || !channel.permissionOverwrites) continue;
           try {
@@ -795,7 +859,6 @@ client.on("interactionCreate", async interaction => {
       const role = interaction.options.getRole("role");
       const durationStr = interaction.options.getString("duration");
       const durationMs = parseDuration(durationStr);
-
       const member = await interaction.guild.members
         .fetch(user.id)
         .catch(() => null);
@@ -806,33 +869,29 @@ client.on("interactionCreate", async interaction => {
         });
         return;
       }
-
       const botMember = interaction.guild.members.me;
       if (!botMember || role.position >= botMember.roles.highest.position) {
         await interaction.reply({
-          content: "❌ I cannot manage that role.",
+          content: "❌ Cannot manage that role.",
           ephemeral: true
         });
         return;
       }
-
       try {
-        await member.roles.add(role, `Added by ${interaction.user.tag}`);
+        await member.roles.add(role, `By ${interaction.user.tag}`);
         let msg = `✅ Added **${role.name}** to <@${user.id}>.`;
         if (durationMs) {
-          msg += ` Removes in **${durationStr}**.`;
+          msg += ` Removes in **${formatDuration(durationMs)}**.`;
           setTimeout(async () => {
             try {
-              await member.roles.remove(role, "Temporary role expired");
+              await member.roles.remove(role, "Temp role expired");
             } catch {}
           }, durationMs);
-        } else {
-          msg += " (permanent)";
-        }
+        } else msg += " (permanent)";
         await interaction.reply({ content: msg, ephemeral: true });
       } catch {
         await interaction.reply({
-          content: "❌ Failed to add role.",
+          content: "❌ Failed.",
           ephemeral: true
         });
       }
@@ -849,17 +908,15 @@ client.on("interactionCreate", async interaction => {
       const botMember = interaction.guild.members.me;
       if (!botMember || role.position >= botMember.roles.highest.position) {
         await interaction.reply({
-          content: "❌ I cannot manage that role.",
+          content: "❌ Cannot manage that role.",
           ephemeral: true
         });
         return;
       }
-
       await interaction.guild.members.fetch().catch(() => {});
       const total = interaction.guild.members.cache.filter(
         m => !m.user.bot && !m.roles.cache.has(role.id)
       ).size;
-
       const estimatedSeconds = Math.ceil(total * 1.2);
       const estimatedMin = Math.floor(estimatedSeconds / 60);
       const estimatedSec = estimatedSeconds % 60;
@@ -872,9 +929,9 @@ client.on("interactionCreate", async interaction => {
         .setTitle("ROLE ALL PANEL")
         .setDescription(
           `> **Role:** ${role}\n` +
-            `> **Members to add:** \`${total}\`\n` +
-            `> **Estimated time:** \`${timeStr}\`\n\n` +
-            `Click **Start** to begin.\nClick **Stop** to cancel.`
+            `> **Members:** \`${total}\`\n` +
+            `> **Estimated:** \`${timeStr}\`\n\n` +
+            `**Start** to begin · **Stop** deletes panel & cancels.`
         )
         .setColor(0x808080)
         .setFooter({ text: `Today at ${getTodayTime()}` });
@@ -895,21 +952,20 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // Role all buttons
+    // Buttons
     if (interaction.isButton()) {
       const id = interaction.customId;
 
       if (id.startsWith("roleall_start_")) {
         if (
-          !interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
+          !interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)
         ) {
           await interaction.reply({
-            content: "❌ Administrator only.",
+            content: "❌ Manage Roles required.",
             ephemeral: true
           });
           return;
         }
-
         const roleId = id.replace("roleall_start_", "");
         const role = interaction.guild.roles.cache.get(roleId);
         if (!role) {
@@ -919,15 +975,13 @@ client.on("interactionCreate", async interaction => {
           });
           return;
         }
-
         if (roleJobs.get(interaction.guildId)?.running) {
           await interaction.reply({
-            content: "⚠️ A job is already running.",
+            content: "⚠️ Already running.",
             ephemeral: true
           });
           return;
         }
-
         await interaction.deferUpdate();
         await interaction.guild.members.fetch().catch(() => {});
         const targets = [
@@ -935,27 +989,22 @@ client.on("interactionCreate", async interaction => {
             .filter(m => !m.user.bot && !m.roles.cache.has(role.id))
             .values()
         ];
-
         roleJobs.set(interaction.guildId, {
-          roleId,
           running: true,
           stopped: false,
           added: 0,
           total: targets.length
         });
-
         await interaction.message.edit({
           embeds: [
             new EmbedBuilder()
               .setTitle("ROLE ALL — RUNNING")
               .setDescription(
-                `> **Role:** ${role}\n> **Progress:** \`0 / ${targets.length}\`\n> Status: **Running...**`
+                `> **Role:** ${role}\n> **Progress:** \`0 / ${targets.length}\``
               )
               .setColor(0x808080)
-          ],
-          components: interaction.message.components
+          ]
         });
-
         for (const member of targets) {
           const job = roleJobs.get(interaction.guildId);
           if (!job || job.stopped) break;
@@ -970,7 +1019,7 @@ client.on("interactionCreate", async interaction => {
                   new EmbedBuilder()
                     .setTitle("ROLE ALL — RUNNING")
                     .setDescription(
-                      `> **Role:** ${role}\n> **Progress:** \`${job.added} / ${job.total}\`\n> Status: **Running...**`
+                      `> **Role:** ${role}\n> **Progress:** \`${job.added} / ${job.total}\``
                     )
                     .setColor(0x808080)
                 ]
@@ -979,9 +1028,7 @@ client.on("interactionCreate", async interaction => {
           }
           await new Promise(r => setTimeout(r, 1200));
         }
-
         const finalJob = roleJobs.get(interaction.guildId);
-        // If Stop was pressed, panel was already deleted — skip edit
         if (finalJob && !finalJob.stopped) {
           await interaction.message
             .edit({
@@ -989,7 +1036,7 @@ client.on("interactionCreate", async interaction => {
                 new EmbedBuilder()
                   .setTitle("ROLE ALL — DONE")
                   .setDescription(
-                    `> **Role:** ${role}\n> **Added:** \`${finalJob.added || 0} / ${finalJob.total || 0}\``
+                    `> **Role:** ${role}\n> **Added:** \`${finalJob.added} / ${finalJob.total}\``
                   )
                   .setColor(0x808080)
               ],
@@ -1003,123 +1050,104 @@ client.on("interactionCreate", async interaction => {
 
       if (id.startsWith("roleall_stop_")) {
         if (
-          !interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
+          !interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)
         ) {
           await interaction.reply({
-            content: "❌ Administrator only.",
+            content: "❌ Manage Roles required.",
             ephemeral: true
           });
           return;
         }
         const job = roleJobs.get(interaction.guildId);
-        if (job && job.running) {
-          job.stopped = true;
-          // Delete the panel message
-          await interaction.message.delete().catch(() => {});
-          await interaction.reply({
-            content: "🛑 Stopped and panel deleted.",
-            ephemeral: true
-          });
-        } else {
-          // No job — still delete panel if they click Stop
-          await interaction.message.delete().catch(() => {});
-          await interaction.reply({
-            content: "🗑️ Panel deleted.",
-            ephemeral: true
-          });
-        }
+        if (job && job.running) job.stopped = true;
+        await interaction.message.delete().catch(() => {});
+        await interaction.reply({
+          content: "🛑 Stopped — panel deleted.",
+          ephemeral: true
+        });
         return;
       }
-    }
 
-    // Guess start button
-    if (interaction.isButton() && interaction.customId === "guess_start") {
-      const game = games.get(interaction.channelId);
-      if (!game) {
-        await interaction.reply({
-          content: "❌ No active guessing game.",
-          ephemeral: true
-        });
-        return;
-      }
-      const isHost = interaction.user.id === game.hostId;
-      const canManage =
-        interaction.memberPermissions &&
-        (interaction.memberPermissions.has(PermissionFlagsBits.ManageNicknames) ||
-          interaction.memberPermissions.has(PermissionFlagsBits.ManageMessages));
-      if (!isHost && !canManage) {
-        await interaction.reply({
-          content: "❌ Only Host or staff can start.",
-          ephemeral: true
-        });
-        return;
-      }
-      if (game.active) {
-        await interaction.reply({
-          content: "⚠️ Already started.",
-          ephemeral: true
-        });
-        return;
-      }
-      game.active = true;
-      if (
-        interaction.guild &&
-        interaction.channel?.permissionOverwrites
-      ) {
+      if (id === "guess_start") {
+        const game = games.get(interaction.channelId);
+        if (!game) {
+          await interaction.reply({
+            content: "❌ No game.",
+            ephemeral: true
+          });
+          return;
+        }
+        const isHost = interaction.user.id === game.hostId;
+        const can =
+          interaction.memberPermissions?.has(
+            PermissionFlagsBits.ManageMessages
+          );
+        if (!isHost && !can) {
+          await interaction.reply({
+            content: "❌ Host or Manage Messages only.",
+            ephemeral: true
+          });
+          return;
+        }
+        if (game.active) {
+          await interaction.reply({
+            content: "⚠️ Already started.",
+            ephemeral: true
+          });
+          return;
+        }
+        game.active = true;
         try {
           await interaction.channel.permissionOverwrites.edit(
             interaction.guild.roles.everyone,
             { SendMessages: true }
           );
         } catch {}
+        await interaction.update({
+          embeds: [
+            new EmbedBuilder()
+              .setDescription(
+                "> 🔓 **UNLOCK!**\n> 🔢 **1 - 10000**\n> 💀 **TRY TO WIN**"
+              )
+              .setColor(0x808080)
+          ],
+          components: []
+        });
+        return;
       }
-      await interaction.update({
-        embeds: [
-          new EmbedBuilder()
-            .setDescription(
-              "> 🔓 **UNLOCK!**\n> 🔢 **1 - 10000**\n> 💀 **TRY TO WIN**"
-            )
-            .setColor(0x808080)
-        ],
-        components: []
-      });
-      return;
     }
   } catch (error) {
     console.error("❌ Interaction error:", error);
     if (!interaction.replied && !interaction.deferred) {
       await interaction
-        .reply({ content: "❌ An error occurred.", ephemeral: true })
+        .reply({ content: "❌ Error.", ephemeral: true })
         .catch(() => {});
     }
   }
 });
 
 // =========================
-// Anti-Nuke (2 creates in ~1s)
+// Anti-Nuke
 // =========================
 
 async function handleNukeCreate(guild, auditType) {
   if (!antiNukeEnabled.get(guild.id)) return;
-
   try {
     const logs = await guild.fetchAuditLogs({ limit: 1, type: auditType });
     const entry = logs.entries.first();
     if (!entry) return;
-
     const executor = entry.executor;
     if (
       !executor ||
       executor.id === OWNER_ID ||
       executor.id === client.user?.id
-    ) {
+    )
       return;
-    }
 
     const ignoreRoleId = antiNukeIgnoreRole.get(guild.id);
     if (ignoreRoleId) {
       const member = await guild.members.fetch(executor.id).catch(() => null);
-      if (member && member.roles.cache.has(ignoreRoleId)) return;
+      if (member?.roles.cache.has(ignoreRoleId)) return;
     }
 
     if (!recentNukeCreates.has(guild.id)) {
@@ -1127,45 +1155,38 @@ async function handleNukeCreate(guild, auditType) {
     }
     const guildMap = recentNukeCreates.get(guild.id);
     const now = Date.now();
-    const key = executor.id;
-    let data = guildMap.get(key) || { count: 0, first: now };
-    if (now - data.first > 1000) {
-      data = { count: 0, first: now };
-    }
+    let data = guildMap.get(executor.id) || { count: 0, first: now };
+    if (now - data.first > 1000) data = { count: 0, first: now };
     data.count++;
-    guildMap.set(key, data);
+    guildMap.set(executor.id, data);
 
     if (data.count >= 2) {
-      try {
-        const member = await guild.members.fetch(executor.id).catch(() => null);
-        if (member && member.bannable) {
-          await member.ban({
-            reason: "Anti-Nuke: mass channel/role/category create (2 in 1s)"
-          });
-          const logCh =
-            guild.systemChannel ||
-            guild.channels.cache.find(
-              c =>
-                c.isTextBased() &&
-                c.permissionsFor(guild.members.me)?.has(
-                  PermissionFlagsBits.SendMessages
-                )
-            );
-          if (logCh) {
-            await logCh
-              .send({
-                content: `🛡️ **Anti-Nuke** banned <@${executor.id}> for mass create (2+ in 1s).`
-              })
-              .catch(() => {});
-          }
+      const member = await guild.members.fetch(executor.id).catch(() => null);
+      if (member?.bannable) {
+        await member.ban({
+          reason: "Anti-Nuke: 2 creates in 1s"
+        });
+        const logCh =
+          guild.systemChannel ||
+          guild.channels.cache.find(
+            c =>
+              c.isTextBased() &&
+              c.permissionsFor(guild.members.me)?.has(
+                PermissionFlagsBits.SendMessages
+              )
+          );
+        if (logCh) {
+          await logCh
+            .send({
+              content: `🛡️ **Anti-Nuke** banned <@${executor.id}> (mass create).`
+            })
+            .catch(() => {});
         }
-      } catch (err) {
-        console.error("❌ Anti-Nuke ban failed:", err);
       }
-      guildMap.delete(key);
+      guildMap.delete(executor.id);
     }
   } catch (err) {
-    console.error("❌ Anti-Nuke error:", err.message);
+    console.error("❌ Anti-Nuke:", err.message);
   }
 }
 
@@ -1184,9 +1205,7 @@ client.on("roleCreate", async role => {
 
 client.on("messageCreate", async message => {
   try {
-    // =========================
-    // Anti-Raid: webhook spam (3 msgs in 2s → delete webhook)
-    // =========================
+    // Anti-Raid: webhook spam — 2 messages in 1.5s → delete webhook FAST
     if (
       message.webhookId &&
       message.guild &&
@@ -1195,37 +1214,33 @@ client.on("messageCreate", async message => {
       const wid = message.webhookId;
       const now = Date.now();
       let data = webhookSpamTracker.get(wid);
-
-      if (!data || now - data.first > 2000) {
-        data = { count: 0, first: now, channelId: message.channelId, guildId: message.guildId };
+      if (!data || now - data.first > 1500) {
+        data = { count: 0, first: now };
       }
-
       data.count++;
       webhookSpamTracker.set(wid, data);
 
-      if (data.count >= 3) {
+      if (data.count >= 2) {
+        webhookSpamTracker.delete(wid);
         try {
           const webhooks = await message.channel.fetchWebhooks();
           const hook = webhooks.get(wid);
           if (hook) {
-            await hook.delete("Anti-Raid: webhook spam (3 messages in 2 seconds)");
-            await message.channel
+            await hook.delete(
+              "Anti-Raid: webhook spam (2 msgs in 1.5s)"
+            );
+            message.channel
               .send({
-                content: `🛡️ **Anti-Raid** deleted a spam webhook (\`${hook.name}\`).`
+                content: `🛡️ **Anti-Raid** deleted spam webhook \`${hook.name}\`.`
               })
               .catch(() => {});
-            console.log(
-              `🛡️ Anti-Raid deleted webhook ${hook.name} (${wid}) in ${message.guild.name}`
-            );
           }
         } catch (err) {
-          console.error("❌ Failed to delete spam webhook:", err.message);
+          console.error("❌ Webhook delete:", err.message);
         }
-        webhookSpamTracker.delete(wid);
       }
     }
 
-    // Ignore bots (but webhook handling already ran above)
     if (message.author.bot) return;
 
     // Ping Warn
@@ -1240,39 +1255,49 @@ client.on("messageCreate", async message => {
           if (!member.roles.cache.has(roleId)) continue;
           const role = message.guild.roles.cache.get(roleId);
           if (!role) continue;
-          if (role.permissions.has(PermissionFlagsBits.MentionEveryone)) {
-            try {
-              await role.setPermissions(
-                role.permissions.remove(PermissionFlagsBits.MentionEveryone),
-                `PingWarn: ${message.author.tag}`
-              );
-              if (data.timeout) clearTimeout(data.timeout);
-              const timeout = setTimeout(async () => {
+          if (!role.permissions.has(PermissionFlagsBits.MentionEveryone))
+            continue;
+
+          try {
+            await role.setPermissions(
+              role.permissions.remove(PermissionFlagsBits.MentionEveryone),
+              `PingWarn: ${message.author.tag}`
+            );
+
+            if (data.timeout) clearTimeout(data.timeout);
+
+            // Only auto-restore if duration was set
+            if (data.durationMs) {
+              data.timeout = setTimeout(async () => {
                 try {
-                  const currentRole = message.guild.roles.cache.get(roleId);
-                  if (currentRole) {
-                    await currentRole.setPermissions(
-                      currentRole.permissions.add(
-                        PermissionFlagsBits.MentionEveryone
-                      ),
-                      "PingWarn: 10h passed"
+                  const r = message.guild.roles.cache.get(roleId);
+                  if (r) {
+                    await r.setPermissions(
+                      r.permissions.add(PermissionFlagsBits.MentionEveryone),
+                      "PingWarn duration ended"
                     );
                   }
                 } catch {}
-                const current = pingWarnRoles.get(roleId);
-                if (current) current.timeout = null;
-              }, TEN_HOURS);
-              data.timeout = timeout;
-              pingWarnRoles.set(roleId, data);
-              await message.channel
-                .send({
-                  content:
-                    `⚠️ **Ping Warn**\nRole **${role.name}** lost ping for **10 hours** because <@${message.author.id}> mass pinged.`,
-                  allowedMentions: { users: [message.author.id] }
-                })
-                .catch(() => {});
-            } catch {}
-          }
+                const cur = pingWarnRoles.get(roleId);
+                if (cur) cur.timeout = null;
+              }, data.durationMs);
+            } else {
+              data.timeout = null;
+            }
+            pingWarnRoles.set(roleId, data);
+
+            await message.channel
+              .send({
+                content:
+                  `⚠️ **Ping Warn** — **${role.name}** lost @everyone/@here` +
+                  (data.durationMs
+                    ? ` for **${formatDuration(data.durationMs)}**.`
+                    : ` **permanently** (until /pingwarn OFF).`) +
+                  `\nTriggered by <@${message.author.id}>.`,
+                allowedMentions: { users: [message.author.id] }
+              })
+              .catch(() => {});
+          } catch {}
           break;
         }
       }
@@ -1280,7 +1305,7 @@ client.on("messageCreate", async message => {
 
     // Guess game
     const game = games.get(message.channelId);
-    if (game && game.active) {
+    if (game?.active) {
       const guess = Number(message.content.trim());
       if (Number.isInteger(guess) && guess >= 1 && guess <= 10000) {
         if (guess === game.answer) {
@@ -1293,43 +1318,32 @@ client.on("messageCreate", async message => {
                 .setColor(0x808080)
             ]
           });
-          if (message.guild && message.channel.permissionOverwrites) {
-            try {
-              await message.channel.permissionOverwrites.edit(
-                message.guild.roles.everyone,
-                { SendMessages: false }
-              );
-            } catch {}
-          }
+          try {
+            await message.channel.permissionOverwrites.edit(
+              message.guild.roles.everyone,
+              { SendMessages: false }
+            );
+          } catch {}
           games.delete(message.channelId);
         }
-        return;
       }
     }
   } catch (error) {
-    console.error("❌ Message handler error:", error);
+    console.error("❌ Message error:", error);
   }
 });
 
 // =========================
-// Errors
+// Errors + Login
 // =========================
 
-client.on("error", error => console.error("❌ Discord client error:", error));
-client.on("warn", warning => console.warn("⚠️ Discord warning:", warning));
-process.on("unhandledRejection", error =>
-  console.error("❌ Unhandled promise rejection:", error)
-);
-process.on("uncaughtException", error =>
-  console.error("❌ Uncaught exception:", error)
-);
-
-// =========================
-// Login
-// =========================
+client.on("error", e => console.error("❌ Client:", e));
+client.on("warn", w => console.warn("⚠️", w));
+process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
+process.on("uncaughtException", e => console.error("❌ Exception:", e));
 
 console.log("🔑 Logging into Discord...");
-client.login(TOKEN).catch(error => {
-  console.error("❌ Discord login failed:", error);
+client.login(TOKEN).catch(e => {
+  console.error("❌ Login failed:", e);
   process.exit(1);
 });
