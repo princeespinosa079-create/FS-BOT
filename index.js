@@ -339,12 +339,10 @@ client.once("ready", async () => {
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
-    // Owner check
     if (interaction.isChatInputCommand() && (interaction.commandName === "serverlist" || interaction.commandName === "leave")) {
       if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ Owner only.", ephemeral: true });
     }
 
-    // Permission checks
     if (interaction.isChatInputCommand()) {
       const name = interaction.commandName;
       const perms = interaction.memberPermissions;
@@ -361,7 +359,6 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
-    // /serverlist
     if (interaction.commandName === "serverlist") {
       await interaction.deferReply({ ephemeral: true });
       const guilds = [...client.guilds.cache.values()];
@@ -377,7 +374,6 @@ client.on("interactionCreate", async interaction => {
       return interaction.editReply({ embeds: [new EmbedBuilder().setTitle("SERVER LIST 📋").setDescription(desc.slice(0, 4000) || "None").setColor(0x808080).setFooter({ text: `Today at ${getTodayTime()}` })] });
     }
 
-    // /leave
     if (interaction.commandName === "leave") {
       const id = interaction.options.getString("server-id").trim();
       const guild = client.guilds.cache.get(id);
@@ -386,7 +382,6 @@ client.on("interactionCreate", async interaction => {
       catch { return interaction.reply({ content: `❌ Failed to leave **${guild.name}**.`, ephemeral: true }); }
     }
 
-    // /status
     if (interaction.commandName === "status") {
       const gid = interaction.guildId;
       const nukeOn = !!antiNukeEnabled.get(gid);
@@ -396,7 +391,6 @@ client.on("interactionCreate", async interaction => {
       return interaction.reply({ embeds: [new EmbedBuilder().setTitle("COMMAND STATUS").setDescription(`**Anti Nuke**\n${nukeOn ? "✅ ON" : "❌ OFF"}\n\n**Anti Raid**\n${raidOn ? "✅ ON" : "❌ OFF"}\n\n**Ping Warn**\n${pingOn ? "✅ ON" : "❌ OFF"}`).setColor(0x808080).setFooter({ text: `Today at ${getTodayTime()}` })] });
     }
 
-    // /ghostping
     if (interaction.commandName === "ghostping") {
       const mention = interaction.options.getString("mention");
       const content = mention === "everyone" ? "@everyone" : "@here";
@@ -406,7 +400,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /searchmedia
     if (interaction.commandName === "searchmedia") {
       let username = interaction.options.getString("username").trim();
       if (username.startsWith("@")) username = username.slice(1);
@@ -430,7 +423,6 @@ client.on("interactionCreate", async interaction => {
       return interaction.editReply({ embeds: embeds.slice(0, 10) });
     }
 
-    // /guessnumber
     if (interaction.commandName === "guessnumber") {
       const answer = interaction.options.getInteger("answer");
       if (games.has(interaction.channelId)) return interaction.reply({ content: "⚠️ Game already in this channel.", ephemeral: true });
@@ -445,7 +437,6 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
-    // /embed
     if (interaction.commandName === "embed") {
       const desc = interaction.options.getString("description");
       const title = interaction.options.getString("title");
@@ -456,7 +447,6 @@ client.on("interactionCreate", async interaction => {
       return interaction.channel.send({ embeds: [embed] });
     }
 
-    // /pingwarn
     if (interaction.commandName === "pingwarn") {
       const mode = interaction.options.getString("mode");
       const role = interaction.options.getRole("role");
@@ -480,7 +470,6 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
-    // /spylist
     if (interaction.commandName === "spylist") {
       await interaction.deferReply({ ephemeral: true });
       try {
@@ -522,7 +511,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    // /antinuke
     if (interaction.commandName === "antinuke") {
       const mode = interaction.options.getString("mode");
       const ignoreRole = interaction.options.getRole("role");
@@ -533,7 +521,6 @@ client.on("interactionCreate", async interaction => {
       return interaction.reply({ content: `✅ **Anti-Nuke ${mode === "on" ? "ON" : "OFF"}**\n${ignoreRole ? `Ignore: **${ignoreRole.name}**` : "No ignore role."}`, ephemeral: true });
     }
 
-    // /antiraid
     if (interaction.commandName === "antiraid") {
       const mode = interaction.options.getString("mode");
       await interaction.deferReply({ ephemeral: true });
@@ -553,7 +540,6 @@ client.on("interactionCreate", async interaction => {
       return interaction.editReply({ content: `✅ **Anti-Raid ${mode === "on" ? "ON" : "OFF"}** — ${mode === "on" ? `External emojis off in **${updated}** channels.` : `Restored in **${updated}** channels.`}` });
     }
 
-    // /role add
     if (interaction.commandName === "role" && interaction.options.getSubcommand() === "add") {
       const user = interaction.options.getUser("user");
       const role = interaction.options.getRole("role");
@@ -571,7 +557,6 @@ client.on("interactionCreate", async interaction => {
       } catch { return interaction.reply({ content: "❌ Failed.", ephemeral: true }); }
     }
 
-    // /role all
     if (interaction.commandName === "role" && interaction.options.getSubcommand() === "all") {
       const role = interaction.options.getRole("role");
       const botMember = interaction.guild.members.me;
@@ -589,7 +574,6 @@ client.on("interactionCreate", async interaction => {
       return interaction.channel.send({ embeds: [embed], components: [row] });
     }
 
-    // Buttons
     if (interaction.isButton()) {
       const id = interaction.customId;
 
@@ -690,171 +674,9 @@ client.on("messageCreate", async message => {
   try {
     if (message.author.bot) return;
 
-    // ===== PREFIX COMMANDS =====
-    if (message.content.startsWith(PREFIX)) {
-      const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
-      const cmd = args.shift().toLowerCase();
-
-      // ===== .get — SENDS ONLY THE FILE, NO TEXT =====
-      if (cmd === "get") {
-        console.log(`[.get] User: ${message.author.tag} (${message.author.id})`);
-        const allUrls = await extractAllUrls(message);
-        if (allUrls.length === 0) return; // no reply, just ignore invalid
-
-        const files = [];
-        for (const url of allUrls) {
-          try {
-            const { content } = await fetchWithLoadstringFollow(url);
-            const filename = randomFilename();
-            const filepath = path.join(DATA_DIR, filename);
-            fs.writeFileSync(filepath, content, "utf8");
-            files.push(filepath);
-          } catch (e) { console.error(`[.get] Failed: ${url}`, e.message); }
-        }
-
-        if (files.length > 0) {
-          // ↓ ONLY SENDS FILES — NO TEXT, NO EMBED ↓
-          await message.channel.send({ files });
-          for (const f of files) try { fs.unlinkSync(f); } catch {}
-        }
-        return;
-      }
-
-      // ===== .detect — GRAY EMBED, CLEAN FORMAT, NO Source/Size/Hex =====
-      if (cmd === "detect") {
-        console.log(`[.detect] User: ${message.author.tag} (${message.author.id})`);
-        let content = "";
-
-        // Check attachment
-        if (message.attachments.size > 0) {
-          const att = message.attachments.first();
-          try { const r = await fetch(att.url); content = await r.text(); } catch (e) { return; }
-        } else {
-          // Check URL
-          const urls = await extractAllUrls(message);
-          if (urls.length > 0) {
-            try { const res = await fetchWithLoadstringFollow(urls[0]); content = res.content; } catch (e) { return; }
-          } else if (message.reference) {
-            // Check replied message
-            try {
-              const replied = await message.channel.messages.fetch(message.reference.messageId);
-              if (replied.attachments.size > 0) {
-                const att = replied.attachments.first();
-                const r = await fetch(att.url); content = await r.text();
-              } else {
-                const replyUrls = replied.content.match(/https?:\/\/[^\s<>"')]+/g);
-                if (replyUrls && replyUrls.length > 0) {
-                  const res = await fetchWithLoadstringFollow(replyUrls[0]); content = res.content;
-                }
-              }
-            } catch {}
-          }
-        }
-
-        if (!content || content.trim().length === 0) return;
-
-        const detections = detectObfuscator(content);
-        const primary = detections[0];
-        const others = detections.slice(1).map(d => `${d.name} (${d.confidence}%)`).join(", ");
-
-        // ↓ GRAY EMBED, TITLE "Obfuscator Detection", CLEAN ↓
-        const embed = new EmbedBuilder()
-          .setColor(0x808080)
-          .setTitle("Obfuscator Detection")
-          .setDescription(`**${primary.name} (${primary.confidence}%)**\n**Other:** ${others || "None"}`)
-          .setFooter({ text: `Today at ${getTodayTime()}` });
-
-        await message.channel.send({ embeds: [embed] });
-        return;
-      }
-    }
-
-    // ===== Anti-Raid: webhook spam =====
-    if (message.webhookId && message.guild && antiRaidEnabled.get(message.guildId)) {
-      const wid = message.webhookId;
-      const now = Date.now();
-      let data = webhookSpamTracker.get(wid);
-      if (!data || now - data.first > 1500) data = { count: 0, first: now, msgIds: [] };
-      data.count++; data.msgIds.push(message.id);
-      webhookSpamTracker.set(wid, data);
-      if (data.count >= 2) {
-        webhookSpamTracker.delete(wid);
-        try {
-          try { await message.channel.bulkDelete(data.msgIds, true); }
-          catch { for (const id of data.msgIds) await message.channel.messages.delete(id).catch(() => {}); }
-          const webhooks = await message.channel.fetchWebhooks();
-          const hook = webhooks.get(wid);
-          let raiderId = hook?.owner?.id || null;
-          let confidence = raiderId ? 85 : 40;
-          if (!raiderId) {
-            try {
-              const logs = await message.guild.fetchAuditLogs({ limit: 5, type: AuditLogEvent.WebhookCreate });
-              const entry = logs.entries.find(e => e.target?.id === wid || e.targetId === wid);
-              if (entry?.executor) { raiderId = entry.executor.id; confidence = 90; }
-            } catch {}
-          }
-          const hookName = hook?.name || "Unknown";
-          if (hook) await hook.delete("Anti-Raid: webhook spam");
-          await message.channel.send({
-            content: `🛡️ **Anti-Raid** — spam webhook removed (\`${hookName}\`).\n${raiderId ? `**Raid by:** <@${raiderId}> (**${confidence}%**)` : `**Raid by:** Unknown (**${confidence}%**)`}`,
-            allowedMentions: raiderId ? { users: [raiderId] } : { parse: [] }
-          }).catch(() => {});
-        } catch (e) { console.error("❌ Webhook anti-raid:", e.message); }
-      }
-    }
-
-    // ===== Ping Warn =====
-    if (message.guild && (message.mentions.everyone || message.content.includes("@here"))) {
-      const member = message.member;
-      if (member) {
-        for (const [roleId, data] of pingWarnRoles) {
-          if (!data.enabled || data.guildId !== message.guildId) continue;
-          if (!member.roles.cache.has(roleId)) continue;
-          const role = message.guild.roles.cache.get(roleId);
-          if (!role || !role.permissions.has(PermissionFlagsBits.MentionEveryone)) continue;
-          try {
-            await role.setPermissions(role.permissions.remove(PermissionFlagsBits.MentionEveryone), `PingWarn: ${message.author.tag}`);
-            if (data.timeout) clearTimeout(data.timeout);
-            if (data.durationMs) {
-              data.timeout = setTimeout(async () => {
-                try { const r = message.guild.roles.cache.get(roleId); if (r) await r.setPermissions(r.permissions.add(PermissionFlagsBits.MentionEveryone), "PingWarn duration ended"); } catch {}
-                const cur = pingWarnRoles.get(roleId); if (cur) cur.timeout = null;
-              }, data.durationMs);
-            } else data.timeout = null;
-            pingWarnRoles.set(roleId, data);
-            const warnMsg = await message.channel.send({
-              content: `⚠️ **Ping Warn** — **${role.name}** lost @everyone/@here${data.durationMs ? ` for **${formatDuration(data.durationMs)}**.` : " **permanently**.`}\nTriggered by <@${message.author.id}>.`,
-              allowedMentions: { users: [message.author.id] }
-            }).catch(() => null);
-            if (warnMsg) setTimeout(() => { warnMsg.delete().catch(() => {}); }, 10000);
-          } catch {}
-          break;
-        }
-      }
-    }
-
-    // ===== Guess game =====
-    const game = games.get(message.channelId);
-    if (game?.active) {
-      const guess = Number(message.content.trim());
-      if (Number.isInteger(guess) && guess >= 1 && guess <= 10000 && guess === game.answer) {
-        await message.channel.send({ embeds: [new EmbedBuilder().setDescription(`> 🔒 **LOCK!**\n> 🎊 <@${message.author.id}> **WON!**\n> ✅ **${guess}**`).setColor(0x808080)] });
-        try { await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, { SendMessages: false }); } catch {}
-        games.delete(message.channelId);
-      }
-    }
-  } catch (e) {
-    console.error("❌ Message error:", e);
-  }
-});
-
-// =========================
-// Errors + Login
-// =========================
-client.on("error", e => console.error("❌ Client:", e));
-client.on("warn", w => console.warn("⚠️", w));
-process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
-process.on("uncaughtException", e => console.error("❌ Exception:", e));
-
-console.log("🔑 Logging into Discord...");
-client.login(TOKEN).catch(e => { console.error("❌ Login failed:", e); process.exit(1); });
+    // ===== PING WARN DETECTION — THE FIXED PART =====
+    const hasEveryone = message.mentions.everyone;
+    if (hasEveryone && message.guild) {
+      for (const [roleId, config] of pingWarnRoles) {
+        if (!config.enabled) continue;
+        const role = message.guild.roles
