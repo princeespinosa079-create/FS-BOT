@@ -21,6 +21,7 @@ const path = require("path");
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OWNER_ID = "1302080645987569694";
+const SCAN_ROLE_ID = "1509953862226935948";
 
 if (!TOKEN || !CLIENT_ID) {
   console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID");
@@ -83,7 +84,7 @@ const libraryFiles = library.files;
 saveLibrary();
 
 // =========================
-// FILTER — IGNORE IMAGES ONLY
+// HELPERS
 // =========================
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"];
 function isImageFile(name) {
@@ -91,6 +92,7 @@ function isImageFile(name) {
   return IMAGE_EXTENSIONS.includes(ext);
 }
 
+// PH Time
 function getTimePH() {
   const now = new Date();
   const ph = new Date(now.getTime() + 8 * 60 * 60 * 1000);
@@ -98,8 +100,7 @@ function getTimePH() {
 }
 
 // =========================
-// ✅ SMART SEARCH — PRIORITY SYSTEM
-// .find anti desync → 1st: anti_desync.txt, 2nd: work_desync.txt, 3rd: nothing
+// SMART SEARCH
 // =========================
 function searchFiles(query) {
   const q = query.toLowerCase().trim();
@@ -107,42 +108,28 @@ function searchFiles(query) {
 
   const qWords = q.split(/\s+/);
   const qNoSpecial = q.replace(/[^a-z0-9]/g, "");
-
-  const exactMatches = [];
-  const allWordsMatches = [];
-  const anyWordMatches = [];
+  const exactMatches = [], allWordsMatches = [], anyWordMatches = [];
 
   for (const file of libraryFiles) {
     const name = normalizeFilename(file.name);
     const nameNoSpecial = name.replace(/[^a-z0-9]/g, "");
 
-    // 1️⃣ EXACT MATCH — anti_desync.txt = "anti desync"
     if (name === q || nameNoSpecial === qNoSpecial || 
         name.startsWith(q + ".") || nameNoSpecial.startsWith(qNoSpecial + ".")) {
       exactMatches.push(file);
       continue;
     }
 
-    // 2️⃣ ALL WORDS MATCH — contains "anti" AND "desync"
     let allWords = true;
     for (const word of qWords) {
       if (!name.includes(word)) { allWords = false; break; }
     }
-    if (allWords && qWords.length > 1) {
-      allWordsMatches.push(file);
-      continue;
-    }
+    if (allWords && qWords.length > 1) { allWordsMatches.push(file); continue; }
 
-    // 3️⃣ ANY WORD MATCH — contains "anti" OR "desync"
     for (const word of qWords) {
-      if (name.includes(word)) {
-        anyWordMatches.push(file);
-        break;
-      }
+      if (name.includes(word)) { anyWordMatches.push(file); break; }
     }
   }
-
-  // Return in PRIORITY ORDER
   return [...exactMatches, ...allWordsMatches, ...anyWordMatches];
 }
 
@@ -151,7 +138,7 @@ function getFileById(id) {
 }
 
 // =========================
-// PAGINATION STATE
+// PAGINATION
 // =========================
 const searchSessions = new Map();
 
@@ -172,33 +159,20 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName("setchannel")
-    .setDescription("Set allowed channel for .find and .get commands")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
-    .addChannelOption(o => 
-      o.setName("channel")
-       .setDescription("Channel where .find and .get work")
-       .setRequired(true)
-    ),
+    .setDescription("Owner only: Set allowed channel for .find and .get"),
   new SlashCommandBuilder()
     .setName("scanchannel")
-    .setDescription("Scan channel — all messages + forwarded files")
+    .setDescription("Scan channel for files")
+    .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("embed")
+    .setDescription("Send a gray embed")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addChannelOption(o => 
-      o.setName("channel")
-       .setDescription("Channel to scan")
-       .setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName("serverlist")
-    .setDescription("Owner only: list all servers"),
-  new SlashCommandBuilder()
-    .setName("leave")
-    .setDescription("Owner only: leave a server")
-    .addStringOption(o => 
-      o.setName("server-id")
-       .setDescription("Server ID to leave")
-       .setRequired(true)
-    )
+    .addStringOption(o => o.setName("description").setDescription("Embed text").setRequired(true))
+    .addStringOption(o => o.setName("title").setDescription("Optional title").setRequired(false)),
+  new SlashCommandBuilder().setName("serverlist").setDescription("Owner only: list all servers"),
+  new SlashCommandBuilder().setName("leave").setDescription("Owner only: leave a server")
+    .addStringOption(o => o.setName("server-id").setDescription("Server ID").setRequired(true))
 ].map(c => c.toJSON());
 
 // =========================
@@ -224,8 +198,7 @@ async function scanChannel(channel, interaction = null) {
   if (interaction) await interaction.editReply({ content: `🔍 Scanning <#${channel.id}> — please wait...` });
 
   const foundFiles = [];
-  let before = null;
-  let scanned = 0;
+  let before = null, scanned = 0;
 
   while (true) {
     const options = { limit: 100 };
@@ -243,14 +216,10 @@ async function scanChannel(channel, interaction = null) {
         foundFiles.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
       }
       if (msg.messageSnapshots) {
-        const snapshots = Array.isArray(msg.messageSnapshots) 
-          ? msg.messageSnapshots 
-          : [...(msg.messageSnapshots.values?.() || [])];
+        const snapshots = Array.isArray(msg.messageSnapshots) ? msg.messageSnapshots : [...(msg.messageSnapshots.values?.() || [])];
         for (const snap of snapshots) {
           if (!snap?.attachments) continue;
-          const atts = typeof snap.attachments.values === "function" 
-            ? snap.attachments.values() 
-            : Array.isArray(snap.attachments) ? snap.attachments : [];
+          const atts = typeof snap.attachments.values === "function" ? snap.attachments.values() : Array.isArray(snap.attachments) ? snap.attachments : [];
           for (const a of atts) {
             const n = normalizeFilename(a.name);
             if (!n || isImageFile(a.name)) continue;
@@ -274,33 +243,30 @@ async function scanChannel(channel, interaction = null) {
       newCount++;
     }
   }
-
   libraryFiles.length = 0;
   libraryFiles.push(...[...unique.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)));
   saveLibrary();
-
-  console.log(`✅ Scan: +${newCount} new, total ${libraryFiles.length}`);
   return { added: newCount, total: libraryFiles.length, scanned };
 }
 
 // =========================
-// ✅ BUILD SEARCH PAGE — BACK (GRAY) / NEXT (GREEN) BUTTONS
+// ✅ 15 LINES PER PAGE — filename │ ID lines ONLY
 // =========================
 function buildSearchPage(userId, results, page = 1) {
-  const perPage = 25;
+  const perPage = 15; // ✅ EXACTLY 15 lines per page
   const totalPages = Math.ceil(results.length / perPage);
   const start = (page - 1) * perPage;
   const display = results.slice(start, start + perPage);
 
+  // ✅ Each line = `filename │ ID: abc123` — MAX 15 LINES
   const desc = display.map(f => `\`${f.name}\` │ ID: \`${f.id}\``).join("\n");
 
   const embed = new EmbedBuilder()
     .setTitle("Finder Source Results")
-    .setColor(0x808080) // GRAY
+    .setColor(0x808080)
     .setDescription(desc)
-    .setFooter({ text: `Page ${page}/${totalPages} • Today at ${getTimePH()}` });
+    .setFooter({ text: `Page ${page}/${totalPages} │ Today at ${getTimePH()}` });
 
-  // ✅ Buttons: Back = GRAY (Secondary), Next = GREEN (Success)
   const components = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`search_back_${userId}_${page}`)
@@ -313,45 +279,44 @@ function buildSearchPage(userId, results, page = 1) {
       .setStyle(ButtonStyle.Success) // GREEN
       .setDisabled(page >= totalPages)
   );
-
   return { embeds: [embed], components: [components] };
 }
 
 // =========================
-// INTERACTIONS — SLASH + BUTTONS
+// INTERACTIONS
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
-    // ✅ BUTTON HANDLER — Back/Next pagination
     if (interaction.isButton()) {
       const userId = interaction.user.id;
       if (interaction.customId.startsWith("search_")) {
         const parts = interaction.customId.split("_");
-        const direction = parts[1];
-        const targetUserId = parts[2];
-        let page = parseInt(parts[3]);
-
-        if (targetUserId !== userId) 
-          return interaction.reply({ content: "❌ Not your search, idiot.", ephemeral: true });
-
+        const direction = parts[1], targetUserId = parts[2], page = parseInt(parts[3]);
+        if (targetUserId !== userId) return interaction.reply({ content: "❌ Not your search, idiot.", ephemeral: true });
         const session = searchSessions.get(userId);
-        if (!session) 
-          return interaction.reply({ content: "❌ Search expired. Use .find again.", ephemeral: true });
-
-        page = direction === "next" ? page + 1 : page - 1;
-        const reply = buildSearchPage(userId, session.results, page);
-        session.page = page;
-        searchSessions.set(userId, session);
-        await interaction.update(reply);
+        if (!session) return interaction.reply({ content: "❌ Search expired. Use .find again.", ephemeral: true });
+        const newPage = direction === "next" ? page + 1 : page - 1;
+        searchSessions.set(userId, { ...session, page: newPage });
+        await interaction.update(buildSearchPage(userId, session.results, newPage));
       }
       return;
     }
 
     if (!interaction.isChatInputCommand()) return;
 
-    // Owner only
-    if ((interaction.commandName === "leave" || interaction.commandName === "serverlist") && interaction.user.id !== OWNER_ID)
-      return interaction.reply({ content: "❌ Owner only.", ephemeral: true });
+    const ownerOnly = ["leave", "serverlist", "setchannel"];
+    if (ownerOnly.includes(interaction.commandName) && interaction.user.id !== OWNER_ID)
+      return interaction.reply({ content: "❌ Owner only, idiot.", ephemeral: true });
+
+    if (interaction.commandName === "scanchannel") {
+      const isOwner = interaction.user.id === OWNER_ID;
+      const hasRole = interaction.member?.roles?.cache?.has(SCAN_ROLE_ID);
+      if (!isOwner && !hasRole) return interaction.reply({ content: "❌ You need the scan role, idiot.", ephemeral: true });
+      const channel = interaction.options.getChannel("channel");
+      await interaction.deferReply();
+      const r = await scanChannel(channel);
+      return interaction.editReply({ content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${r.scanned}\n**Added:** ${r.added}\n**Total:** ${r.total}` });
+    }
 
     if (interaction.commandName === "serverlist") {
       const list = [...client.guilds.cache.values()].map((g, i) => `${i+1}. **${g.name}** \`${g.id}\``).join("\n");
@@ -365,87 +330,60 @@ client.on("interactionCreate", async interaction => {
       catch { return interaction.reply({ content: "❌ Failed to leave.", ephemeral: true }); }
     }
 
-    // /setchannel
     if (interaction.commandName === "setchannel") {
-      const channel = interaction.options.getChannel("channel");
-      config.allowedChannelId = channel.id;
+      config.allowedChannelId = interaction.channelId;
       saveConfig();
-      return interaction.reply({ 
-        content: `✅ **Channel Set!**\n🔗 Allowed: <#${channel.id}>\n• \`.find <name>\` — search\n• \`.get <id>\` — get file`,
-        ephemeral: false 
-      });
+      return interaction.reply({ content: `✅ **Channel Set!**\n🔗 Allowed: <#${interaction.channelId}>`, ephemeral: false });
     }
 
-    // /scanchannel
-    if (interaction.commandName === "scanchannel") {
-      const channel = interaction.options.getChannel("channel");
-      await interaction.deferReply();
-      const result = await scanChannel(channel, interaction);
-      return interaction.editReply({
-        content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${result.scanned} messages\n**Added:** ${result.added} files\n**Total:** ${result.total}\nℹ️ Images ignored, .lua scanned`
-      });
+    if (interaction.commandName === "embed") {
+      const desc = interaction.options.getString("description");
+      const title = interaction.options.getString("title");
+      const embed = new EmbedBuilder().setColor(0x808080).setDescription(desc);
+      if (title) embed.setTitle(title);
+      embed.setFooter({ text: `Today at ${getTimePH()}` });
+      await interaction.deferReply({ ephemeral: true });
+      await interaction.deleteReply();
+      return interaction.channel.send({ embeds: [embed] });
     }
   } catch (e) { console.error("❌ Interaction error:", e); }
 });
 
 // =========================
-// ✅ PREFIX COMMANDS — .find + .get
+// PREFIX COMMANDS
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
-
   const isOwner = message.author.id === OWNER_ID;
   const allowed = isOwner || !config.allowedChannelId || message.channel.id === config.allowedChannelId;
 
-  // ========== .find <query> — SMART SEARCH + BUTTONS ==========
   if (message.content.startsWith(".find ")) {
-    if (!allowed) return message.reply(`❌ Use .find in <#${config.allowedChannelId}>`);
-    
+    if (!allowed) return message.reply("❌ Not here, idiot.");
     const query = message.content.slice(6).trim();
-    
-    if (!query) {
-      return message.reply("❌ No match file for that, idiot.");
-    }
-
+    if (!query) return message.reply("❌ No match file for that, idiot.");
     const results = searchFiles(query);
-    
-    if (results.length === 0) {
-      return message.reply("❌ No match file for that, idiot.");
-    }
-
-    // Save session for pagination
+    if (results.length === 0) return message.reply("❌ No match file for that, idiot.");
     searchSessions.set(message.author.id, { results, page: 1 });
-
-    const reply = buildSearchPage(message.author.id, results, 1);
-    return message.reply(reply);
+    return message.reply(buildSearchPage(message.author.id, results, 1));
   }
 
-  // ========== .get <id> — MENTION USER + "Here is the file twin!" ==========
-  if (message.content.startsWith(".get ")) {
-    if (!allowed) return message.reply(`❌ Use .get in <#${config.allowedChannelId}>`);
-    
-    const id = message.content.slice(5).trim();
-    if (!id) return message.reply("❌ No match file for that, idiot.");
-
+  if (message.content.startsWith(".get")) {
+    if (!allowed) return message.reply("❌ Not here, idiot.");
+    const id = message.content.slice(4).trim();
+    if (!id) return message.reply("❌ Put ID of File, idiot.");
     const file = getFileById(id);
     if (!file) return message.reply("❌ No match file for that, idiot.");
-
-    // ✅ @user Here is the file twin! + sends the file
     await message.channel.send({
       content: `<@${message.author.id}> Here is the file twin!`,
-      files: [{
-        attachment: file.url,
-        name: file.name
-      }]
+      files: [{ attachment: file.url, name: file.name }]
     });
   }
 });
 
 // =========================
-// LOGIN & ERROR
+// LOGIN
 // =========================
 client.on("error", e => console.error("❌ Client error:", e));
 process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
-
 console.log("🔑 Logging in...");
 client.login(TOKEN).catch(e => { console.error("❌ Login failed:", e); process.exit(1); });
