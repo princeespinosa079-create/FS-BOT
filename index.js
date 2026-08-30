@@ -240,44 +240,48 @@ function activeEmoji(active) { return active === true ? "🟢" : active === fals
 function activeText(active) { return active === true ? "Found" : active === false ? "Not found" : "Unknown"; }
 
 // =========================
-// Slash Commands
+// Slash Commands — ALL DESCRIPTIONS ARE STRINGS ✅
 // =========================
 const commands = [
-  new SlashCommandBuilder().setName("guessnumber").setDescription("Number guessing game")
+  new SlashCommandBuilder().setName("guessnumber").setDescription("Create a number guessing game")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString())
-    .addIntegerOption(o => o.setName("answer").setDescription("Answer 1-10000").setRequired(true).setMinValue(1).setMaxValue(10000)),
-  new SlashCommandBuilder().setName("embed").setDescription("Send gray embed")
+    .addIntegerOption(o => o.setName("answer").setDescription("Secret answer between 1 and 10000").setRequired(true).setMinValue(1).setMaxValue(10000)),
+  new SlashCommandBuilder().setName("embed").setDescription("Send a custom gray embed")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString())
-    .addStringOption(o => o.setName("description").setRequired(true))
-    .addStringOption(o => o.setName("title")),
-  new SlashCommandBuilder().setName("status").setDescription("Show bot status"),
-  new SlashCommandBuilder().setName("ghostping").setDescription("Ghost ping")
+    .addStringOption(o => o.setName("description").setDescription("Embed description text").setRequired(true))
+    .addStringOption(o => o.setName("title").setDescription("Embed title")),
+  new SlashCommandBuilder().setName("status").setDescription("Show Anti-Nuke, Anti-Raid and Ping Warn status"),
+  new SlashCommandBuilder().setName("ghostping").setDescription("Send and delete an everyone/here ping")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString())
-    .addStringOption(o => o.setName("mention").setRequired(true).addChoices({ name: "@everyone", value: "everyone" }, { name: "@here", value: "here" })),
-  new SlashCommandBuilder().setName("searchmedia").setDescription("Search username across platforms")
-    .addStringOption(o => o.setName("username").setRequired(true))
-    .addStringOption(o => o.setName("apps").setRequired(true).addChoices({ name: "All", value: "all" }, ...Object.keys(MEDIA_PLATFORMS).map(k => ({ name: MEDIA_PLATFORMS[k].name, value: k })))),
-  new SlashCommandBuilder().setName("pingwarn").setDescription("Ping warn config")
+    .addStringOption(o => o.setName("mention").setDescription("Who to ping").setRequired(true).addChoices({ name: "@everyone", value: "everyone" }, { name: "@here", value: "here" })),
+  new SlashCommandBuilder().setName("searchmedia").setDescription("Search a username across social media platforms")
+    .addStringOption(o => o.setName("username").setDescription("Username to search for").setRequired(true))
+    .addStringOption(o => o.setName("apps").setDescription("Which platform or all").setRequired(true).addChoices({ name: "All Platforms", value: "all" }, ...Object.keys(MEDIA_PLATFORMS).map(k => ({ name: MEDIA_PLATFORMS[k].name, value: k })))),
+  new SlashCommandBuilder().setName("pingwarn").setDescription("Configure ping warn auto-mute")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles.toString())
-    .addStringOption(o => o.setName("mode").setRequired(true).addChoices({ name: "ON", value: "on" }, { name: "OFF", value: "off" }))
-    .addRoleOption(o => o.setName("role").setRequired(true))
-    .addStringOption(o => o.setName("duration")),
-  new SlashCommandBuilder().setName("spylist").setDescription("List spies/alts")
+    .addStringOption(o => o.setName("mode").setDescription("Turn on or off").setRequired(true).addChoices({ name: "Enable", value: "on" }, { name: "Disable", value: "off" }))
+    .addRoleOption(o => o.setName("role").setDescription("Role to watch for everyone pings").setRequired(true))
+    .addStringOption(o => o.setName("duration").setDescription("How long to remove ping permission (e.g. 1h, 30m)")),
+  new SlashCommandBuilder().setName("spylist").setDescription("List potential spies, alts and new accounts")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString()),
-  new SlashCommandBuilder().setName("antinuke").setDescription("Anti-Nuke toggle")
+  new SlashCommandBuilder().setName("antinuke").setDescription("Toggle Anti-Nuke protection")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString())
-    .addStringOption(o => o.setName("mode").setRequired(true).addChoices({ name: "ON", value: "on" }, { name: "OFF", value: "off" }))
-    .addRoleOption(o => o.setName("role")),
-  new SlashCommandBuilder().setName("antiraid").setDescription("Anti-Raid toggle")
+    .addStringOption(o => o.setName("mode").setDescription("Turn on or off").setRequired(true).addChoices({ name: "Enable", value: "on" }, { name: "Disable", value: "off" }))
+    .addRoleOption(o => o.setName("ignore-role").setDescription("Role to exclude from protection")),
+  new SlashCommandBuilder().setName("antiraid").setDescription("Toggle Anti-Raid protection")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString())
-    .addStringOption(o => o.setName("mode").setRequired(true).addChoices({ name: "ON", value: "on" }, { name: "OFF", value: "off" })),
-  new SlashCommandBuilder().setName("role").setDescription("Manage roles")
+    .addStringOption(o => o.setName("mode").setDescription("Turn on or off").setRequired(true).addChoices({ name: "Enable", value: "on" }, { name: "Disable", value: "off" })),
+  new SlashCommandBuilder().setName("role").setDescription("Manage roles for users or everyone")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles.toString())
-    .addSubcommand(sub => sub.setName("add").addUserOption(o => o.setName("user").setRequired(true)).addRoleOption(o => o.setName("role").setRequired(true)).addStringOption(o => o.setName("duration")))
-    .addSubcommand(sub => sub.setName("all").addRoleOption(o => o.setName("role").setRequired(true))),
-  new SlashCommandBuilder().setName("serverlist").setDescription("List all servers (Owner only)"),
-  new SlashCommandBuilder().setName("leave").setDescription("Leave server (Owner only)")
-    .addStringOption(o => o.setName("server-id").setRequired(true))
+    .addSubcommand(sub => sub.setName("add").setDescription("Add a role to a specific user")
+      .addUserOption(o => o.setName("user").setDescription("User to give role to").setRequired(true))
+      .addRoleOption(o => o.setName("role").setDescription("Role to add").setRequired(true))
+      .addStringOption(o => o.setName("duration").setDescription("Auto-remove after time (e.g. 1h)")))
+    .addSubcommand(sub => sub.setName("all").setDescription("Add a role to every member in the server")
+      .addRoleOption(o => o.setName("role").setDescription("Role to give everyone").setRequired(true))),
+  new SlashCommandBuilder().setName("serverlist").setDescription("List all servers the bot is in (Owner only)"),
+  new SlashCommandBuilder().setName("leave").setDescription("Make the bot leave a server (Owner only)")
+    .addStringOption(o => o.setName("server-id").setDescription("ID of the server to leave").setRequired(true))
 ].map(c => c.toJSON());
 
 // =========================
@@ -287,8 +291,8 @@ async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   try {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    console.log("✅ Commands registered");
-  } catch (e) { console.error("❌ Command register error:", e); }
+    console.log("✅ Commands registered successfully");
+  } catch (e) { console.error("❌ Command registration error:", e); }
 }
 
 client.once("ready", async () => {
@@ -303,7 +307,7 @@ client.on("interactionCreate", async interaction => {
   try {
     if (interaction.isChatInputCommand()) {
       if ((interaction.commandName === "serverlist" || interaction.commandName === "leave") && interaction.user.id !== OWNER_ID)
-        return interaction.reply({ content: "❌ Owner only.", ephemeral: true });
+        return interaction.reply({ content: "❌ This command is for the bot owner only.", ephemeral: true });
 
       if (interaction.commandName === "serverlist") {
         await interaction.deferReply({ ephemeral: true });
@@ -323,9 +327,9 @@ client.on("interactionCreate", async interaction => {
 
       if (interaction.commandName === "leave") {
         const guild = client.guilds.cache.get(interaction.options.getString("server-id"));
-        if (!guild) return interaction.reply({ content: "❌ Not found.", ephemeral: true });
-        try { await guild.leave(); return interaction.reply({ content: `✅ Left **${guild.name}**.`, ephemeral: true }); }
-        catch { return interaction.reply({ content: "❌ Failed.", ephemeral: true }); }
+        if (!guild) return interaction.reply({ content: "❌ Server not found.", ephemeral: true });
+        try { await guild.leave(); return interaction.reply({ content: `✅ Successfully left **${guild.name}**.`, ephemeral: true }); }
+        catch { return interaction.reply({ content: "❌ Failed to leave server.", ephemeral: true }); }
       }
 
       if (interaction.commandName === "status") {
@@ -338,7 +342,7 @@ client.on("interactionCreate", async interaction => {
 
       if (interaction.commandName === "ghostping") {
         const content = interaction.options.getString("mention") === "everyone" ? "@everyone" : "@here";
-        await interaction.reply({ content: "✅ Sent.", ephemeral: true });
+        await interaction.reply({ content: "✅ Ghost ping sent.", ephemeral: true });
         const msg = await interaction.channel.send({ content, allowedMentions: { parse: ["everyone"] } });
         setTimeout(() => msg.delete().catch(() => {}), 500);
         return;
@@ -355,7 +359,7 @@ client.on("interactionCreate", async interaction => {
           const chunk = results.slice(i, i + 6);
           const embed = new EmbedBuilder().setTitle(`🔍 MEDIA SEARCH — @${username}`).setColor(0x808080);
           for (const r of chunk) {
-            embed.addFields({ name: `${r.platform.emoji} ${r.platform.name}`, value: `**Active:** ${activeEmoji(r.active)} ${activeText(r.active)}\n[Profile](${r.profileUrl})`, inline: true });
+            embed.addFields({ name: `${r.platform.emoji} ${r.platform.name}`, value: `**Status:** ${activeEmoji(r.active)} ${activeText(r.active)}\n[Open Profile](${r.profileUrl})`, inline: true });
           }
           embeds.push(embed);
         }
@@ -364,21 +368,22 @@ client.on("interactionCreate", async interaction => {
 
       if (interaction.commandName === "guessnumber") {
         const answer = interaction.options.getInteger("answer");
-        if (games.has(interaction.channelId)) return interaction.reply({ content: "⚠️ Game exists.", ephemeral: true });
+        if (games.has(interaction.channelId)) return interaction.reply({ content: "⚠️ A game is already active in this channel.", ephemeral: true });
         games.set(interaction.channelId, { answer, hostId: interaction.user.id, active: false });
-        try { await interaction.user.send({ embeds: [new EmbedBuilder().setDescription(`🔢 Answer: \`${answer}\``).setColor(0x808080)] }); }
-        catch { games.delete(interaction.channelId); return interaction.reply({ content: "❌ Enable DMs.", ephemeral: true }); }
+        try { await interaction.user.send({ embeds: [new EmbedBuilder().setDescription(`🔢 The secret answer is: \`${answer}\``).setColor(0x808080)] }); }
+        catch { games.delete(interaction.channelId); return interaction.reply({ content: "❌ Please enable DMs first so I can send you the answer!", ephemeral: true }); }
         await interaction.deferReply({ ephemeral: true });
         await interaction.deleteReply();
         return interaction.channel.send({
-          embeds: [new EmbedBuilder().setTitle("GAME EVENT 🧧").setDescription(`Host: <@${interaction.user.id}>\nClick Start to begin.`).setColor(0x808080)],
-          components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("guess_start").setLabel("Start").setStyle(ButtonStyle.Success))]
+          embeds: [new EmbedBuilder().setTitle("NUMBER GUESS GAME 🎮").setDescription(`> **Hosted by:** <@${interaction.user.id}>\n> Click **Start** to unlock the channel and begin guessing!`).setColor(0x808080)],
+          components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("guess_start").setLabel("Start Game").setStyle(ButtonStyle.Success))]
         });
       }
 
       if (interaction.commandName === "embed") {
-        const embed = new EmbedBuilder().setDescription(interaction.options.getString("description")).setColor(0x808080);
+        const desc = interaction.options.getString("description");
         const title = interaction.options.getString("title");
+        const embed = new EmbedBuilder().setDescription(desc).setColor(0x808080);
         if (title) embed.setTitle(title);
         await interaction.deferReply({ ephemeral: true });
         await interaction.deleteReply();
@@ -392,11 +397,11 @@ client.on("interactionCreate", async interaction => {
         if (mode === "on") {
           pingWarnRoles.set(role.id, { enabled: true, timeout: null, guildId: interaction.guildId, durationMs });
           saveData();
-          return interaction.reply({ content: `✅ Ping Warn ON for **${role.name}**. Duration: **${formatDuration(durationMs)}**.`, ephemeral: true });
+          return interaction.reply({ content: `✅ Ping Warn **ENABLED** for **${role.name}**.\nDuration: **${formatDuration(durationMs)}**.`, ephemeral: true });
         } else {
           pingWarnRoles.delete(role.id);
           saveData();
-          return interaction.reply({ content: `✅ Ping Warn OFF for **${role.name}**.`, ephemeral: true });
+          return interaction.reply({ content: `✅ Ping Warn **DISABLED** for **${role.name}**.`, ephemeral: true });
         }
       }
 
@@ -412,28 +417,29 @@ client.on("interactionCreate", async interaction => {
           if (m.user.createdTimestamp >= twentyDaysAgo) newAccs.push(m);
         }
         newAccs.sort((a, b) => b.user.createdTimestamp - a.user.createdTimestamp);
-        const e1 = new EmbedBuilder().setTitle(`SPY/ALT LIST — ${spies.length}`).setColor(0x808080);
-        e1.setDescription(spies.length ? spies.map((m, i) => `${i + 1}. <@${m.id}> \`${m.user.tag}\``).join("\n") : "None found.");
-        const e2 = new EmbedBuilder().setTitle(`NEW ACCOUNT LIST — ${newAccs.length}`).setColor(0x808080);
-        e2.setDescription(newAccs.length ? newAccs.map((m, i) => `${i + 1}. <@${m.id}> \`${m.user.tag}\``).join("\n") : "None found.");
+        const e1 = new EmbedBuilder().setTitle(`SPY / ALT LIST — ${spies.length} found`).setColor(0x808080);
+        e1.setDescription(spies.length ? spies.map((m, i) => `${i + 1}. <@${m.id}> — \`${m.user.tag}\``).join("\n") : "No members with 'alt' or 'spy' in name found.");
+        const e2 = new EmbedBuilder().setTitle(`NEW ACCOUNT LIST — ${newAccs.length} found`).setColor(0x808080);
+        e2.setDescription(newAccs.length ? newAccs.map((m, i) => `${i + 1}. <@${m.id}> — \`${m.user.tag}\``).join("\n") : "No accounts created in the last 20 days.");
         await interaction.channel.send({ embeds: [e1, e2] });
-        return interaction.editReply({ content: "✅ Sent.", ephemeral: true });
+        return interaction.editReply({ content: "✅ List sent to channel.", ephemeral: true });
       }
 
       if (interaction.commandName === "antinuke") {
         const mode = interaction.options.getString("mode");
-        const role = interaction.options.getRole("role");
+        const ignoreRole = interaction.options.getRole("ignore-role");
         antiNukeEnabled.set(interaction.guildId, mode === "on");
-        if (role) antiNukeIgnoreRole.set(interaction.guildId, role.id);
+        if (ignoreRole) antiNukeIgnoreRole.set(interaction.guildId, ignoreRole.id);
+        else antiNukeIgnoreRole.delete(interaction.guildId);
         saveData();
-        return interaction.reply({ content: `✅ Anti-Nuke ${mode === "on" ? "ON" : "OFF"}`, ephemeral: true });
+        return interaction.reply({ content: `✅ Anti-Nuke **${mode === "on" ? "ENABLED" : "DISABLED"}**\n${ignoreRole ? `Ignored role: **${ignoreRole.name}**` : "No ignored role set."}`, ephemeral: true });
       }
 
       if (interaction.commandName === "antiraid") {
         const mode = interaction.options.getString("mode");
         antiRaidEnabled.set(interaction.guildId, mode === "on");
         saveData();
-        return interaction.reply({ content: `✅ Anti-Raid ${mode === "on" ? "ON" : "OFF"}`, ephemeral: true });
+        return interaction.reply({ content: `✅ Anti-Raid **${mode === "on" ? "ENABLED" : "DISABLED"}**`, ephemeral: true });
       }
 
       if (interaction.commandName === "role") {
@@ -443,18 +449,19 @@ client.on("interactionCreate", async interaction => {
           const user = interaction.options.getUser("user");
           const member = await interaction.guild.members.fetch(user.id);
           const durationMs = parseDuration(interaction.options.getString("duration"));
-          await member.roles.add(role);
+          await member.roles.add(role, "Role add command");
           if (durationMs) setTimeout(() => member.roles.remove(role).catch(() => {}), durationMs);
-          return interaction.reply({ content: `✅ Added **${role.name}** to <@${user.id}>.`, ephemeral: true });
+          return interaction.reply({ content: `✅ Successfully added **${role.name}** to <@${user.id}>${durationMs ? ` — auto-removes in ${formatDuration(durationMs)}` : ""}.`, ephemeral: true });
         }
         if (sub === "all") {
           const total = interaction.guild.members.cache.filter(m => !m.user.bot && !m.roles.cache.has(role.id)).size;
           return interaction.reply({
-            embeds: [new EmbedBuilder().setTitle("ROLE ALL PANEL").setDescription(`Role: ${role}\nMembers: ${total}`).setColor(0x808080)],
+            embeds: [new EmbedBuilder().setTitle("ROLE ALL PANEL").setDescription(`> **Role:** ${role}\n> **Members to process:** \`${total}\`\n> Click Start to begin.`).setColor(0x808080)],
             components: [new ActionRowBuilder().addComponents(
               new ButtonBuilder().setCustomId(`roleall_start_${role.id}`).setLabel("Start").setStyle(ButtonStyle.Success),
               new ButtonBuilder().setCustomId(`roleall_stop`).setLabel("Stop").setStyle(ButtonStyle.Danger)
-            )]
+            )],
+            ephemeral: true
           });
         }
       }
@@ -466,7 +473,7 @@ client.on("interactionCreate", async interaction => {
         if (!game || game.active) return;
         game.active = true;
         try { await interaction.channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: true }); } catch {}
-        return interaction.update({ embeds: [new EmbedBuilder().setDescription("> 🔓 UNLOCKED! Guess 1-10000").setColor(0x808080)], components: [] });
+        return interaction.update({ embeds: [new EmbedBuilder().setDescription("> 🔓 **CHANNEL UNLOCKED!** Start guessing numbers between **1 and 10000**").setColor(0x808080)], components: [] });
       }
       if (interaction.customId.startsWith("roleall_start_")) {
         const roleId = interaction.customId.split("_")[2];
@@ -478,32 +485,32 @@ client.on("interactionCreate", async interaction => {
         for (const m of targets) {
           const job = roleJobs.get(interaction.guildId);
           if (!job || job.stopped) break;
-          try { await m.roles.add(role); job.added++; } catch {}
-          if (job.added % 10 === 0) await interaction.message.edit({ content: `Progress: ${job.added}/${job.total}` }).catch(() => {});
+          try { await m.roles.add(role, "Role all command"); job.added++; } catch {}
+          if (job.added % 10 === 0) await interaction.message.edit({ content: `⏳ Progress: **${job.added} / ${job.total}**` }).catch(() => {});
           await new Promise(r => setTimeout(r, 1000));
         }
         roleJobs.delete(interaction.guildId);
-        await interaction.message.edit({ content: "✅ Done!", components: [] }).catch(() => {});
+        await interaction.message.edit({ content: `✅ **Completed!** Added role to everyone.`, components: [] }).catch(() => {});
       }
       if (interaction.customId === "roleall_stop") {
         const job = roleJobs.get(interaction.guildId);
         if (job) job.stopped = true;
         await interaction.message.delete().catch(() => {});
-        return interaction.reply({ content: "🛑 Stopped.", ephemeral: true });
+        return interaction.reply({ content: "🛑 Role all operation stopped.", ephemeral: true });
       }
     }
   } catch (e) { console.error("❌ Interaction error:", e); }
 });
 
 // =========================
-// Anti-Nuke
+// Anti-Nuke System
 // =========================
 async function handleNukeCreate(guild, auditType) {
   if (!antiNukeEnabled.get(guild.id)) return;
   try {
     const logs = await guild.fetchAuditLogs({ limit: 1, type: auditType });
     const entry = logs.entries.first();
-    if (!entry || !entry.executor || entry.executor.id === OWNER_ID) return;
+    if (!entry || !entry.executor || entry.executor.id === OWNER_ID || entry.executor.id === client.user.id) return;
     const ignoreId = antiNukeIgnoreRole.get(guild.id);
     if (ignoreId) {
       const member = await guild.members.fetch(entry.executor.id).catch(() => null);
@@ -518,7 +525,7 @@ async function handleNukeCreate(guild, auditType) {
     map.set(entry.executor.id, data);
     if (data.count >= 2) {
       const member = await guild.members.fetch(entry.executor.id).catch(() => null);
-      if (member?.bannable) await member.ban({ reason: "Anti-Nuke triggered" });
+      if (member?.bannable) await member.ban({ reason: "Anti-Nuke: Mass creation detected" });
       recentNukeCreates.delete(guild.id);
     }
   } catch (e) { console.error("❌ Anti-Nuke error:", e); }
@@ -533,7 +540,7 @@ client.on("roleCreate", r => handleNukeCreate(r.guild, AuditLogEvent.RoleCreate)
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
-  // ===== .get <url> — send ONLY the file =====
+  // ===== .get <url> — SENDS ONLY THE FILE =====
   if (message.content.startsWith(PREFIX + "get ")) {
     const urls = await extractAllUrls(message);
     if (!urls.length) return;
@@ -545,12 +552,12 @@ client.on("messageCreate", async message => {
         fs.writeFileSync(filepath, content, "utf8");
         await message.channel.send({ files: [filepath] });
         fs.unlinkSync(filepath);
-      } catch (e) { console.error(".get error:", e); }
+      } catch (e) { console.error(".get command error:", e); }
     }
     return;
   }
 
-  // ===== .detect — gray embed, clean output =====
+  // ===== .detect — GRAY EMBED, CLEAN OUTPUT =====
   if (message.content.startsWith(PREFIX + "detect")) {
     let content = "";
     if (message.attachments.size > 0) {
@@ -567,13 +574,13 @@ client.on("messageCreate", async message => {
     const embed = new EmbedBuilder()
       .setColor(0x808080)
       .setTitle("Obfuscator Detection")
-      .setDescription(`**${primary.name} (${primary.confidence}%)**\n**Other:** ${others || "None"}`)
+      .setDescription(`**${primary.name} (${primary.confidence}%)**\n**Other Detections:** ${others || "None"}`)
       .setFooter({ text: `Today at ${getTodayTime()}` });
     await message.channel.send({ embeds: [embed] });
     return;
   }
 
-  // ===== Ping Warn =====
+  // ===== Ping Warn System =====
   if (message.mentions.everyone && message.guild) {
     for (const [roleId, config] of pingWarnRoles) {
       if (!config.enabled || config.guildId !== message.guildId) continue;
@@ -591,7 +598,7 @@ client.on("messageCreate", async message => {
           }, config.durationMs);
         }
         await message.channel.send({
-          content: `⚠️ **Ping Warn** — **${role.name}** lost @everyone permission${config.durationMs ? ` for ${formatDuration(config.durationMs)}` : " permanently"}.\nTriggered by <@${message.author.id}>.`,
+          content: `⚠️ **Ping Warn Triggered** — **${role.name}** lost @everyone/@here permission${config.durationMs ? ` for ${formatDuration(config.durationMs)}` : " permanently"}.\nTriggered by <@${message.author.id}>.`,
           allowedMentions: { users: [message.author.id] }
         }).then(m => setTimeout(() => m.delete().catch(() => {}), 10000));
       } catch {}
@@ -599,18 +606,18 @@ client.on("messageCreate", async message => {
     }
   }
 
-  // ===== Guess Game =====
+  // ===== Number Guess Game =====
   const game = games.get(message.channelId);
   if (game?.active) {
     const guess = parseInt(message.content.trim());
     if (Number.isInteger(guess) && guess >= 1 && guess <= 10000 && guess === game.answer) {
-      await message.channel.send({ embeds: [new EmbedBuilder().setDescription(`> 🎊 <@${message.author.id}> WON! Answer: **${guess}**`).setColor(0x808080)] });
+      await message.channel.send({ embeds: [new EmbedBuilder().setDescription(`> 🎊 **CONGRATULATIONS!** <@${message.author.id}> guessed correctly!\n> ✅ Answer: **${guess}**`).setColor(0x808080)] });
       try { await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, { SendMessages: false }); } catch {}
       games.delete(message.channelId);
     }
   }
 
-  // ===== Anti-Raid Webhook Spam =====
+  // ===== Anti-Raid Webhook Spam Protection =====
   if (message.webhookId && message.guild && antiRaidEnabled.get(message.guildId)) {
     const now = Date.now();
     if (!webhookSpamTracker.has(message.guildId)) webhookSpamTracker.set(message.guildId, new Map());
@@ -623,7 +630,7 @@ client.on("messageCreate", async message => {
       try {
         const webhooks = await message.channel.fetchWebhooks();
         const hook = webhooks.get(message.webhookId);
-        if (hook) await hook.delete("Anti-Raid: webhook spam");
+        if (hook) await hook.delete("Anti-Raid: Webhook spam detected");
       } catch {}
       map.delete(message.webhookId);
     }
@@ -635,6 +642,7 @@ client.on("messageCreate", async message => {
 // =========================
 client.on("error", e => console.error("❌ Client error:", e));
 process.on("unhandledRejection", e => console.error("❌ Unhandled rejection:", e));
+process.on("uncaughtException", e => console.error("❌ Uncaught exception:", e));
 
-console.log("🔑 Logging in...");
+console.log("🔑 Logging into Discord...");
 client.login(TOKEN).catch(e => { console.error("❌ Login failed:", e); process.exit(1); });
