@@ -24,7 +24,7 @@ if (!TOKEN || !CLIENT_ID) {
 }
 
 // =========================
-// DATA FILES — FRESH START
+// DATA
 // =========================
 const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
@@ -54,11 +54,10 @@ function loadLibrary() {
     if (fs.existsSync(LIBRARY_FILE)) {
       const data = JSON.parse(fs.readFileSync(LIBRARY_FILE, "utf8"));
       if (!data.files) data.files = [];
-      // Assign IDs to files missing them
       for (const f of data.files) if (!f.id) f.id = generateId();
       return data;
     }
-  } catch (e) { console.log("⚠️ Library empty or corrupted, starting fresh..."); }
+  } catch (e) {}
   return { files: [] };
 }
 
@@ -66,11 +65,10 @@ function saveLibrary() {
   try { fs.writeFileSync(LIBRARY_FILE, JSON.stringify(library, null, 2)); } catch (e) {}
 }
 
-// ✅ START FRESH — NO FAKE 394 COUNT
 const config = loadConfig();
 const library = loadLibrary();
 const libraryFiles = library.files;
-saveLibrary(); // Save any new IDs
+saveLibrary();
 
 // =========================
 // HELPERS
@@ -81,8 +79,14 @@ function isImageFile(name) {
   return IMAGE_EXTENSIONS.includes(ext);
 }
 
+function getTimePH() {
+  const now = new Date();
+  const ph = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  return ph.toISOString().slice(11, 16); // HH:MM
+}
+
 // =========================
-// SEARCH & GET — FAST
+// SEARCH & GET
 // =========================
 function searchFiles(query) {
   const q = query.toLowerCase().trim();
@@ -95,7 +99,7 @@ function getFileById(id) {
 }
 
 // =========================
-// CLIENT — FAST RESPONSE
+// CLIENT
 // =========================
 const client = new Client({
   intents: [
@@ -106,24 +110,38 @@ const client = new Client({
 });
 
 // =========================
-// SLASH COMMANDS
+// SLASH COMMANDS — ONLY 4: setchannel, scanchannel, serverlist, leave
 // =========================
 const commands = [
   new SlashCommandBuilder()
-    .setName("selectchannel")
-    .setDescription("Set allowed channel for .find and .get")
+    .setName("setchannel")
+    .setDescription("Set allowed channel for .find and .get commands")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
-    .addChannelOption(o => o.setName("channel").setDescription("Allowed channel").setRequired(true)),
+    .addChannelOption(o => 
+      o.setName("channel")
+       .setDescription("Channel where .find and .get work")
+       .setRequired(true)
+    ),
   new SlashCommandBuilder()
     .setName("scanchannel")
-    .setDescription("Scan channel and build file library")
+    .setDescription("Scan channel — all messages + forwarded files")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true)),
+    .addChannelOption(o => 
+      o.setName("channel")
+       .setDescription("Channel to scan")
+       .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("serverlist")
+    .setDescription("Owner only: list all servers"),
   new SlashCommandBuilder()
     .setName("leave")
-    .setDescription("Owner only: leave server")
-    .addStringOption(o => o.setName("server-id").setDescription("Server ID").setRequired(true)),
-  new SlashCommandBuilder().setName("serverlist").setDescription("Owner only: list all servers")
+    .setDescription("Owner only: leave a server")
+    .addStringOption(o => 
+      o.setName("server-id")
+       .setDescription("Server ID to leave")
+       .setRequired(true)
+    )
 ].map(c => c.toJSON());
 
 // =========================
@@ -137,16 +155,16 @@ async function registerCommands() {
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log(`📚 Library: ${libraryFiles.length} files (loaded from disk)`);
+  console.log(`📚 Library: ${libraryFiles.length} files`);
   await registerCommands();
 });
 
 // =========================
-// SCAN — FAST & ACCURATE
+// SCAN CHANNEL — ALL MESSAGES + FORWARDED
 // =========================
 async function scanChannel(channel, interaction = null) {
   if (!channel.isTextBased()) return { added: 0, total: libraryFiles.length, scanned: 0 };
-  if (interaction) await interaction.editReply({ content: `🔍 Scanning <#${channel.id}>...` });
+  if (interaction) await interaction.editReply({ content: `🔍 Scanning <#${channel.id}> — please wait...` });
 
   const foundFiles = [];
   let before = null;
@@ -168,11 +186,17 @@ async function scanChannel(channel, interaction = null) {
         if (!n || n.endsWith(".lua") || isImageFile(a.name)) continue;
         foundFiles.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
       }
-      // Forwarded attachments
+      // Forwarded files — messageSnapshots
       if (msg.messageSnapshots) {
-        for (const snap of msg.messageSnapshots.values?.() || []) {
+        const snapshots = Array.isArray(msg.messageSnapshots) 
+          ? msg.messageSnapshots 
+          : [...(msg.messageSnapshots.values?.() || [])];
+        for (const snap of snapshots) {
           if (!snap?.attachments) continue;
-          for (const a of snap.attachments.values?.() || snap.attachments || []) {
+          const atts = typeof snap.attachments.values === "function" 
+            ? snap.attachments.values() 
+            : Array.isArray(snap.attachments) ? snap.attachments : [];
+          for (const a of atts) {
             const n = normalizeFilename(a.name);
             if (!n || n.endsWith(".lua") || isImageFile(a.name)) continue;
             foundFiles.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
@@ -206,7 +230,7 @@ async function scanChannel(channel, interaction = null) {
 }
 
 // =========================
-// INTERACTIONS
+// SLASH COMMANDS HANDLER
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
@@ -223,36 +247,36 @@ client.on("interactionCreate", async interaction => {
 
     if (interaction.commandName === "leave") {
       const g = client.guilds.cache.get(interaction.options.getString("server-id"));
-      if (!g) return interaction.reply({ content: "❌ Not found.", ephemeral: true });
+      if (!g) return interaction.reply({ content: "❌ Server not found.", ephemeral: true });
       try { await g.leave(); return interaction.reply({ content: `✅ Left **${g.name}**`, ephemeral: true }); }
-      catch { return interaction.reply({ content: "❌ Failed.", ephemeral: true }); }
+      catch { return interaction.reply({ content: "❌ Failed to leave.", ephemeral: true }); }
     }
 
-    // Select Channel
-    if (interaction.commandName === "selectchannel") {
+    // /setchannel
+    if (interaction.commandName === "setchannel") {
       const channel = interaction.options.getChannel("channel");
       config.allowedChannelId = channel.id;
       saveConfig();
       return interaction.reply({ 
-        content: `✅ **Channel set!**\n🔗 <#${channel.id}>\n• \`.find <name>\` — search\n• \`.get <id>\` — get file\n👑 Owner can use anywhere`,
+        content: `✅ **Channel Set!**\n🔗 Allowed channel: <#${channel.id}>\n👥 All users can use:\n• \`.find <name>\` — search files\n• \`.get <id>\` — get file`,
         ephemeral: false 
       });
     }
 
-    // Scan Channel
+    // /scanchannel
     if (interaction.commandName === "scanchannel") {
       const channel = interaction.options.getChannel("channel");
       await interaction.deferReply();
       const result = await scanChannel(channel, interaction);
       return interaction.editReply({
-        content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${result.scanned} messages\n**Files added:** ${result.added}\n**Total Library:** ${result.total}`
+        content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Messages scanned:** ${result.scanned}\n**New files added:** ${result.added}\n**Total in Library:** ${result.total}`
       });
     }
   } catch (e) { console.error("❌ Interaction error:", e); }
 });
 
 // =========================
-// ✅ PREFIX COMMANDS — FAST
+// ✅ PREFIX COMMANDS — .find + .get EXACTLY AS REQUESTED
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
@@ -260,50 +284,57 @@ client.on("messageCreate", async message => {
   const isOwner = message.author.id === OWNER_ID;
   const allowed = isOwner || !config.allowedChannelId || message.channel.id === config.allowedChannelId;
 
-  // ========== .find — GRAY EMBED ==========
+  // ========== .find <query> — GRAY EMBED, 25 MAX, FOOTER WITH PAGE/TIME ==========
   if (message.content.startsWith(".find ")) {
-    if (!allowed) return message.reply(`❌ Use in <#${config.allowedChannelId}>`);
+    if (!allowed) return message.reply(`❌ Use .find in <#${config.allowedChannelId}>`);
     
     const query = message.content.slice(6).trim();
-    if (!query) return message.reply("⚠️ Usage: `.find <name>`");
-
-    const results = searchFiles(query);
-    if (results.length === 0) {
-      return message.reply({
-        embeds: [new EmbedBuilder()
-          .setTitle("Finder Source Results")
-          .setColor(0x808080)
-          .setDescription(`❌ No matches for \"${query}\"\n📚 Total files: **${libraryFiles.length}**`)
-        ]
-      });
+    
+    // Empty .find
+    if (!query) {
+      return message.reply("❌ No match found for that, idiot.");
     }
 
-    let desc = `Found **${results.length}** match(es) for \"${query}\":\n\n`;
-    desc += results.slice(0, 25).map(f => `**${f.name}** | ID: \`${f.id}\``).join("\n");
-    if (results.length > 25) desc += `\n\n...and **${results.length - 25}** more. Be more specific.`;
-    desc += `\n\n💡 Use \`.get <id>\` to get the file`;
+    const results = searchFiles(query);
+    
+    // No results
+    if (results.length === 0) {
+      return message.reply("❌ No match found for that, idiot.");
+    }
 
-    return message.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle("Finder Source Results")
-        .setColor(0x808080)
-        .setDescription(desc)
-      ]
-    });
+    // Limit to 25 files
+    const display = results.slice(0, 25);
+    const totalPages = Math.ceil(results.length / 25);
+    const currentPage = 1;
+
+    // Build description — PABABA (one per line)
+    const desc = display.map(f => `\`${f.name}\` │ ID: \`${f.id}\``).join("\n");
+
+    // Gray Embed
+    const embed = new EmbedBuilder()
+      .setTitle("Finder Source Results")
+      .setColor(0x808080) // GRAY
+      .setDescription(desc)
+      .setFooter({ 
+        text: `Page ${currentPage}/${totalPages} • Today at ${getTimePH()}`
+      });
+
+    return message.reply({ embeds: [embed] });
   }
 
-  // ========== .get — SEND THE FILE ==========
+  // ========== .get <id> — SEND FILE + MENTION @ON ==========
   if (message.content.startsWith(".get ")) {
-    if (!allowed) return message.reply(`❌ Use in <#${config.allowedChannelId}>`);
+    if (!allowed) return message.reply(`❌ Use .get in <#${config.allowedChannelId}>`);
     
     const id = message.content.slice(5).trim();
-    if (!id) return message.reply("⚠️ Usage: `.get <id>`");
+    if (!id) return message.reply("❌ Usage: `.get <id>`");
 
     const file = getFileById(id);
-    if (!file) return message.reply(`❌ No file with ID: \`${id}\`\n📚 Total files: **${libraryFiles.length}**`);
+    if (!file) return message.reply("❌ No match found for that, idiot.");
 
-    // ✅ SEND THE FILE — NO EXTRA TEXT, JUST THE ATTACHMENT
+    // Send file + mention @ON
     await message.channel.send({
+      content: `@ON`,
       files: [{
         attachment: file.url,
         name: file.name
@@ -313,7 +344,7 @@ client.on("messageCreate", async message => {
 });
 
 // =========================
-// LOGIN
+// LOGIN & ERROR
 // =========================
 client.on("error", e => console.error("❌ Client error:", e));
 process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
