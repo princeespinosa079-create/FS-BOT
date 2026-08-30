@@ -43,7 +43,7 @@ app.get("/", (req, res) => res.send("FS Bot Online"));
 app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT} open`));
 
 // =========================
-// ✅ FIXED: DEFINE DATA_DIR FIRST BEFORE USING
+// DATA DIRS
 // =========================
 const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
@@ -209,18 +209,84 @@ const client = new Client({
 });
 
 // =========================
-// SLASH COMMANDS
+// ✅ SLASH COMMANDS — "Owner Only" AT END OF DESCRIPTIONS + NEW /forwardall
 // =========================
 const commands = [
-  new SlashCommandBuilder().setName("setchannel").setDescription("Owner only: Set allowed channel for .find and .get"),
-  new SlashCommandBuilder().setName("scanchannel").setDescription("Owner only: Scan channel (skips duplicates)").addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true)),
-  new SlashCommandBuilder().setName("forwardall").setDescription("Owner only: Forward all library files to a channel").addChannelOption(o => o.setName("channel").setDescription("Target channel").setRequired(true)),
-  new SlashCommandBuilder().setName("uploadzip").setDescription("Owner only: Upload zip — auto extract to library").addAttachmentOption(o => o.setName("file").setDescription("Zip file").setRequired(true)),
-  new SlashCommandBuilder().setName("embed").setDescription("Send a gray embed").setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages).addStringOption(o => o.setName("description").setDescription("Embed text").setRequired(true)).addStringOption(o => o.setName("title").setDescription("Optional title").setRequired(false)),
-  new SlashCommandBuilder().setName("serverlist").setDescription("Owner only: list all servers"),
-  new SlashCommandBuilder().setName("leave").setDescription("Owner only: leave a server").addStringOption(o => o.setName("server-id").setDescription("Server ID").setRequired(true))
+  // ✅ /setchannel — Owner Only at end
+  new SlashCommandBuilder()
+    .setName("setchannel")
+    .setDescription("Set allowed channel for .find and .get — Owner Only"),
+
+  // ✅ /scanchannel — Owner Only at end
+  new SlashCommandBuilder()
+    .setName("scanchannel")
+    .setDescription("Scan channel for files, skips duplicates — Owner Only")
+    .addChannelOption(o => 
+      o.setName("channel")
+       .setDescription("Channel to scan")
+       .setRequired(true)
+    ),
+
+  // ✅ /forwardall — TWO OPTIONS: channel-id (source) + destination-channel-id (target)
+  new SlashCommandBuilder()
+    .setName("forwardall")
+    .setDescription("Scan source channel and forward all files to destination — Owner Only")
+    .addChannelOption(o => 
+      o.setName("channel-id")
+       .setDescription("Source channel to scan for files")
+       .setRequired(true)
+    )
+    .addChannelOption(o => 
+      o.setName("destination-channel-id")
+       .setDescription("Destination channel where files will be forwarded")
+       .setRequired(true)
+    ),
+
+  // ✅ /uploadzip — Owner Only at end
+  new SlashCommandBuilder()
+    .setName("uploadzip")
+    .setDescription("Upload zip file, auto extract to library — Owner Only")
+    .addAttachmentOption(o => 
+      o.setName("file")
+       .setDescription("Zip file to extract")
+       .setRequired(true)
+    ),
+
+  // /embed — NOT owner only, ManageMessages permission
+  new SlashCommandBuilder()
+    .setName("embed")
+    .setDescription("Send a gray embed message")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+    .addStringOption(o => 
+      o.setName("description")
+       .setDescription("Embed text content")
+       .setRequired(true)
+    )
+    .addStringOption(o => 
+      o.setName("title")
+       .setDescription("Optional title — leave blank for none")
+       .setRequired(false)
+    ),
+
+  // ✅ /serverlist — Owner Only at end
+  new SlashCommandBuilder()
+    .setName("serverlist")
+    .setDescription("List all servers the bot is in — Owner Only"),
+
+  // ✅ /leave — Owner Only at end
+  new SlashCommandBuilder()
+    .setName("leave")
+    .setDescription("Make the bot leave a server — Owner Only")
+    .addStringOption(o => 
+      o.setName("server-id")
+       .setDescription("Server ID to leave")
+       .setRequired(true)
+    )
 ].map(c => c.toJSON());
 
+// =========================
+// REGISTER
+// =========================
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
@@ -324,11 +390,16 @@ client.on("interactionCreate", async interaction => {
       }
       return;
     }
+
     if (!interaction.isChatInputCommand()) return;
+
     const ownerOnlyCmds = ["leave", "serverlist", "setchannel", "scanchannel", "forwardall", "uploadzip"];
     if (ownerOnlyCmds.includes(interaction.commandName) && interaction.user.id !== OWNER_ID)
       return interaction.reply({ content: "❌ Owner only, idiot.", ephemeral: true });
 
+    // =========================
+    // /scanchannel
+    // =========================
     if (interaction.commandName === "scanchannel") {
       const channel = interaction.options.getChannel("channel");
       await interaction.deferReply();
@@ -336,23 +407,46 @@ client.on("interactionCreate", async interaction => {
       return interaction.editReply({ content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${r.scanned}\n**✅ Added:** ${r.added}\n**⏭️ Skipped:** ${r.skipped}\n**📚 Total:** ${r.total}` });
     }
 
+    // =========================
+    // ✅ /forwardall — SCAN SOURCE → FORWARD TO DESTINATION
+    // =========================
     if (interaction.commandName === "forwardall") {
-      const channel = interaction.options.getChannel("channel");
-      if (!channel.isTextBased()) return interaction.reply({ content: "❌ Invalid channel.", ephemeral: true });
-      if (libraryFiles.length === 0) return interaction.reply({ content: "❌ Library is empty, idiot.", ephemeral: true });
-      await interaction.deferReply({ ephemeral: true });
+      const sourceChannel = interaction.options.getChannel("channel-id");
+      const destChannel = interaction.options.getChannel("destination-channel-id");
+
+      if (!sourceChannel.isTextBased() || !destChannel.isTextBased())
+        return interaction.reply({ content: "❌ Both channels must be text channels.", ephemeral: true });
+
+      await interaction.deferReply();
+
+      // Step 1: Scan source channel first
+      await interaction.editReply({ content: `🔍 Scanning <#${sourceChannel.id}>...` });
+      const scanResult = await scanChannel(sourceChannel);
+
+      // Step 2: Forward all files to destination
+      await interaction.editReply({ content: `📤 Forwarding ${scanResult.total} files to <#${destChannel.id}>...` });
       let sent = 0, failed = 0;
+
       for (const file of libraryFiles) {
         try {
-          if (file.isLocal && fs.existsSync(file.url)) await channel.send({ files: [{ attachment: file.url, name: file.name }] });
-          else await channel.send({ files: [{ attachment: file.url, name: file.name }] });
+          if (file.isLocal && fs.existsSync(file.url)) {
+            await destChannel.send({ files: [{ attachment: file.url, name: file.name }] });
+          } else {
+            await destChannel.send({ files: [{ attachment: file.url, name: file.name }] });
+          }
           sent++;
           await new Promise(r => setTimeout(r, 500));
         } catch (e) { failed++; }
       }
-      return interaction.editReply({ content: `📤 **FORWARD COMPLETE**\n**Target:** <#${channel.id}>\n**✅ Sent:** ${sent}\n**❌ Failed:** ${failed}\n**📚 Total:** ${libraryFiles.length}` });
+
+      return interaction.editReply({
+        content: `📤 **FORWARD COMPLETE**\n**Source:** <#${sourceChannel.id}>\n**Destination:** <#${destChannel.id}>\n**Scanned:** ${scanResult.scanned} messages\n**Files in library:** ${scanResult.total}\n**✅ Sent:** ${sent}\n**❌ Failed:** ${failed}`
+      });
     }
 
+    // =========================
+    // /uploadzip
+    // =========================
     if (interaction.commandName === "uploadzip") {
       const attachment = interaction.options.getAttachment("file");
       if (!attachment.name.toLowerCase().endsWith(".zip")) return interaction.reply({ content: "❌ Must be a .zip file, idiot.", ephemeral: true });
@@ -369,11 +463,17 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
+    // =========================
+    // /serverlist
+    // =========================
     if (interaction.commandName === "serverlist") {
       const list = [...client.guilds.cache.values()].map((g, i) => `${i+1}. **${g.name}** \`${g.id}\``).join("\n");
       return interaction.reply({ content: `**Servers (${client.guilds.cache.size}):**\n${list.slice(0, 4000)}`, ephemeral: true });
     }
 
+    // =========================
+    // /leave
+    // =========================
     if (interaction.commandName === "leave") {
       const g = client.guilds.cache.get(interaction.options.getString("server-id"));
       if (!g) return interaction.reply({ content: "❌ Server not found.", ephemeral: true });
@@ -381,12 +481,18 @@ client.on("interactionCreate", async interaction => {
       catch { return interaction.reply({ content: "❌ Failed to leave.", ephemeral: true }); }
     }
 
+    // =========================
+    // /setchannel
+    // =========================
     if (interaction.commandName === "setchannel") {
       config.allowedChannelId = interaction.channelId;
       saveConfig();
       return interaction.reply({ content: `✅ **Channel Set!**\n🔗 Allowed: <#${interaction.channelId}>`, ephemeral: false });
     }
 
+    // =========================
+    // /embed
+    // =========================
     if (interaction.commandName === "embed") {
       const desc = interaction.options.getString("description");
       const title = interaction.options.getString("title");
@@ -397,6 +503,7 @@ client.on("interactionCreate", async interaction => {
       await interaction.deleteReply();
       return interaction.channel.send({ embeds: [embed] });
     }
+
   } catch (e) { console.error("❌ Interaction error:", e); }
 });
 
