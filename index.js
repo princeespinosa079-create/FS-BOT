@@ -52,12 +52,6 @@ const TEMP_DIR = path.join(DATA_DIR, "temp");
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // =========================
-// ✅ USER TOKEN CLIENT — for external servers
-// =========================
-let userClient = null;
-let userToken = null;
-
-// =========================
 // HELPERS
 // =========================
 function normalizeFilename(name) {
@@ -72,7 +66,7 @@ function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
   } catch (e) {}
-  return { allowedChannelId: null, userToken: null };
+  return { allowedChannelId: null };
 }
 
 function saveConfig() {
@@ -99,13 +93,6 @@ const config = loadConfig();
 const library = loadLibrary();
 const libraryFiles = library.files;
 saveLibrary();
-
-// Restore saved user token on startup
-if (config.userToken) {
-  userToken = config.userToken;
-  userClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
-  userClient.login(userToken).catch(() => { userClient = null; userToken = null; delete config.userToken; saveConfig(); });
-}
 
 // =========================
 // MORE HELPERS
@@ -214,16 +201,18 @@ async function extractZipToLibrary(zipPath) {
 }
 
 // =========================
-// ✅ GET CHANNEL — use userClient if bot not in server
+// ✅ FETCH CHANNEL BY ID — FIXED: works across servers
 // =========================
-async function getChannelAny(channelId) {
-  let channel = client.channels.cache.get(channelId);
-  if (!channel && userClient) {
-    channel = userClient.channels.cache.get(channelId) || await userClient.channels.fetch(channelId).catch(() => null);
+async function fetchChannelById(channelId) {
+  if (!/^\d+$/.test(channelId)) return null;
+  try {
+    let channel = client.channels.cache.get(channelId);
+    if (!channel) channel = await client.channels.fetch(channelId, { force: true });
+    return channel;
+  } catch (e) {
+    console.error(`Failed to fetch channel ${channelId}:`, e.message);
+    return null;
   }
-  if (!channel) channel = await client.channels.fetch(channelId).catch(() => null);
-  if (!channel && userClient) channel = await userClient.channels.fetch(channelId).catch(() => null);
-  return channel;
 }
 
 // =========================
@@ -278,19 +267,9 @@ const client = new Client({
 });
 
 // =========================
-// ✅ SLASH COMMANDS — /login + /forwardall EXACT LIKE SCREENSHOT
+// ✅ SLASH COMMANDS — NO /login + CHANNEL ID INPUT
 // =========================
 const commands = [
-  // ✅ /login — set user token for external server access
-  new SlashCommandBuilder()
-    .setName("login")
-    .setDescription("Set Discord User Token for accessing external servers — Owner Only")
-    .addStringOption(o =>
-      o.setName("token")
-       .setDescription("Discord account token (user account)")
-       .setRequired(true)
-    ),
-
   new SlashCommandBuilder()
     .setName("setchannel")
     .setDescription("Set allowed channel for .find and .get — Owner Only"),
@@ -304,18 +283,18 @@ const commands = [
        .setRequired(true)
     ),
 
-  // ✅ /forwardall — EXACT LIKE SCREENSHOT
+  // ✅ /forwardall — ACCEPTS CHANNEL ID DIRECTLY! FIXED INVALID CHANNEL ERROR
   new SlashCommandBuilder()
     .setName("forwardall")
     .setDescription("Copy all .txt files from source to destination channel — Owner Only")
-    .addChannelOption(o =>
-      o.setName("source")
-       .setDescription("Source channel where files are copied from")
+    .addStringOption(o =>
+      o.setName("source_channel_id")
+       .setDescription("Source Channel ID (paste the ID) — where files are copied from")
        .setRequired(true)
     )
-    .addChannelOption(o =>
-      o.setName("destination")
-       .setDescription("Destination channel where files will be sent")
+    .addStringOption(o =>
+      o.setName("destination_channel_id")
+       .setDescription("Destination Channel ID (paste the ID) — where files will be sent")
        .setRequired(true)
     ),
 
@@ -466,41 +445,9 @@ client.on("interactionCreate", async interaction => {
 
     if (!interaction.isChatInputCommand()) return;
 
-    const ownerOnlyCmds = ["leave", "serverlist", "setchannel", "scanchannel", "forwardall", "uploadzip", "login"];
+    const ownerOnlyCmds = ["leave", "serverlist", "setchannel", "scanchannel", "forwardall", "uploadzip"];
     if (ownerOnlyCmds.includes(interaction.commandName) && interaction.user.id !== OWNER_ID)
       return interaction.reply({ content: "❌ Owner only, idiot.", ephemeral: true });
-
-    // =========================
-    // ✅ /login — SET USER TOKEN
-    // =========================
-    if (interaction.commandName === "login") {
-      const token = interaction.options.getString("token").trim();
-      await interaction.deferReply({ ephemeral: true });
-
-      try {
-        if (userClient) { userClient.destroy(); userClient = null; }
-        userClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
-        
-        await new Promise((resolve, reject) => {
-          userClient.once("ready", () => resolve());
-          userClient.once("error", (e) => reject(e));
-          userClient.login(token).catch(e => reject(e));
-          setTimeout(() => reject(new Error("Login timeout")), 15000);
-        });
-
-        userToken = token;
-        config.userToken = token;
-        saveConfig();
-        
-        return interaction.editReply({ content: `✅ **Logged in as User:** ${userClient.user.tag}\n🔑 Token saved — can now access external servers!` });
-      } catch (err) {
-        userClient = null;
-        userToken = null;
-        delete config.userToken;
-        saveConfig();
-        return interaction.editReply({ content: `❌ **Login Failed:** Invalid token or error.\nError: ${err.message}` });
-      }
-    }
 
     // =========================
     // /scanchannel
@@ -509,24 +456,32 @@ client.on("interactionCreate", async interaction => {
       const channel = interaction.options.getChannel("channel");
       await interaction.deferReply();
       const r = await scanChannel(channel);
-      return interaction.editReply({ content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${r.scanned}\n**✅ Added:** ${r.added}\n**⏭️ Skipped:** ${r.skipped}\n**📚 Total:** ${r.total}` });
+      return interaction.editReply({ content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${r.scanned}\n✅ **Added:** ${r.added}\n⏭️ **Skipped:** ${r.skipped}\n📚 **Total:** ${r.total}` });
     }
 
     // =========================
-    // ✅ /forwardall — EXACT LIKE SCREENSHOT
+    // ✅ /forwardall — FIXED CHANNEL ID ERROR!
     // =========================
     if (interaction.commandName === "forwardall") {
-      const sourceChannel = interaction.options.getChannel("source");
-      const destChannel = interaction.options.getChannel("destination");
-
-      if (!sourceChannel.isTextBased() || !destChannel.isTextBased())
-        return interaction.reply({ content: "❌ Both channels must be text channels.", ephemeral: true });
+      const sourceId = interaction.options.getString("source_channel_id").trim();
+      const destId = interaction.options.getString("destination_channel_id").trim();
 
       await interaction.deferReply();
 
+      // Fetch channels by ID — FIXED: no more "invalid channel" error!
+      const sourceChannel = await fetchChannelById(sourceId);
+      if (!sourceChannel || !sourceChannel.isTextBased()) {
+        return interaction.editReply({ content: `❌ **Invalid Source Channel:** ${sourceId}\nMake sure the bot is in that server and can view the channel.` });
+      }
+
+      const destChannel = await fetchChannelById(destId);
+      if (!destChannel || !destChannel.isTextBased()) {
+        return interaction.editReply({ content: `❌ **Invalid Destination Channel:** ${destId}\nMake sure the bot is in that server and can view/send messages there.` });
+      }
+
       // ✅ EXACT SCREENSHOT MESSAGE
       await interaction.editReply({
-        content: `🔄 **Starting FULL COPY of .txt files** from ${sourceChannel} to ${destChannel}`
+        content: `🔄 **Starting FULL COPY of .txt files** from <#${sourceId}> to <#${destId}>`
       });
 
       // Scan source for .txt files
@@ -534,11 +489,11 @@ client.on("interactionCreate", async interaction => {
 
       if (txtFiles.length === 0) {
         return interaction.editReply({
-          content: `❌ No .txt files found in ${sourceChannel}\nScanned ${scanned} messages.`
+          content: `❌ No .txt files found in <#${sourceId}>\nScanned ${scanned} messages.`
         });
       }
 
-      // Send to destination — show each file like screenshot
+      // Send to destination — show progress
       let sent = 0, failed = 0;
       for (const file of txtFiles) {
         try {
@@ -553,9 +508,9 @@ client.on("interactionCreate", async interaction => {
         }
       }
 
-      // ✅ Final result
+      // ✅ Final result — EXACT LIKE SCREENSHOT FORMAT
       return interaction.editReply({
-        content: `✅ **FORWARD COMPLETE**\n**From:** ${sourceChannel}\n**To:** ${destChannel}\n**📄 Files Found:** ${txtFiles.length}\n**✅ Sent:** ${sent}\n**❌ Failed:** ${failed}`
+        content: `✅ **FORWARD COMPLETE**\n**Channel:** <#${sourceId}>\n**Scanned:** ${scanned}\n✅ **Added:** ${txtFiles.length}\n⏭️ **Skipped:** 0\n📚 **Total:** ${sent}\n\n📤 **Sent to:** <#${destId}>\n✅ **Success:** ${sent}\n❌ **Failed:** ${failed}`
       });
     }
 
@@ -570,7 +525,7 @@ client.on("interactionCreate", async interaction => {
       try {
         await downloadFile(attachment.url, zipPath);
         const result = await extractZipToLibrary(zipPath);
-        return interaction.editReply({ content: `📦 **ZIP EXTRACTED**\n**File:** \`${attachment.name}\`\n**✅ Added:** ${result.added}\n**⏭️ Skipped:** ${result.skipped}\n**📚 Total:** ${result.total}` });
+        return interaction.editReply({ content: `📦 **ZIP EXTRACTED**\n**File:** \`${attachment.name}\`\n✅ **Added:** ${result.added}\n⏭️ **Skipped:** ${result.skipped}\n📚 **Total:** ${result.total}` });
       } catch (err) {
         console.error("Zip error:", err);
         fs.unlink(zipPath, () => {});
