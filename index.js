@@ -52,6 +52,12 @@ const TEMP_DIR = path.join(DATA_DIR, "temp");
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // =========================
+// ✅ USER TOKEN CLIENT — for external servers
+// =========================
+let userClient = null;
+let userToken = null;
+
+// =========================
 // HELPERS
 // =========================
 function normalizeFilename(name) {
@@ -66,7 +72,7 @@ function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
   } catch (e) {}
-  return { allowedChannelId: null };
+  return { allowedChannelId: null, userToken: null };
 }
 
 function saveConfig() {
@@ -94,6 +100,13 @@ const library = loadLibrary();
 const libraryFiles = library.files;
 saveLibrary();
 
+// Restore saved user token on startup
+if (config.userToken) {
+  userToken = config.userToken;
+  userClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+  userClient.login(userToken).catch(() => { userClient = null; userToken = null; delete config.userToken; saveConfig(); });
+}
+
 // =========================
 // MORE HELPERS
 // =========================
@@ -101,6 +114,10 @@ const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".sv
 function isImageFile(name) {
   const ext = path.extname((name || "").toLowerCase());
   return IMAGE_EXTENSIONS.includes(ext);
+}
+
+function isTxtFile(name) {
+  return path.extname((name || "").toLowerCase()) === ".txt";
 }
 
 function getTimePH() {
@@ -197,6 +214,58 @@ async function extractZipToLibrary(zipPath) {
 }
 
 // =========================
+// ✅ GET CHANNEL — use userClient if bot not in server
+// =========================
+async function getChannelAny(channelId) {
+  let channel = client.channels.cache.get(channelId);
+  if (!channel && userClient) {
+    channel = userClient.channels.cache.get(channelId) || await userClient.channels.fetch(channelId).catch(() => null);
+  }
+  if (!channel) channel = await client.channels.fetch(channelId).catch(() => null);
+  if (!channel && userClient) channel = await userClient.channels.fetch(channelId).catch(() => null);
+  return channel;
+}
+
+// =========================
+// ✅ SCAN .txt FILES ONLY
+// =========================
+async function scanTxtFiles(channel) {
+  if (!channel.isTextBased()) return { files: [], scanned: 0 };
+  const foundFiles = [];
+  let before = null, scanned = 0;
+  while (true) {
+    const options = { limit: 100 };
+    if (before) options.before = before;
+    let batch;
+    try { batch = await channel.messages.fetch(options); }
+    catch (e) { await new Promise(r => setTimeout(r, 500)); continue; }
+    if (!batch.size) break;
+    scanned += batch.size;
+    for (const msg of batch.values()) {
+      for (const a of msg.attachments.values()) {
+        if (!isTxtFile(a.name)) continue;
+        foundFiles.push({ name: a.name, url: a.url, size: a.size, message: msg });
+      }
+      if (msg.messageSnapshots) {
+        const snapshots = Array.isArray(msg.messageSnapshots) ? msg.messageSnapshots : [...(msg.messageSnapshots.values?.() || [])];
+        for (const snap of snapshots) {
+          if (!snap?.attachments) continue;
+          const atts = typeof snap.attachments.values === "function" ? snap.attachments.values() : Array.isArray(snap.attachments) ? snap.attachments : [];
+          for (const a of atts) {
+            if (!isTxtFile(a.name)) continue;
+            foundFiles.push({ name: a.name, url: a.url, size: a.size, message: msg });
+          }
+        }
+      }
+    }
+    before = batch.last()?.id;
+    if (!before || batch.size < 100) break;
+    await new Promise(r => setTimeout(r, 150));
+  }
+  return { files: foundFiles, scanned };
+}
+
+// =========================
 // PAGINATION
 // =========================
 const searchSessions = new Map();
@@ -209,75 +278,79 @@ const client = new Client({
 });
 
 // =========================
-// ✅ SLASH COMMANDS — "Owner Only" AT END OF DESCRIPTIONS + NEW /forwardall
+// ✅ SLASH COMMANDS — /login + /forwardall EXACT LIKE SCREENSHOT
 // =========================
 const commands = [
-  // ✅ /setchannel — Owner Only at end
+  // ✅ /login — set user token for external server access
+  new SlashCommandBuilder()
+    .setName("login")
+    .setDescription("Set Discord User Token for accessing external servers — Owner Only")
+    .addStringOption(o =>
+      o.setName("token")
+       .setDescription("Discord account token (user account)")
+       .setRequired(true)
+    ),
+
   new SlashCommandBuilder()
     .setName("setchannel")
     .setDescription("Set allowed channel for .find and .get — Owner Only"),
 
-  // ✅ /scanchannel — Owner Only at end
   new SlashCommandBuilder()
     .setName("scanchannel")
     .setDescription("Scan channel for files, skips duplicates — Owner Only")
-    .addChannelOption(o => 
+    .addChannelOption(o =>
       o.setName("channel")
        .setDescription("Channel to scan")
        .setRequired(true)
     ),
 
-  // ✅ /forwardall — TWO OPTIONS: channel-id (source) + destination-channel-id (target)
+  // ✅ /forwardall — EXACT LIKE SCREENSHOT
   new SlashCommandBuilder()
     .setName("forwardall")
-    .setDescription("Scan source channel and forward all files to destination — Owner Only")
-    .addChannelOption(o => 
-      o.setName("channel-id")
-       .setDescription("Source channel to scan for files")
+    .setDescription("Copy all .txt files from source to destination channel — Owner Only")
+    .addChannelOption(o =>
+      o.setName("source")
+       .setDescription("Source channel where files are copied from")
        .setRequired(true)
     )
-    .addChannelOption(o => 
-      o.setName("destination-channel-id")
-       .setDescription("Destination channel where files will be forwarded")
+    .addChannelOption(o =>
+      o.setName("destination")
+       .setDescription("Destination channel where files will be sent")
        .setRequired(true)
     ),
 
-  // ✅ /uploadzip — Owner Only at end
   new SlashCommandBuilder()
     .setName("uploadzip")
     .setDescription("Upload zip file, auto extract to library — Owner Only")
-    .addAttachmentOption(o => 
+    .addAttachmentOption(o =>
       o.setName("file")
        .setDescription("Zip file to extract")
        .setRequired(true)
     ),
 
-  // /embed — NOT owner only, ManageMessages permission
   new SlashCommandBuilder()
     .setName("embed")
     .setDescription("Send a gray embed message")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addStringOption(o => 
+    .addStringOption(o =>
       o.setName("description")
        .setDescription("Embed text content")
        .setRequired(true)
     )
-    .addStringOption(o => 
+    .addStringOption(o =>
       o.setName("title")
        .setDescription("Optional title — leave blank for none")
        .setRequired(false)
     ),
 
-  // ✅ /serverlist — Owner Only at end
   new SlashCommandBuilder()
     .setName("serverlist")
     .setDescription("List all servers the bot is in — Owner Only"),
 
-  // ✅ /leave — Owner Only at end
   new SlashCommandBuilder()
     .setName("leave")
     .setDescription("Make the bot leave a server — Owner Only")
-    .addStringOption(o => 
+    .addStringOption(o =>
       o.setName("server-id")
        .setDescription("Server ID to leave")
        .setRequired(true)
@@ -300,7 +373,7 @@ client.once("ready", async () => {
 });
 
 // =========================
-// SCAN CHANNEL
+// SCAN CHANNEL — duplicates skip
 // =========================
 async function scanChannel(channel) {
   if (!channel.isTextBased()) return { added: 0, skipped: 0, total: libraryFiles.length, scanned: 0 };
@@ -393,9 +466,41 @@ client.on("interactionCreate", async interaction => {
 
     if (!interaction.isChatInputCommand()) return;
 
-    const ownerOnlyCmds = ["leave", "serverlist", "setchannel", "scanchannel", "forwardall", "uploadzip"];
+    const ownerOnlyCmds = ["leave", "serverlist", "setchannel", "scanchannel", "forwardall", "uploadzip", "login"];
     if (ownerOnlyCmds.includes(interaction.commandName) && interaction.user.id !== OWNER_ID)
       return interaction.reply({ content: "❌ Owner only, idiot.", ephemeral: true });
+
+    // =========================
+    // ✅ /login — SET USER TOKEN
+    // =========================
+    if (interaction.commandName === "login") {
+      const token = interaction.options.getString("token").trim();
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        if (userClient) { userClient.destroy(); userClient = null; }
+        userClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+        
+        await new Promise((resolve, reject) => {
+          userClient.once("ready", () => resolve());
+          userClient.once("error", (e) => reject(e));
+          userClient.login(token).catch(e => reject(e));
+          setTimeout(() => reject(new Error("Login timeout")), 15000);
+        });
+
+        userToken = token;
+        config.userToken = token;
+        saveConfig();
+        
+        return interaction.editReply({ content: `✅ **Logged in as User:** ${userClient.user.tag}\n🔑 Token saved — can now access external servers!` });
+      } catch (err) {
+        userClient = null;
+        userToken = null;
+        delete config.userToken;
+        saveConfig();
+        return interaction.editReply({ content: `❌ **Login Failed:** Invalid token or error.\nError: ${err.message}` });
+      }
+    }
 
     // =========================
     // /scanchannel
@@ -408,39 +513,49 @@ client.on("interactionCreate", async interaction => {
     }
 
     // =========================
-    // ✅ /forwardall — SCAN SOURCE → FORWARD TO DESTINATION
+    // ✅ /forwardall — EXACT LIKE SCREENSHOT
     // =========================
     if (interaction.commandName === "forwardall") {
-      const sourceChannel = interaction.options.getChannel("channel-id");
-      const destChannel = interaction.options.getChannel("destination-channel-id");
+      const sourceChannel = interaction.options.getChannel("source");
+      const destChannel = interaction.options.getChannel("destination");
 
       if (!sourceChannel.isTextBased() || !destChannel.isTextBased())
         return interaction.reply({ content: "❌ Both channels must be text channels.", ephemeral: true });
 
       await interaction.deferReply();
 
-      // Step 1: Scan source channel first
-      await interaction.editReply({ content: `🔍 Scanning <#${sourceChannel.id}>...` });
-      const scanResult = await scanChannel(sourceChannel);
+      // ✅ EXACT SCREENSHOT MESSAGE
+      await interaction.editReply({
+        content: `🔄 **Starting FULL COPY of .txt files** from ${sourceChannel} to ${destChannel}`
+      });
 
-      // Step 2: Forward all files to destination
-      await interaction.editReply({ content: `📤 Forwarding ${scanResult.total} files to <#${destChannel.id}>...` });
-      let sent = 0, failed = 0;
+      // Scan source for .txt files
+      const { files: txtFiles, scanned } = await scanTxtFiles(sourceChannel);
 
-      for (const file of libraryFiles) {
-        try {
-          if (file.isLocal && fs.existsSync(file.url)) {
-            await destChannel.send({ files: [{ attachment: file.url, name: file.name }] });
-          } else {
-            await destChannel.send({ files: [{ attachment: file.url, name: file.name }] });
-          }
-          sent++;
-          await new Promise(r => setTimeout(r, 500));
-        } catch (e) { failed++; }
+      if (txtFiles.length === 0) {
+        return interaction.editReply({
+          content: `❌ No .txt files found in ${sourceChannel}\nScanned ${scanned} messages.`
+        });
       }
 
+      // Send to destination — show each file like screenshot
+      let sent = 0, failed = 0;
+      for (const file of txtFiles) {
+        try {
+          await destChannel.send({
+            files: [{ attachment: file.url, name: file.name }]
+          });
+          sent++;
+          await new Promise(r => setTimeout(r, 300)); // Avoid rate limit
+        } catch (e) {
+          failed++;
+          console.error(`Failed to send ${file.name}:`, e.message);
+        }
+      }
+
+      // ✅ Final result
       return interaction.editReply({
-        content: `📤 **FORWARD COMPLETE**\n**Source:** <#${sourceChannel.id}>\n**Destination:** <#${destChannel.id}>\n**Scanned:** ${scanResult.scanned} messages\n**Files in library:** ${scanResult.total}\n**✅ Sent:** ${sent}\n**❌ Failed:** ${failed}`
+        content: `✅ **FORWARD COMPLETE**\n**From:** ${sourceChannel}\n**To:** ${destChannel}\n**📄 Files Found:** ${txtFiles.length}\n**✅ Sent:** ${sent}\n**❌ Failed:** ${failed}`
       });
     }
 
