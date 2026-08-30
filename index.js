@@ -201,7 +201,7 @@ async function extractZipToLibrary(zipPath) {
 }
 
 // =========================
-// ✅ FETCH CHANNEL BY ID — FIXED: works across servers
+// FETCH CHANNEL BY ID
 // =========================
 async function fetchChannelById(channelId) {
   if (!/^\d+$/.test(channelId)) return null;
@@ -216,7 +216,7 @@ async function fetchChannelById(channelId) {
 }
 
 // =========================
-// ✅ SCAN .txt FILES ONLY
+// SCAN .txt FILES — FAST
 // =========================
 async function scanTxtFiles(channel) {
   if (!channel.isTextBased()) return { files: [], scanned: 0 };
@@ -227,13 +227,13 @@ async function scanTxtFiles(channel) {
     if (before) options.before = before;
     let batch;
     try { batch = await channel.messages.fetch(options); }
-    catch (e) { await new Promise(r => setTimeout(r, 500)); continue; }
+    catch (e) { await new Promise(r => setTimeout(r, 100)); continue; }
     if (!batch.size) break;
     scanned += batch.size;
     for (const msg of batch.values()) {
       for (const a of msg.attachments.values()) {
         if (!isTxtFile(a.name)) continue;
-        foundFiles.push({ name: a.name, url: a.url, size: a.size, message: msg });
+        foundFiles.push({ name: a.name, url: a.url, size: a.size });
       }
       if (msg.messageSnapshots) {
         const snapshots = Array.isArray(msg.messageSnapshots) ? msg.messageSnapshots : [...(msg.messageSnapshots.values?.() || [])];
@@ -242,14 +242,14 @@ async function scanTxtFiles(channel) {
           const atts = typeof snap.attachments.values === "function" ? snap.attachments.values() : Array.isArray(snap.attachments) ? snap.attachments : [];
           for (const a of atts) {
             if (!isTxtFile(a.name)) continue;
-            foundFiles.push({ name: a.name, url: a.url, size: a.size, message: msg });
+            foundFiles.push({ name: a.name, url: a.url, size: a.size });
           }
         }
       }
     }
     before = batch.last()?.id;
     if (!before || batch.size < 100) break;
-    await new Promise(r => setTimeout(r, 150));
+    await new Promise(r => setTimeout(r, 50));
   }
   return { files: foundFiles, scanned };
 }
@@ -267,7 +267,7 @@ const client = new Client({
 });
 
 // =========================
-// ✅ SLASH COMMANDS — NO /login + CHANNEL ID INPUT
+// SLASH COMMANDS
 // =========================
 const commands = [
   new SlashCommandBuilder()
@@ -283,18 +283,17 @@ const commands = [
        .setRequired(true)
     ),
 
-  // ✅ /forwardall — ACCEPTS CHANNEL ID DIRECTLY! FIXED INVALID CHANNEL ERROR
   new SlashCommandBuilder()
     .setName("forwardall")
-    .setDescription("Copy all .txt files from source to destination channel — Owner Only")
+    .setDescription("Copy all .txt files FAST from source to destination — Owner Only")
     .addStringOption(o =>
       o.setName("source_channel_id")
-       .setDescription("Source Channel ID (paste the ID) — where files are copied from")
+       .setDescription("Source Channel ID — where files are copied from")
        .setRequired(true)
     )
     .addStringOption(o =>
       o.setName("destination_channel_id")
-       .setDescription("Destination Channel ID (paste the ID) — where files will be sent")
+       .setDescription("Destination Channel ID — where files will be sent")
        .setRequired(true)
     ),
 
@@ -352,7 +351,7 @@ client.once("ready", async () => {
 });
 
 // =========================
-// SCAN CHANNEL — duplicates skip
+// SCAN CHANNEL
 // =========================
 async function scanChannel(channel) {
   if (!channel.isTextBased()) return { added: 0, skipped: 0, total: libraryFiles.length, scanned: 0 };
@@ -363,7 +362,7 @@ async function scanChannel(channel) {
     if (before) options.before = before;
     let batch;
     try { batch = await channel.messages.fetch(options); }
-    catch (e) { await new Promise(r => setTimeout(r, 500)); continue; }
+    catch (e) { await new Promise(r => setTimeout(r, 100)); continue; }
     if (!batch.size) break;
     scanned += batch.size;
     for (const msg of batch.values()) {
@@ -387,7 +386,7 @@ async function scanChannel(channel) {
     }
     before = batch.last()?.id;
     if (!before || batch.size < 100) break;
-    await new Promise(r => setTimeout(r, 150));
+    await new Promise(r => setTimeout(r, 50));
   }
   const unique = new Map();
   for (const f of libraryFiles) unique.set(normalizeFilename(f.name), f);
@@ -406,7 +405,7 @@ async function scanChannel(channel) {
 }
 
 // =========================
-// BUILD SEARCH PAGE — 8 LINES
+// BUILD SEARCH PAGE
 // =========================
 function buildSearchPage(ownerUserId, results, page = 1) {
   const perPage = 8;
@@ -460,7 +459,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     // =========================
-    // ✅ /forwardall — FIXED CHANNEL ID ERROR!
+    // ⚡ /forwardall — MAX SPEED! NO DELAYS!
     // =========================
     if (interaction.commandName === "forwardall") {
       const sourceId = interaction.options.getString("source_channel_id").trim();
@@ -468,23 +467,23 @@ client.on("interactionCreate", async interaction => {
 
       await interaction.deferReply();
 
-      // Fetch channels by ID — FIXED: no more "invalid channel" error!
+      // Fetch channels
       const sourceChannel = await fetchChannelById(sourceId);
       if (!sourceChannel || !sourceChannel.isTextBased()) {
-        return interaction.editReply({ content: `❌ **Invalid Source Channel:** ${sourceId}\nMake sure the bot is in that server and can view the channel.` });
+        return interaction.editReply({ content: `❌ **Invalid Source Channel:** ${sourceId}` });
       }
 
       const destChannel = await fetchChannelById(destId);
       if (!destChannel || !destChannel.isTextBased()) {
-        return interaction.editReply({ content: `❌ **Invalid Destination Channel:** ${destId}\nMake sure the bot is in that server and can view/send messages there.` });
+        return interaction.editReply({ content: `❌ **Invalid Destination Channel:** ${destId}` });
       }
 
-      // ✅ EXACT SCREENSHOT MESSAGE
+      // Start message
       await interaction.editReply({
-        content: `🔄 **Starting FULL COPY of .txt files** from <#${sourceId}> to <#${destId}>`
+        content: `🔄 **Starting FULL COPY of .txt files** from <#${sourceId}> to <#${destId}>\n⚡ **Speed Mode: MAX**`
       });
 
-      // Scan source for .txt files
+      // Scan — FAST
       const { files: txtFiles, scanned } = await scanTxtFiles(sourceChannel);
 
       if (txtFiles.length === 0) {
@@ -493,24 +492,49 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      // Send to destination — show progress
+      // ⚡ SEND ALL FILES — PARALLEL, NO DELAY! BATCH OPTIMIZED!
       let sent = 0, failed = 0;
-      for (const file of txtFiles) {
-        try {
-          await destChannel.send({
-            files: [{ attachment: file.url, name: file.name }]
-          });
-          sent++;
-          await new Promise(r => setTimeout(r, 300)); // Avoid rate limit
-        } catch (e) {
-          failed++;
-          console.error(`Failed to send ${file.name}:`, e.message);
+      const total = txtFiles.length;
+
+      // Send in batches of 10 (max parallel without rate-limit)
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < txtFiles.length; i += BATCH_SIZE) {
+        const batch = txtFiles.slice(i, i + BATCH_SIZE);
+        
+        // Send ALL files in batch at the same time!
+        const promises = batch.map(async (file) => {
+          try {
+            await destChannel.send({
+              files: [{ attachment: file.url, name: file.name }]
+            });
+            return { success: true };
+          } catch (e) {
+            console.error(`Failed: ${file.name}`, e.message);
+            return { success: false };
+          }
+        });
+
+        // Wait for batch to finish
+        const results = await Promise.allSettled(promises);
+        results.forEach(r => {
+          if (r.status === "fulfilled" && r.value.success) sent++;
+          else failed++;
+        });
+
+        // Update progress every batch
+        await interaction.editReply({
+          content: `🔄 **Forwarding...** ⚡ ${sent}/${total}\nFrom: <#${sourceId}> → To: <#${destId}>`
+        });
+
+        // Tiny delay only between batches (prevents rate-limit, still FAST)
+        if (i + BATCH_SIZE < txtFiles.length) {
+          await new Promise(r => setTimeout(r, 50));
         }
       }
 
-      // ✅ Final result — EXACT LIKE SCREENSHOT FORMAT
+      // ✅ FINAL RESULT
       return interaction.editReply({
-        content: `✅ **FORWARD COMPLETE**\n**Channel:** <#${sourceId}>\n**Scanned:** ${scanned}\n✅ **Added:** ${txtFiles.length}\n⏭️ **Skipped:** 0\n📚 **Total:** ${sent}\n\n📤 **Sent to:** <#${destId}>\n✅ **Success:** ${sent}\n❌ **Failed:** ${failed}`
+        content: `✅ **FORWARD COMPLETE — MAX SPEED** ⚡\n**Channel:** <#${sourceId}>\n**Scanned:** ${scanned}\n**Files Found:** ${total}\n✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n📤 **Destination:** <#${destId}>`
       });
     }
 
