@@ -22,7 +22,6 @@ const crypto = require("crypto");
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OWNER_ID = "1302080645987569694";
-const PREFIX = ".";
 
 if (!TOKEN || !CLIENT_ID) {
   console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID");
@@ -35,6 +34,10 @@ if (!TOKEN || !CLIENT_ID) {
 const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
 const DATA_FILE = path.join(DATA_DIR, "bot-data.json");
+
+function normalizeFilename(name) {
+  return String(name || "").trim().toLowerCase();
+}
 
 function loadData() {
   try {
@@ -68,7 +71,7 @@ const libraryFiles = library.files;
 const saved = loadData();
 
 // =========================
-// FILE FILTER — ONLY SKIP IMAGES ✅
+// FILE FILTER — SKIP IMAGES & .lua ✅
 // =========================
 const IMAGE_MIME_REGEX = /^image\//i;
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"];
@@ -82,9 +85,10 @@ function isImageFile(name, contentType) {
 function generateFileId() {
   return Math.random().toString(36).slice(2, 8);
 }
-function fileExistsByHash(hash) { return libraryFiles.some(f => f.hash === hash); }
-function fileExistsByUrl(url) { return libraryFiles.some(f => f.url === url); }
-function getFileById(id) { return libraryFiles.find(f => f.id === id); }
+function fileExistsByName(name) { 
+  const key = normalizeFilename(name);
+  return libraryFiles.some(f => normalizeFilename(f.name) === key); 
+}
 
 // =========================
 // ✅ SMART SEARCH — PRIORITY SYSTEM
@@ -122,8 +126,6 @@ function searchFiles(query) {
   return [...exactMatches, ...startsWithMatches, ...includesMatches, ...relatedMatches.map(r => r.file)];
 }
 
-function getFileHash(buffer) { return crypto.createHash("md5").update(buffer).digest("hex"); }
-
 // =========================
 // WEB SERVER
 // =========================
@@ -133,13 +135,13 @@ app.get("/", (req, res) => res.send("FS Bot Online"));
 app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
 
 // =========================
-// CLIENT — INTENTS FIXED ✅
+// CLIENT — INTENTS ✅
 // =========================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // ⚠️ REQUIRED to read attachments!
+    GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers
   ]
 });
@@ -165,7 +167,7 @@ function parseDuration(str) {
 }
 
 // =========================
-// SLASH COMMANDS
+// SLASH COMMANDS — /scanchannel ✅
 // =========================
 const commands = [
   new SlashCommandBuilder().setName("leave").setDescription("Make bot leave a server (Owner only)")
@@ -195,7 +197,7 @@ const commands = [
       .addChoices({ name: "ON", value: "on" }, { name: "OFF", value: "off" }))
     .addRoleOption(o => o.setName("role").setDescription("Role to watch").setRequired(true))
     .addStringOption(o => o.setName("duration").setDescription("Penalty duration")),
-  new SlashCommandBuilder().setName("scanfile").setDescription("Scan ALL messages & ALL attachments — including forwarded")
+  new SlashCommandBuilder().setName("scanchannel").setDescription("Scan ALL messages including forwarded")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true))
 ].map(c => c.toJSON());
@@ -215,115 +217,174 @@ client.once("ready", async () => {
 });
 
 // =========================
-// ✅ SCAN CHANNEL — FULL FIX: SCANS ALL ATTACHMENTS, FORWARDED, NO LIMIT ✅
+// ✅ SCAN CHANNEL — YOUR LOGIC WITH messageSnapshots ✅
 // =========================
 async function scanChannel(channel, interaction = null) {
   if (!channel.isTextBased()) return { added: 0, total: libraryFiles.length, scanned: 0 };
   
   if (interaction) await interaction.editReply({ 
-    content: `🔍 **Scanning started** — this may take a while...\n> Scanning: <#${channel.id}>\n> Including: forwarded messages, .txt, .lua, all files` 
+    content: `🔍 **Scanning started** — this may take a while...\n> Channel: <#${channel.id}>\n> Scanning: forwarded, attachments, all files` 
   });
 
-  let added = 0;
-  let scanned = 0;
+  const files = [];
   let before = null;
-  let emptyPages = 0;
-  const MAX_EMPTY = 5; // Stop after 5 empty pages = end of history
+  let totalMessages = 0;
+
+  console.log(`🚀 STARTING SCAN — Channel: ${channel.name} (${channel.id})`);
 
   while (true) {
+    const options = { limit: 100 };
+    if (before) options.before = before;
+
+    let batch;
     try {
-      // ✅ Fetch 100 messages at a time, going BACKWARD in history
-      const options = { limit: 100 };
-      if (before) options.before = before;
-      
-      const messages = await channel.messages.fetch(options);
-      
-      // ✅ If no messages = we reached the start
-      if (messages.size === 0) {
-        emptyPages++;
-        if (emptyPages >= MAX_EMPTY) break;
-        await new Promise(r => setTimeout(r, 500));
-        continue;
+      batch = await channel.messages.fetch(options);
+    } catch (e) {
+      console.error("Fetch error:", e.message);
+      await new Promise(r => setTimeout(r, 1000));
+      continue;
+    }
+
+    if (!batch.size) break;
+    totalMessages += batch.size;
+
+    for (const message of batch.values()) {
+      const attachments = [];
+
+      // ==============================================
+      // ✅ NORMAL ATTACHMENTS
+      // ==============================================
+      if (message.attachments) {
+        for (const attachment of message.attachments.values()) {
+          attachments.push({
+            id: attachment.id,
+            name: attachment.name || attachment.filename || "file",
+            url: attachment.url,
+            size: attachment.size || 0,
+            messageId: message.id,
+            channelId: message.channelId,
+            createdTimestamp: message.createdTimestamp,
+            source: "message"
+          });
+        }
       }
-      emptyPages = 0; // Reset — found messages
 
-      // ✅ Process EVERY message — attachments included regardless of forward
-      for (const msg of messages.values()) {
-        scanned++;
-        
-        // ✅ LOG: see what we're scanning
-        if (scanned % 50 === 0) console.log(`📋 Scanned ${scanned} messages... Found ${added} files so far`);
-        
-        // ✅ Get ALL attachments — forwarded messages STILL have attachments in msg.attachments
-        const attachments = [...msg.attachments.values()];
-        
-        for (const att of attachments) {
-          // ✅ ONLY skip images — .txt, .lua, .json, ALL others SCAN
-          if (isImageFile(att.name, att.contentType)) continue;
-          
-          // ✅ Skip duplicates by URL first (fast)
-          if (fileExistsByUrl(att.url)) continue;
+      // ==============================================
+      // ✅ FORWARDED MESSAGE ATTACHMENTS — messageSnapshots
+      // ==============================================
+      if (message.messageSnapshots && typeof message.messageSnapshots.values === "function") {
+        for (const snapshot of message.messageSnapshots.values()) {
+          if (!snapshot) continue;
 
-          try {
-            // ✅ Download file for hash check
-            const res = await fetch(att.url, { signal: AbortSignal.timeout(10000) });
-            if (!res.ok) continue;
-            
-            const buf = Buffer.from(await res.arrayBuffer());
-            const hash = getFileHash(buf);
-            
-            // ✅ Skip duplicates by hash
-            if (fileExistsByHash(hash)) continue;
+          const snapshotAttachments = snapshot.attachments;
 
-            // ✅ ADD TO LIBRARY — ANY attachment that's not an image
-            libraryFiles.push({
-              id: generateFileId(),
-              name: att.name,
-              url: att.url,
-              size: att.size,
-              channelId: channel.id,
-              messageId: msg.id,
-              timestamp: msg.timestamp,
-              hash,
-              isForwarded: !!msg.reference
-            });
-            added++;
-            console.log(`✅ Added: ${att.name} (ID: ${libraryFiles[libraryFiles.length-1].id})`);
-            
-            // ✅ Save every 5 files
-            if (added % 5 === 0) saveLibrary();
-            
-          } catch (e) {
-            console.log(`⚠️ Skipped ${att.name}: ${e.message}`);
+          if (snapshotAttachments && typeof snapshotAttachments.values === "function") {
+            for (const attachment of snapshotAttachments.values()) {
+              attachments.push({
+                id: `forwarded-${attachment.id}`,
+                name: attachment.name || attachment.filename || "file",
+                url: attachment.url,
+                size: attachment.size || 0,
+                messageId: message.id,
+                channelId: message.channelId,
+                createdTimestamp: message.createdTimestamp,
+                source: "forwarded"
+              });
+            }
+          } else if (Array.isArray(snapshotAttachments)) {
+            for (const attachment of snapshotAttachments) {
+              attachments.push({
+                id: `forwarded-${attachment.id}`,
+                name: attachment.name || attachment.filename || "file",
+                url: attachment.url,
+                size: attachment.size || 0,
+                messageId: message.id,
+                channelId: message.channelId,
+                createdTimestamp: message.createdTimestamp,
+                source: "forwarded"
+              });
+            }
           }
         }
       }
 
-      // ✅ Get ID of oldest message for next page
-      before = messages.lastKey();
-      
-      // ✅ Stop if we got less than 100 = end of history
-      if (messages.size < 100) break;
-      
-      // ✅ Rate limit — safe delay
-      await new Promise(r => setTimeout(r, 200));
-      
-    } catch (e) {
-      console.error("❌ Scan error:", e.message);
-      await new Promise(r => setTimeout(r, 1000));
-      continue;
+      // ==============================================
+      // ✅ PROCESS ATTACHMENTS — Skip .lua & images
+      // ==============================================
+      for (const file of attachments) {
+        const filename = String(file.name || "").trim();
+        
+        // Skip .lua files
+        if (filename.toLowerCase().endsWith(".lua")) continue;
+        // Skip images
+        if (isImageFile(filename)) continue;
+        if (!filename) continue;
+
+        files.push(file);
+      }
     }
+
+    const oldestMessage = batch.last();
+    if (!oldestMessage) break;
+    before = oldestMessage.id;
+    if (batch.size < 100) break;
+
+    await new Promise(r => setTimeout(r, 200));
   }
 
-  // ✅ Final save
+  // ==============================================
+  // ✅ DEDUPLICATE by filename (case-insensitive)
+  // ==============================================
+  const uniqueByName = new Map();
+  let newFiles = 0;
+  let duplicateFiles = 0;
+
+  // Keep existing files first
+  for (const file of libraryFiles) {
+    const key = normalizeFilename(file.name);
+    if (!key) continue;
+    if (!uniqueByName.has(key)) uniqueByName.set(key, file);
+  }
+
+  // Add new files, skip duplicates
+  for (const file of files) {
+    const key = normalizeFilename(file.name);
+    if (!key) continue;
+    if (key.endsWith(".lua")) continue;
+    if (isImageFile(file.name)) continue;
+
+    if (uniqueByName.has(key)) {
+      duplicateFiles++;
+      continue;
+    }
+
+    uniqueByName.set(key, {
+      id: generateFileId(),
+      name: file.name,
+      url: file.url,
+      size: file.size,
+      channelId: file.channelId,
+      messageId: file.messageId,
+      timestamp: file.createdTimestamp,
+      source: file.source
+    });
+    newFiles++;
+    console.log(`✅ [${file.source}] Added: ${file.name}`);
+  }
+
+  // Replace library with sorted unique files
+  const sortedFiles = [...uniqueByName.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  libraryFiles.length = 0;
+  libraryFiles.push(...sortedFiles);
   saveLibrary();
-  console.log(`✅ SCAN FINISHED — Scanned: ${scanned}, Added: ${added}, Total files: ${libraryFiles.length}`);
+
+  console.log(`✅ SCAN FINISHED — Messages: ${totalMessages} | New: ${newFiles} | Duplicates: ${duplicateFiles} | Total Files: ${libraryFiles.length}`);
   
-  return { added, total: libraryFiles.length, scanned };
+  return { added: newFiles, total: libraryFiles.length, scanned: totalMessages };
 }
 
 // =========================
-// PAGINATION HELPER
+// PAGINATION — NO ID IN OUTPUT ✅
 // =========================
 function buildSearchPage(userId, results, page = 1) {
   const pageSize = 10;
@@ -332,9 +393,7 @@ function buildSearchPage(userId, results, page = 1) {
   const pageResults = results.slice(start, start + pageSize);
 
   const embed = new EmbedBuilder()
-    .setTitle(`🔍 Search Results`)
-    .setDescription(`**${results.length} matches** | Page ${page}/${totalPages}\n\n` +
-      pageResults.map((f, i) => `**${start + i + 1}. ${f.name}** — \`${f.id}\``).join("\n"))
+    .setDescription(pageResults.map((f, i) => `**${start + i + 1}. ${f.name}**`).join("\n"))
     .setColor(0x808080);
 
   const components = totalPages > 1 ? [new ActionRowBuilder().addComponents(
@@ -350,7 +409,7 @@ function buildSearchPage(userId, results, page = 1) {
       .setDisabled(page >= totalPages)
   )] : [];
 
-  return { embed, components };
+  return { embed, components, totalPages, currentPage: page };
 }
 
 // =========================
@@ -369,7 +428,7 @@ client.on("interactionCreate", async interaction => {
         
         if (targetUserId !== userId) return interaction.reply({ content: "❌ Not your search.", ephemeral: true });
         const session = searchSessions.get(userId);
-        if (!session) return interaction.reply({ content: "❌ Session expired. Use `.find` again.", ephemeral: true });
+        if (!session) return interaction.reply({ content: "❌ Session expired. Try again.", ephemeral: true });
 
         if (interaction.customId.includes("next")) page++;
         else page--;
@@ -428,7 +487,7 @@ client.on("interactionCreate", async interaction => {
       catch { return interaction.reply({ content: "❌ Failed.", ephemeral: true }); }
     }
 
-    if (interaction.commandName === "scanfile") {
+    if (interaction.commandName === "scanchannel") {
       const channel = interaction.options.getChannel("channel");
       await interaction.deferReply();
       const result = await scanChannel(channel, interaction);
@@ -515,15 +574,24 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// PREFIX COMMANDS — .find + .get ✅
+// PREFIX COMMANDS — .fs / .prince / !fs / ?fs ✅ | NO IDs ✅
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
-  // ===== .find — PRIORITY SEARCH ✅
-  if (message.content.startsWith(PREFIX + "find ")) {
-    const query = message.content.slice(PREFIX.length + 5).trim();
-    if (!query) return message.reply("⚠️ Usage: `.find <name>`");
+  // ✅ ALL ALIASES work
+  const prefixes = [".fs ", ".prince ", "!fs ", "?fs "];
+  let query = null;
+  
+  for (const pfx of prefixes) {
+    if (message.content.startsWith(pfx)) {
+      query = message.content.slice(pfx.length).trim();
+      break;
+    }
+  }
+  
+  if (query !== null) {
+    if (!query) return message.reply("⚠️ Usage: `.fs <name>`");
     
     const results = searchFiles(query);
     if (results.length === 0) return message.reply("❌ No matches found.");
@@ -531,15 +599,6 @@ client.on("messageCreate", async message => {
     searchSessions.set(message.author.id, { results, page: 1 });
     const { embed, components } = buildSearchPage(message.author.id, results, 1);
     return message.channel.send({ embeds: [embed], components });
-  }
-
-  // ===== .get — DOWNLOAD FILE ✅
-  if (message.content.startsWith(PREFIX + "get ")) {
-    const id = message.content.slice(PREFIX.length + 4).trim();
-    if (!id) return message.reply("⚠️ Usage: `.get <file_id>`");
-    const file = getFileById(id);
-    if (!file) return message.reply("❌ File not found.");
-    return message.channel.send({ files: [{ attachment: file.url, name: file.name }] });
   }
 
   // ===== PING WARN =====
