@@ -21,7 +21,7 @@ const path = require("path");
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OWNER_ID = "1302080645987569694";
-const SCAN_ROLE_ID = "1509953862226935948";
+const SCAN_ROLE_ID = "1509953862226935948"; // ✅ Can use ANYWHERE
 
 if (!TOKEN || !CLIENT_ID) {
   console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID");
@@ -99,6 +99,13 @@ function getTimePH() {
   return ph.toISOString().slice(11, 16);
 }
 
+// ✅ BYPASS CHECK — Owner OR Scan Role = can use ANY channel
+function hasBypass(member, userId) {
+  if (userId === OWNER_ID) return true;
+  if (member?.roles?.cache?.has(SCAN_ROLE_ID)) return true;
+  return false;
+}
+
 // =========================
 // SMART SEARCH
 // =========================
@@ -138,7 +145,7 @@ function getFileById(id) {
 }
 
 // =========================
-// PAGINATION
+// PAGINATION — STORE MESSAGE ID + OWNER
 // =========================
 const searchSessions = new Map();
 
@@ -250,15 +257,14 @@ async function scanChannel(channel, interaction = null) {
 }
 
 // =========================
-// ✅ 15 LINES PER PAGE — filename │ ID lines ONLY
+// ✅ 8 LINES PER PAGE — BUILD EMBED
 // =========================
-function buildSearchPage(userId, results, page = 1) {
-  const perPage = 15; // ✅ EXACTLY 15 lines per page
+function buildSearchPage(ownerUserId, results, page = 1) {
+  const perPage = 8; // ✅ CHANGED: 8 lines max per page
   const totalPages = Math.ceil(results.length / perPage);
   const start = (page - 1) * perPage;
   const display = results.slice(start, start + perPage);
 
-  // ✅ Each line = `filename │ ID: abc123` — MAX 15 LINES
   const desc = display.map(f => `\`${f.name}\` │ ID: \`${f.id}\``).join("\n");
 
   const embed = new EmbedBuilder()
@@ -269,14 +275,14 @@ function buildSearchPage(userId, results, page = 1) {
 
   const components = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`search_back_${userId}_${page}`)
+      .setCustomId(`search_back_${ownerUserId}_${page}`)
       .setLabel("Back")
-      .setStyle(ButtonStyle.Secondary) // GRAY
+      .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 1),
     new ButtonBuilder()
-      .setCustomId(`search_next_${userId}_${page}`)
+      .setCustomId(`search_next_${ownerUserId}_${page}`)
       .setLabel("Next")
-      .setStyle(ButtonStyle.Success) // GREEN
+      .setStyle(ButtonStyle.Success)
       .setDisabled(page >= totalPages)
   );
   return { embeds: [embed], components: [components] };
@@ -289,15 +295,35 @@ client.on("interactionCreate", async interaction => {
   try {
     if (interaction.isButton()) {
       const userId = interaction.user.id;
-      if (interaction.customId.startsWith("search_")) {
-        const parts = interaction.customId.split("_");
-        const direction = parts[1], targetUserId = parts[2], page = parseInt(parts[3]);
-        if (targetUserId !== userId) return interaction.reply({ content: "❌ Not your search, idiot.", ephemeral: true });
-        const session = searchSessions.get(userId);
-        if (!session) return interaction.reply({ content: "❌ Search expired. Use .find again.", ephemeral: true });
-        const newPage = direction === "next" ? page + 1 : page - 1;
-        searchSessions.set(userId, { ...session, page: newPage });
-        await interaction.update(buildSearchPage(userId, session.results, newPage));
+      const customId = interaction.customId;
+
+      if (customId.startsWith("search_back_") || customId.startsWith("search_next_")) {
+        const parts = customId.split("_");
+        const direction = parts[1];
+        const ownerUserId = parts[2];
+        const currentPage = parseInt(parts[3]);
+
+        if (ownerUserId !== userId) {
+          return interaction.reply({
+            content: "❌ stfu, this is not your search",
+            ephemeral: true
+          });
+        }
+
+        const session = searchSessions.get(interaction.message.id);
+        if (!session) {
+          return interaction.reply({
+            content: "❌ Search expired, idiot. Use .find again.",
+            ephemeral: true
+          });
+        }
+
+        const newPage = direction === "next" ? currentPage + 1 : currentPage - 1;
+        const reply = buildSearchPage(ownerUserId, session.results, newPage);
+        session.page = newPage;
+        searchSessions.set(interaction.message.id, session);
+
+        await interaction.update(reply);
       }
       return;
     }
@@ -350,25 +376,32 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// PREFIX COMMANDS
+// ✅ PREFIX COMMANDS — ROLE BYPASS + 8 LINES
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
-  const isOwner = message.author.id === OWNER_ID;
-  const allowed = isOwner || !config.allowedChannelId || message.channel.id === config.allowedChannelId;
+  
+  // ✅ Owner OR Role = can use ANY channel (bypass check)
+  const bypass = hasBypass(message.member, message.author.id);
+  const allowed = bypass || !config.allowedChannelId || message.channel.id === config.allowedChannelId;
 
+  // ========== .find ==========
   if (message.content.startsWith(".find ")) {
-    if (!allowed) return message.reply("❌ Not here, idiot.");
+    if (!allowed) return message.reply("❌ not here, idiot.");
     const query = message.content.slice(6).trim();
     if (!query) return message.reply("❌ No match file for that, idiot.");
     const results = searchFiles(query);
     if (results.length === 0) return message.reply("❌ No match file for that, idiot.");
-    searchSessions.set(message.author.id, { results, page: 1 });
-    return message.reply(buildSearchPage(message.author.id, results, 1));
+
+    const replyData = buildSearchPage(message.author.id, results, 1);
+    const replyMsg = await message.reply(replyData);
+    searchSessions.set(replyMsg.id, { userId: message.author.id, results, page: 1 });
+    return;
   }
 
+  // ========== .get ==========
   if (message.content.startsWith(".get")) {
-    if (!allowed) return message.reply("❌ Not here, idiot.");
+    if (!allowed) return message.reply("❌ not here, idiot.");
     const id = message.content.slice(4).trim();
     if (!id) return message.reply("❌ Put ID of File, idiot.");
     const file = getFileById(id);
