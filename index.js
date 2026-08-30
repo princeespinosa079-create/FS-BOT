@@ -4,7 +4,6 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
-  EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -14,7 +13,6 @@ const {
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 
 // =========================
 // CONFIG
@@ -82,12 +80,11 @@ function isImageFile(name, contentType) {
   return IMAGE_EXTENSIONS.includes(ext);
 }
 
-function generateFileId() {
-  return Math.random().toString(36).slice(2, 8);
-}
-function fileExistsByName(name) { 
-  const key = normalizeFilename(name);
-  return libraryFiles.some(f => normalizeFilename(f.name) === key); 
+function formatSize(bytes) {
+  if (!bytes) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 // =========================
@@ -314,9 +311,7 @@ async function scanChannel(channel, interaction = null) {
       for (const file of attachments) {
         const filename = String(file.name || "").trim();
         
-        // Skip .lua files
         if (filename.toLowerCase().endsWith(".lua")) continue;
-        // Skip images
         if (isImageFile(filename)) continue;
         if (!filename) continue;
 
@@ -337,79 +332,72 @@ async function scanChannel(channel, interaction = null) {
   // ==============================================
   const uniqueByName = new Map();
   let newFiles = 0;
-  let duplicateFiles = 0;
 
-  // Keep existing files first
   for (const file of libraryFiles) {
     const key = normalizeFilename(file.name);
     if (!key) continue;
     if (!uniqueByName.has(key)) uniqueByName.set(key, file);
   }
 
-  // Add new files, skip duplicates
   for (const file of files) {
     const key = normalizeFilename(file.name);
     if (!key) continue;
     if (key.endsWith(".lua")) continue;
     if (isImageFile(file.name)) continue;
 
-    if (uniqueByName.has(key)) {
-      duplicateFiles++;
-      continue;
-    }
+    if (uniqueByName.has(key)) continue;
 
     uniqueByName.set(key, {
-      id: generateFileId(),
       name: file.name,
       url: file.url,
       size: file.size,
       channelId: file.channelId,
       messageId: file.messageId,
-      timestamp: file.createdTimestamp,
-      source: file.source
+      timestamp: file.createdTimestamp
     });
     newFiles++;
     console.log(`✅ [${file.source}] Added: ${file.name}`);
   }
 
-  // Replace library with sorted unique files
   const sortedFiles = [...uniqueByName.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   libraryFiles.length = 0;
   libraryFiles.push(...sortedFiles);
   saveLibrary();
 
-  console.log(`✅ SCAN FINISHED — Messages: ${totalMessages} | New: ${newFiles} | Duplicates: ${duplicateFiles} | Total Files: ${libraryFiles.length}`);
-  
+  console.log(`✅ SCAN FINISHED — Messages: ${totalMessages} | New: ${newFiles} | Total Files: ${libraryFiles.length}`);
   return { added: newFiles, total: libraryFiles.length, scanned: totalMessages };
 }
 
 // =========================
-// PAGINATION — NO ID IN OUTPUT ✅
+// ✅ BUILD SEARCH — EXACTLY LIKE YOUR SECOND PHOTO ✅
 // =========================
 function buildSearchPage(userId, results, page = 1) {
-  const pageSize = 10;
+  const pageSize = 1; // 1 file per page like your screenshot
   const totalPages = Math.ceil(results.length / pageSize);
   const start = (page - 1) * pageSize;
-  const pageResults = results.slice(start, start + pageSize);
+  const file = results[start];
 
-  const embed = new EmbedBuilder()
-    .setDescription(pageResults.map((f, i) => `**${start + i + 1}. ${f.name}**`).join("\n"))
-    .setColor(0x808080);
+  // ✅ EXACT FORMAT: File name + size + page counter + blue buttons
+  const content = `📄 **${file.name}**\n${formatSize(file.size)}`;
 
-  const components = totalPages > 1 ? [new ActionRowBuilder().addComponents(
+  const components = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`search_prev_${userId}_${page}`)
       .setEmoji("⬅️")
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(ButtonStyle.Primary) // Blue like your screenshot
       .setDisabled(page <= 1),
+    new ButtonBuilder()
+      .setLabel(`${page}/${totalPages}`)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true),
     new ButtonBuilder()
       .setCustomId(`search_next_${userId}_${page}`)
       .setEmoji("➡️")
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(ButtonStyle.Primary) // Blue like your screenshot
       .setDisabled(page >= totalPages)
-  )] : [];
+  );
 
-  return { embed, components, totalPages, currentPage: page };
+  return { content, components };
 }
 
 // =========================
@@ -433,10 +421,10 @@ client.on("interactionCreate", async interaction => {
         if (interaction.customId.includes("next")) page++;
         else page--;
 
-        const { embed, components } = buildSearchPage(userId, session.results, page);
+        const { content, components } = buildSearchPage(userId, session.results, page);
         session.page = page;
         searchSessions.set(userId, session);
-        await interaction.update({ embeds: [embed], components });
+        await interaction.update({ content, components });
         return;
       }
 
@@ -477,7 +465,7 @@ client.on("interactionCreate", async interaction => {
       await interaction.deferReply({ ephemeral: true });
       const guilds = [...client.guilds.cache.values()];
       const desc = `**Total:** ${guilds.length}\n\n` + guilds.map((g, i) => `${i + 1}. **${g.name}** — \`${g.id}\``).join("\n").slice(0, 4000);
-      return interaction.editReply({ embeds: [new EmbedBuilder().setTitle("SERVER LIST").setDescription(desc).setColor(0x808080)] });
+      return interaction.editReply({ embeds: [{ title: "SERVER LIST", description: desc, color: 0x808080 }] });
     }
 
     if (interaction.commandName === "leave") {
@@ -492,10 +480,7 @@ client.on("interactionCreate", async interaction => {
       await interaction.deferReply();
       const result = await scanChannel(channel, interaction);
       return interaction.editReply({
-        embeds: [new EmbedBuilder()
-          .setTitle("📁 SCAN COMPLETE")
-          .setDescription(`**Channel:** <#${channel.id}>\n**Messages scanned:** ${result.scanned}\n**Files added:** ${result.added}\n**Total in Library:** ${result.total}`)
-          .setColor(0x808080)]
+        content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Messages scanned:** ${result.scanned}\n**Files added:** ${result.added}\n**Total in Library:** ${result.total}`
       });
     }
 
@@ -511,10 +496,7 @@ client.on("interactionCreate", async interaction => {
         if (m.user.createdTimestamp >= day20) newAccs.push(`<@${m.id}> \`${m.user.tag}\``);
       }
       return interaction.editReply({
-        embeds: [
-          new EmbedBuilder().setTitle(`SPY/ALT LIST (${spies.length})`).setDescription(spies.join("\n") || "None").setColor(0x808080),
-          new EmbedBuilder().setTitle(`NEW ACCOUNTS (${newAccs.length})`).setDescription(newAccs.join("\n") || "None").setColor(0x808080)
-        ]
+        content: `**SPY/ALT LIST (${spies.length})**\n${spies.join("\n") || "None"}\n\n**NEW ACCOUNTS (${newAccs.length})**\n${newAccs.join("\n") || "None"}`
       });
     }
 
@@ -532,7 +514,7 @@ client.on("interactionCreate", async interaction => {
       if (sub === "all") {
         const total = interaction.guild.members.cache.filter(m => !m.user.bot && !m.roles.cache.has(role.id)).size;
         return interaction.reply({
-          embeds: [new EmbedBuilder().setTitle("ROLE ALL").setDescription(`Role: ${role}\nMembers: ${total}`).setColor(0x808080)],
+          content: `**ROLE ALL**\nRole: ${role}\nMembers: ${total}`,
           components: [new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`roleall_start_${role.id}`).setLabel("Start").setStyle(ButtonStyle.Success),
             new ButtonBuilder().setCustomId("roleall_stop").setLabel("Stop").setStyle(ButtonStyle.Danger)
@@ -543,11 +525,11 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (interaction.commandName === "embed") {
-      const embed = new EmbedBuilder().setDescription(interaction.options.getString("description")).setColor(0x808080);
-      if (interaction.options.getString("title")) embed.setTitle(interaction.options.getString("title"));
+      const desc = interaction.options.getString("description");
+      const title = interaction.options.getString("title");
       await interaction.deferReply({ ephemeral: true });
       await interaction.deleteReply();
-      return interaction.channel.send({ embeds: [embed] });
+      return interaction.channel.send({ content: title ? `**${title}**\n${desc}` : desc });
     }
 
     if (interaction.commandName === "ghostping") {
@@ -574,7 +556,7 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// PREFIX COMMANDS — .fs / .prince / !fs / ?fs ✅ | NO IDs ✅
+// PREFIX COMMANDS — .fs / .prince / !fs / ?fs ✅ | PHOTO 2 FORMAT ✅
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
@@ -597,8 +579,8 @@ client.on("messageCreate", async message => {
     if (results.length === 0) return message.reply("❌ No matches found.");
 
     searchSessions.set(message.author.id, { results, page: 1 });
-    const { embed, components } = buildSearchPage(message.author.id, results, 1);
-    return message.channel.send({ embeds: [embed], components });
+    const { content, components } = buildSearchPage(message.author.id, results, 1);
+    return message.channel.send({ content, components });
   }
 
   // ===== PING WARN =====
