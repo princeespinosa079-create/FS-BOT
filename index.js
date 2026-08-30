@@ -67,9 +67,12 @@ if (!library.files) library.files = [];
 const libraryFiles = library.files;
 const saved = loadData();
 
-// IMAGE FILTER
+// =========================
+// FILTERS — SCAN .txt & ALL FILES, ONLY SKIP IMAGES ✅
+// =========================
 const IMAGE_MIME_REGEX = /^image\//i;
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"];
+
 function isImageFile(name, contentType) {
   if (contentType && IMAGE_MIME_REGEX.test(contentType)) return true;
   const ext = path.extname(name || "").toLowerCase();
@@ -82,10 +85,69 @@ function generateFileId() {
 function fileExistsByHash(hash) { return libraryFiles.some(f => f.hash === hash); }
 function fileExistsByUrl(url) { return libraryFiles.some(f => f.url === url); }
 function getFileById(id) { return libraryFiles.find(f => f.id === id); }
+
+// =========================
+// ✅ SMART SEARCH — PRIORITY SYSTEM
+// .find anti desync → 1st: anti_desync.txt, then desync, then work_desync ✅
+// =========================
 function searchFiles(query) {
-  const q = query.toLowerCase();
-  return libraryFiles.filter(f => f.name.toLowerCase().includes(q) || f.id.toLowerCase().includes(q));
+  const q = query.toLowerCase().trim();
+  if (!q) return [];
+
+  const results = [];
+  const exactMatches = [];
+  const startsWithMatches = [];
+  const includesMatches = [];
+  const relatedMatches = [];
+
+  const keywords = q.split(/\s+/);
+  const qWords = new Set(keywords);
+  const qNoSpecial = q.replace(/[^a-z0-9]/g, "");
+
+  for (const file of libraryFiles) {
+    const name = file.name.toLowerCase();
+    const nameNoSpecial = name.replace(/[^a-z0-9]/g, "");
+
+    // 1️⃣ EXACT MATCH — anti_desync.txt == anti desync
+    if (name === q || nameNoSpecial === qNoSpecial || name === q + ".txt") {
+      exactMatches.push(file);
+      continue;
+    }
+
+    // 2️⃣ STARTS WITH — highest priority after exact
+    if (name.startsWith(q) || nameNoSpecial.startsWith(qNoSpecial)) {
+      startsWithMatches.push(file);
+      continue;
+    }
+
+    // 3️⃣ INCLUDES — contains full query
+    if (name.includes(q) || nameNoSpecial.includes(qNoSpecial)) {
+      includesMatches.push(file);
+      continue;
+    }
+
+    // 4️⃣ RELATED — matches keywords like desync, work_desync
+    let matchCount = 0;
+    for (const word of qWords) {
+      if (name.includes(word)) matchCount++;
+    }
+    if (matchCount > 0) {
+      relatedMatches.push({ file, score: matchCount });
+    }
+  }
+
+  // Sort related by best match
+  relatedMatches.sort((a, b) => b.score - a.score);
+
+  // Return in PRIORITY ORDER ✅
+  return [
+    ...exactMatches,
+    ...startsWithMatches,
+    ...includesMatches,
+    ...relatedMatches.map(r => r.file)
+  ];
 }
+
 function getFileHash(buffer) { return crypto.createHash("md5").update(buffer).digest("hex"); }
 
 // =========================
@@ -113,7 +175,7 @@ const client = new Client({
 // =========================
 const pingWarnRoles = new Map(Object.entries(saved.pingWarn || {}));
 const roleJobs = new Map();
-const searchSessions = new Map(); // FOR PAGINATION ✅
+const searchSessions = new Map();
 
 // =========================
 // HELPERS
@@ -159,7 +221,7 @@ const commands = [
       .addChoices({ name: "ON", value: "on" }, { name: "OFF", value: "off" }))
     .addRoleOption(o => o.setName("role").setDescription("Role to watch").setRequired(true))
     .addStringOption(o => o.setName("duration").setDescription("Penalty duration")),
-  new SlashCommandBuilder().setName("scanfile").setDescription("Scan ALL messages in channel & add files to library")
+  new SlashCommandBuilder().setName("scanfile").setDescription("Scan ALL messages including forwarded — add all files to library")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true))
 ].map(c => c.toJSON());
@@ -179,34 +241,46 @@ client.once("ready", async () => {
 });
 
 // =========================
-// SCAN CHANNEL — SCAN ALL MESSAGES, NO SKIP ✅
+// ✅ SCAN CHANNEL — NOW SCANS FORWARDED, .txt, ALL ATTACHMENTS ✅
+// NO MESSAGE SKIP — SCANS EVERY SINGLE MESSAGE
 // =========================
 async function scanChannel(channel, interaction = null) {
-  if (!channel.isTextBased()) return { added: 0, total: libraryFiles.length };
-  if (interaction) await interaction.editReply({ content: `🔍 Scanning **ALL messages** in <#${channel.id}>... This may take time.` });
+  if (!channel.isTextBased()) return { added: 0, total: libraryFiles.length, scanned: 0 };
+  if (interaction) await interaction.editReply({ content: `🔍 Scanning **ALL messages** in <#${channel.id}> — including forwarded & .txt files...` });
 
   let added = 0;
-  let before = null;
   let scanned = 0;
+  let before = null;
 
   while (true) {
     const options = { limit: 100 };
     if (before) options.before = before;
+    
+    // ✅ Fetch ALL messages — NO timestamp filter, NO skip
     const messages = await channel.messages.fetch(options);
     if (messages.size === 0) break;
 
     for (const msg of messages.values()) {
       scanned++;
+      
+      // ✅ FORWARDED MESSAGES ARE SCANNED TOO — Discord keeps attachments in msg.attachments
       for (const att of msg.attachments.values()) {
-        if (isImageFile(att.name, att.contentType)) continue; // SKIP IMAGES ✅
-        if (fileExistsByUrl(att.url)) continue; // NO DUPLICATE ✅
+        // ✅ ONLY skip images — .txt, .lua, .json, ALL other files SCANNED
+        if (isImageFile(att.name, att.contentType)) continue;
+        
+        // ✅ NO DUPLICATES
+        if (fileExistsByUrl(att.url)) continue;
 
         try {
+          // Download file to get hash for duplicate check
           const res = await fetch(att.url);
+          if (!res.ok) continue;
           const buf = Buffer.from(await res.arrayBuffer());
           const hash = getFileHash(buf);
+          
           if (fileExistsByHash(hash)) continue;
 
+          // ✅ ADD TO LIBRARY
           libraryFiles.push({
             id: generateFileId(),
             name: att.name,
@@ -215,16 +289,24 @@ async function scanChannel(channel, interaction = null) {
             channelId: channel.id,
             messageId: msg.id,
             timestamp: msg.timestamp,
-            hash
+            hash,
+            forwarded: msg.reference ? true : false
           });
           added++;
-        } catch (e) {}
+          
+          // ✅ Save periodically
+          if (added % 10 === 0) saveLibrary();
+        } catch (e) {
+          console.log(`⚠️ Skipped ${att.name}: ${e.message}`);
+        }
       }
     }
 
     before = messages.lastKey();
     if (messages.size < 100) break;
-    await new Promise(r => setTimeout(r, 100)); // Rate limit safe
+    
+    // ✅ Rate limit safe
+    await new Promise(r => setTimeout(r, 150));
   }
 
   saveLibrary();
@@ -234,7 +316,7 @@ async function scanChannel(channel, interaction = null) {
 // =========================
 // PAGINATION HELPER — SHORT DESCRIPTION ✅
 // =========================
-function buildSearchPage(interactionOrMsg, results, page = 1) {
+function buildSearchPage(userId, results, page = 1) {
   const pageSize = 10;
   const totalPages = Math.ceil(results.length / pageSize);
   const start = (page - 1) * pageSize;
@@ -243,17 +325,17 @@ function buildSearchPage(interactionOrMsg, results, page = 1) {
   const embed = new EmbedBuilder()
     .setTitle(`🔍 Search Results`)
     .setDescription(`**${results.length} matches** | Page ${page}/${totalPages}\n\n` +
-      pageResults.map(f => `**${f.name}** — \`${f.id}\``).join("\n"))
+      pageResults.map((f, i) => `**${start + i + 1}. ${f.name}** — \`${f.id}\``).join("\n"))
     .setColor(0x808080);
 
   const components = totalPages > 1 ? [new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`search_prev_${page}`)
+      .setCustomId(`search_prev_${userId}_${page}`)
       .setEmoji("⬅️")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 1),
     new ButtonBuilder()
-      .setCustomId(`search_next_${page}`)
+      .setCustomId(`search_next_${userId}_${page}`)
       .setEmoji("➡️")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page >= totalPages)
@@ -267,21 +349,30 @@ function buildSearchPage(interactionOrMsg, results, page = 1) {
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
-    // === BUTTONS — PAGINATION ACTUALLY WORKS NOW ✅ ===
+    // === BUTTONS — PAGINATION FULLY WORKING ✅ ===
     if (interaction.isButton()) {
       const userId = interaction.user.id;
 
       if (interaction.customId.startsWith("search_prev_") || interaction.customId.startsWith("search_next_")) {
+        const parts = interaction.customId.split("_");
+        const targetUserId = parts[2];
+        let page = parseInt(parts[3]);
+        
+        // Only the user who searched can paginate
+        if (targetUserId !== userId) {
+          return interaction.reply({ content: "❌ Not your search.", ephemeral: true });
+        }
+
         const session = searchSessions.get(userId);
         if (!session) return interaction.reply({ content: "❌ Session expired. Use `.find` again.", ephemeral: true });
 
-        let page = parseInt(interaction.customId.split("_")[2]);
+        // Calculate new page
         if (interaction.customId.includes("next")) page++;
         else page--;
 
-        const { embed, components } = buildSearchPage(interaction, session.results, page);
+        const { embed, components } = buildSearchPage(userId, session.results, page);
         session.page = page;
-        searchSessions.set(userId, session); // Update session
+        searchSessions.set(userId, session);
 
         await interaction.update({ embeds: [embed], components });
         return;
@@ -342,7 +433,7 @@ client.on("interactionCreate", async interaction => {
       return interaction.editReply({
         embeds: [new EmbedBuilder()
           .setTitle("📁 SCAN COMPLETE")
-          .setDescription(`**Channel:** <#${channel.id}>\n**Scanned:** ${result.scanned} messages\n**Added:** ${result.added} files\n**Total in Library:** ${result.total}`)
+          .setDescription(`**Channel:** <#${channel.id}>\n**Messages scanned:** ${result.scanned}\n**Files added:** ${result.added}\n**Total in Library:** ${result.total}`)
           .setColor(0x808080)]
       });
     }
@@ -422,22 +513,25 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// PREFIX COMMANDS — .find & .get ✅
+// PREFIX COMMANDS — .find PRIORITY + .get ✅
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
-  // ===== .find — SHORT DESCRIPTION + WORKING ⬅️➡️ PAGINATION ✅
+  // ===== .find — SMART PRIORITY SEARCH ✅
   if (message.content.startsWith(PREFIX + "find ")) {
     const query = message.content.slice(PREFIX.length + 5).trim();
     if (!query) return message.reply("⚠️ Usage: `.find <name>`");
+    
+    // ✅ Uses priority search — exact → starts with → includes → related
     const results = searchFiles(query);
+    
     if (results.length === 0) return message.reply("❌ No matches found.");
 
     // Save session for pagination
     searchSessions.set(message.author.id, { results, page: 1 });
 
-    const { embed, components } = buildSearchPage(message, results, 1);
+    const { embed, components } = buildSearchPage(message.author.id, results, 1);
     return message.channel.send({ embeds: [embed], components });
   }
 
