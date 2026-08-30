@@ -8,8 +8,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  PermissionFlagsBits,
-  AttachmentBuilder
+  PermissionFlagsBits
 } = require("discord.js");
 
 const express = require("express");
@@ -19,7 +18,6 @@ const https = require("https");
 const http = require("http");
 const crypto = require("crypto");
 
-// Try to load yauzl for zip extraction
 let yauzl = null;
 try { yauzl = require("yauzl"); } catch (e) { console.log("⚠️ yauzl not installed, zip extraction disabled"); }
 
@@ -45,18 +43,17 @@ app.get("/", (req, res) => res.send("FS Bot Online"));
 app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT} open`));
 
 // =========================
-// TEMP DIR FOR ZIP EXTRACTION
-// =========================
-const TEMP_DIR = path.join(DATA_DIR || __dirname, "temp");
-if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
-
-// =========================
-// DATA
+// ✅ FIXED: DEFINE DATA_DIR FIRST BEFORE USING
 // =========================
 const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
+const TEMP_DIR = path.join(DATA_DIR, "temp");
+if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
+// =========================
+// HELPERS
+// =========================
 function normalizeFilename(name) {
   return String(name || "").trim().toLowerCase();
 }
@@ -98,7 +95,7 @@ const libraryFiles = library.files;
 saveLibrary();
 
 // =========================
-// HELPERS
+// MORE HELPERS
 // =========================
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"];
 function isImageFile(name) {
@@ -112,14 +109,12 @@ function getTimePH() {
   return ph.toISOString().slice(11, 16);
 }
 
-// ✅ BYPASS — Owner OR Scan Role = anywhere
 function hasBypass(member, userId) {
   if (userId === OWNER_ID) return true;
   if (member?.roles?.cache?.has(SCAN_ROLE_ID)) return true;
   return false;
 }
 
-// ✅ CHECK IF FILE ALREADY EXISTS (by normalized filename)
 function fileExistsByName(name) {
   const n = normalizeFilename(name);
   return libraryFiles.some(f => normalizeFilename(f.name) === n);
@@ -131,27 +126,21 @@ function fileExistsByName(name) {
 function searchFiles(query) {
   const q = query.toLowerCase().trim();
   if (!q || libraryFiles.length === 0) return [];
-
   const qWords = q.split(/\s+/);
   const qNoSpecial = q.replace(/[^a-z0-9]/g, "");
   const exactMatches = [], allWordsMatches = [], anyWordMatches = [];
-
   for (const file of libraryFiles) {
     const name = normalizeFilename(file.name);
     const nameNoSpecial = name.replace(/[^a-z0-9]/g, "");
-
-    if (name === q || nameNoSpecial === qNoSpecial || 
-        name.startsWith(q + ".") || nameNoSpecial.startsWith(qNoSpecial + ".")) {
+    if (name === q || nameNoSpecial === qNoSpecial || name.startsWith(q + ".") || nameNoSpecial.startsWith(qNoSpecial + ".")) {
       exactMatches.push(file);
       continue;
     }
-
     let allWords = true;
     for (const word of qWords) {
       if (!name.includes(word)) { allWords = false; break; }
     }
     if (allWords && qWords.length > 1) { allWordsMatches.push(file); continue; }
-
     for (const word of qWords) {
       if (name.includes(word)) { anyWordMatches.push(file); break; }
     }
@@ -163,9 +152,6 @@ function getFileById(id) {
   return libraryFiles.find(file => file.id === id);
 }
 
-// =========================
-// DOWNLOAD FILE HELPER
-// =========================
 function downloadFile(url, destPath) {
   return new Promise((resolve, reject) => {
     const protocol = url.startsWith("https") ? https : http;
@@ -173,81 +159,38 @@ function downloadFile(url, destPath) {
     protocol.get(url, response => {
       response.pipe(file);
       file.on("finish", () => { file.close(); resolve(destPath); });
-    }).on("error", err => {
-      fs.unlink(destPath, () => {});
-      reject(err);
-    });
+    }).on("error", err => { fs.unlink(destPath, () => {}); reject(err); });
   });
 }
 
-// =========================
-// ✅ EXTRACT ZIP & ADD TO LIBRARY
-// =========================
-async function extractZipToLibrary(zipPath, interaction = null) {
+async function extractZipToLibrary(zipPath) {
   if (!yauzl) throw new Error("yauzl not installed. Run: npm install yauzl");
-
   return new Promise((resolve, reject) => {
     let added = 0, skipped = 0;
-
     yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
       if (err) return reject(err);
-
       zipfile.readEntry();
       zipfile.on("entry", entry => {
-        // Skip directories
-        if (/\/$/.test(entry.fileName)) {
-          zipfile.readEntry();
-          return;
-        }
-
+        if (/\/$/.test(entry.fileName)) { zipfile.readEntry(); return; }
         const fileName = path.basename(entry.fileName);
         const n = normalizeFilename(fileName);
-
-        // Skip images or empty
-        if (!n || isImageFile(fileName)) {
-          skipped++;
-          zipfile.readEntry();
-          return;
-        }
-
-        // ✅ SKIP DUPLICATES — same filename already in library
-        if (fileExistsByName(fileName)) {
-          skipped++;
-          zipfile.readEntry();
-          return;
-        }
-
-        // Extract file to temp
+        if (!n || isImageFile(fileName)) { skipped++; zipfile.readEntry(); return; }
+        if (fileExistsByName(fileName)) { skipped++; zipfile.readEntry(); return; }
         const tempPath = path.join(TEMP_DIR, `${crypto.randomBytes(8).toString("hex")}_${fileName}`);
-        
         zipfile.openReadStream(entry, (err, readStream) => {
           if (err) { zipfile.readEntry(); return; }
           const writeStream = fs.createWriteStream(tempPath);
           readStream.pipe(writeStream);
           writeStream.on("finish", () => {
-            // Add to library
             const stats = fs.statSync(tempPath);
-            libraryFiles.push({
-              id: generateId(),
-              name: fileName,
-              url: tempPath, // Local path — will be sent as attachment
-              isLocal: true,
-              size: stats.size,
-              timestamp: Date.now()
-            });
+            libraryFiles.push({ id: generateId(), name: fileName, url: tempPath, isLocal: true, size: stats.size, timestamp: Date.now() });
             added++;
             saveLibrary();
             zipfile.readEntry();
           });
         });
       });
-
-      zipfile.on("end", () => {
-        // Cleanup zip
-        fs.unlink(zipPath, () => {});
-        resolve({ added, skipped, total: libraryFiles.length });
-      });
-
+      zipfile.on("end", () => { fs.unlink(zipPath, () => {}); resolve({ added, skipped, total: libraryFiles.length }); });
       zipfile.on("error", err => reject(err));
     });
   });
@@ -262,46 +205,22 @@ const searchSessions = new Map();
 // CLIENT
 // =========================
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
 // =========================
-// ✅ SLASH COMMANDS — NEW: /forwardall + /uploadzip
+// SLASH COMMANDS
 // =========================
 const commands = [
-  new SlashCommandBuilder()
-    .setName("setchannel")
-    .setDescription("Owner only: Set allowed channel for .find and .get"),
-  new SlashCommandBuilder()
-    .setName("scanchannel")
-    .setDescription("Owner only: Scan channel for files (skips duplicates)")
-    .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true)),
-  new SlashCommandBuilder()
-    .setName("forwardall")
-    .setDescription("Owner only: Forward ALL library files to a channel")
-    .addChannelOption(o => o.setName("channel").setDescription("Target channel").setRequired(true)),
-  new SlashCommandBuilder()
-    .setName("uploadzip")
-    .setDescription("Owner only: Upload zip file — auto extract to library")
-    .addAttachmentOption(o => o.setName("file").setDescription("Zip file to extract").setRequired(true)),
-  new SlashCommandBuilder()
-    .setName("embed")
-    .setDescription("Send a gray embed")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addStringOption(o => o.setName("description").setDescription("Embed text").setRequired(true))
-    .addStringOption(o => o.setName("title").setDescription("Optional title").setRequired(false)),
+  new SlashCommandBuilder().setName("setchannel").setDescription("Owner only: Set allowed channel for .find and .get"),
+  new SlashCommandBuilder().setName("scanchannel").setDescription("Owner only: Scan channel (skips duplicates)").addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true)),
+  new SlashCommandBuilder().setName("forwardall").setDescription("Owner only: Forward all library files to a channel").addChannelOption(o => o.setName("channel").setDescription("Target channel").setRequired(true)),
+  new SlashCommandBuilder().setName("uploadzip").setDescription("Owner only: Upload zip — auto extract to library").addAttachmentOption(o => o.setName("file").setDescription("Zip file").setRequired(true)),
+  new SlashCommandBuilder().setName("embed").setDescription("Send a gray embed").setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages).addStringOption(o => o.setName("description").setDescription("Embed text").setRequired(true)).addStringOption(o => o.setName("title").setDescription("Optional title").setRequired(false)),
   new SlashCommandBuilder().setName("serverlist").setDescription("Owner only: list all servers"),
-  new SlashCommandBuilder().setName("leave").setDescription("Owner only: leave a server")
-    .addStringOption(o => o.setName("server-id").setDescription("Server ID").setRequired(true))
+  new SlashCommandBuilder().setName("leave").setDescription("Owner only: leave a server").addStringOption(o => o.setName("server-id").setDescription("Server ID").setRequired(true))
 ].map(c => c.toJSON());
 
-// =========================
-// REGISTER
-// =========================
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
@@ -315,15 +234,12 @@ client.once("ready", async () => {
 });
 
 // =========================
-// SCAN CHANNEL — ✅ SKIPS DUPLICATES
+// SCAN CHANNEL
 // =========================
-async function scanChannel(channel, interaction = null) {
+async function scanChannel(channel) {
   if (!channel.isTextBased()) return { added: 0, skipped: 0, total: libraryFiles.length, scanned: 0 };
-  if (interaction) await interaction.editReply({ content: `🔍 Scanning <#${channel.id}>...` });
-
   const foundFiles = [];
   let before = null, scanned = 0;
-
   while (true) {
     const options = { limit: 100 };
     if (before) options.before = before;
@@ -332,7 +248,6 @@ async function scanChannel(channel, interaction = null) {
     catch (e) { await new Promise(r => setTimeout(r, 500)); continue; }
     if (!batch.size) break;
     scanned += batch.size;
-
     for (const msg of batch.values()) {
       for (const a of msg.attachments.values()) {
         const n = normalizeFilename(a.name);
@@ -356,31 +271,24 @@ async function scanChannel(channel, interaction = null) {
     if (!before || batch.size < 100) break;
     await new Promise(r => setTimeout(r, 150));
   }
-
-  // ✅ DEDUPLICATE — skip same filenames already in library
   const unique = new Map();
   for (const f of libraryFiles) unique.set(normalizeFilename(f.name), f);
   let newCount = 0, skipped = 0;
-
   for (const f of foundFiles) {
     const key = normalizeFilename(f.name);
     if (!unique.has(key)) {
       unique.set(key, { id: generateId(), name: f.name, url: f.url, size: f.size, timestamp: f.ts });
       newCount++;
-    } else {
-      skipped++; // ✅ Skip duplicates
-    }
+    } else { skipped++; }
   }
-
   libraryFiles.length = 0;
   libraryFiles.push(...[...unique.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)));
   saveLibrary();
-
   return { added: newCount, skipped, total: libraryFiles.length, scanned };
 }
 
 // =========================
-// 8 LINES PER PAGE
+// BUILD SEARCH PAGE — 8 LINES
 // =========================
 function buildSearchPage(ownerUserId, results, page = 1) {
   const perPage = 8;
@@ -388,24 +296,10 @@ function buildSearchPage(ownerUserId, results, page = 1) {
   const start = (page - 1) * perPage;
   const display = results.slice(start, start + perPage);
   const desc = display.map(f => `\`${f.name}\` │ ID: \`${f.id}\``).join("\n");
-
-  const embed = new EmbedBuilder()
-    .setTitle("Finder Source Results")
-    .setColor(0x808080)
-    .setDescription(desc)
-    .setFooter({ text: `Page ${page}/${totalPages} │ Today at ${getTimePH()}` });
-
+  const embed = new EmbedBuilder().setTitle("Finder Source Results").setColor(0x808080).setDescription(desc).setFooter({ text: `Page ${page}/${totalPages} │ Today at ${getTimePH()}` });
   const components = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`search_back_${ownerUserId}_${page}`)
-      .setLabel("Back")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(page <= 1),
-    new ButtonBuilder()
-      .setCustomId(`search_next_${ownerUserId}_${page}`)
-      .setLabel("Next")
-      .setStyle(ButtonStyle.Success)
-      .setDisabled(page >= totalPages)
+    new ButtonBuilder().setCustomId(`search_back_${ownerUserId}_${page}`).setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(page <= 1),
+    new ButtonBuilder().setCustomId(`search_next_${ownerUserId}_${page}`).setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(page >= totalPages)
   );
   return { embeds: [embed], components: [components] };
 }
@@ -415,102 +309,59 @@ function buildSearchPage(ownerUserId, results, page = 1) {
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
-    // BUTTONS
     if (interaction.isButton()) {
       const userId = interaction.user.id;
       const customId = interaction.customId;
-
       if (customId.startsWith("search_back_") || customId.startsWith("search_next_")) {
         const parts = customId.split("_");
         const direction = parts[1], ownerUserId = parts[2], currentPage = parseInt(parts[3]);
-
-        if (ownerUserId !== userId) {
-          return interaction.reply({ content: "❌ stfu, this is not your search", ephemeral: true });
-        }
-
+        if (ownerUserId !== userId) return interaction.reply({ content: "❌ stfu, this is not your search", ephemeral: true });
         const session = searchSessions.get(interaction.message.id);
-        if (!session) {
-          return interaction.reply({ content: "❌ Search expired, idiot. Use .find again.", ephemeral: true });
-        }
-
+        if (!session) return interaction.reply({ content: "❌ Search expired, idiot. Use .find again.", ephemeral: true });
         const newPage = direction === "next" ? currentPage + 1 : currentPage - 1;
-        const reply = buildSearchPage(ownerUserId, session.results, newPage);
-        session.page = newPage;
-        searchSessions.set(interaction.message.id, session);
-        await interaction.update(reply);
+        searchSessions.set(interaction.message.id, { ...session, page: newPage });
+        await interaction.update(buildSearchPage(ownerUserId, session.results, newPage));
       }
       return;
     }
-
     if (!interaction.isChatInputCommand()) return;
-
-    // ✅ OWNER ONLY COMMANDS
     const ownerOnlyCmds = ["leave", "serverlist", "setchannel", "scanchannel", "forwardall", "uploadzip"];
     if (ownerOnlyCmds.includes(interaction.commandName) && interaction.user.id !== OWNER_ID)
       return interaction.reply({ content: "❌ Owner only, idiot.", ephemeral: true });
 
-    // =========================
-    // /scanchannel — OWNER ONLY + SKIPS DUPLICATES
-    // =========================
     if (interaction.commandName === "scanchannel") {
       const channel = interaction.options.getChannel("channel");
       await interaction.deferReply();
-      const r = await scanChannel(channel, interaction);
-      return interaction.editReply({ 
-        content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${r.scanned} messages\n**✅ Added:** ${r.added} new files\n**⏭️ Skipped:** ${r.skipped} duplicates\n**📚 Total:** ${r.total}` 
-      });
+      const r = await scanChannel(channel);
+      return interaction.editReply({ content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${r.scanned}\n**✅ Added:** ${r.added}\n**⏭️ Skipped:** ${r.skipped}\n**📚 Total:** ${r.total}` });
     }
 
-    // =========================
-    // ✅ /forwardall — FORWARD ALL FILES TO CHANNEL
-    // =========================
     if (interaction.commandName === "forwardall") {
       const channel = interaction.options.getChannel("channel");
       if (!channel.isTextBased()) return interaction.reply({ content: "❌ Invalid channel.", ephemeral: true });
       if (libraryFiles.length === 0) return interaction.reply({ content: "❌ Library is empty, idiot.", ephemeral: true });
-
       await interaction.deferReply({ ephemeral: true });
       let sent = 0, failed = 0;
-
       for (const file of libraryFiles) {
         try {
-          if (file.isLocal && fs.existsSync(file.url)) {
-            await channel.send({ files: [{ attachment: file.url, name: file.name }] });
-          } else {
-            await channel.send({ files: [{ attachment: file.url, name: file.name }] });
-          }
+          if (file.isLocal && fs.existsSync(file.url)) await channel.send({ files: [{ attachment: file.url, name: file.name }] });
+          else await channel.send({ files: [{ attachment: file.url, name: file.name }] });
           sent++;
-          await new Promise(r => setTimeout(r, 500)); // Rate limit protection
-        } catch (e) {
-          failed++;
-        }
+          await new Promise(r => setTimeout(r, 500));
+        } catch (e) { failed++; }
       }
-
-      return interaction.editReply({ 
-        content: `📤 **FORWARD COMPLETE**\n**Target:** <#${channel.id}>\n**✅ Sent:** ${sent}\n**❌ Failed:** ${failed}\n**📚 Total:** ${libraryFiles.length}` 
-      });
+      return interaction.editReply({ content: `📤 **FORWARD COMPLETE**\n**Target:** <#${channel.id}>\n**✅ Sent:** ${sent}\n**❌ Failed:** ${failed}\n**📚 Total:** ${libraryFiles.length}` });
     }
 
-    // =========================
-    // ✅ /uploadzip — AUTO EXTRACT TO LIBRARY
-    // =========================
     if (interaction.commandName === "uploadzip") {
       const attachment = interaction.options.getAttachment("file");
-      
-      if (!attachment.name.toLowerCase().endsWith(".zip")) {
-        return interaction.reply({ content: "❌ Must be a .zip file, idiot.", ephemeral: true });
-      }
-
+      if (!attachment.name.toLowerCase().endsWith(".zip")) return interaction.reply({ content: "❌ Must be a .zip file, idiot.", ephemeral: true });
       await interaction.deferReply();
       const zipPath = path.join(TEMP_DIR, `${crypto.randomBytes(8).toString("hex")}.zip`);
-
       try {
         await downloadFile(attachment.url, zipPath);
-        const result = await extractZipToLibrary(zipPath, interaction);
-        
-        return interaction.editReply({
-          content: `📦 **ZIP EXTRACTED**\n**File:** \`${attachment.name}\`\n**✅ Added:** ${result.added} new files\n**⏭️ Skipped:** ${result.skipped} duplicates/images\n**📚 Total Library:** ${result.total}`
-        });
+        const result = await extractZipToLibrary(zipPath);
+        return interaction.editReply({ content: `📦 **ZIP EXTRACTED**\n**File:** \`${attachment.name}\`\n**✅ Added:** ${result.added}\n**⏭️ Skipped:** ${result.skipped}\n**📚 Total:** ${result.total}` });
       } catch (err) {
         console.error("Zip error:", err);
         fs.unlink(zipPath, () => {});
@@ -518,17 +369,11 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
-    // =========================
-    // /serverlist
-    // =========================
     if (interaction.commandName === "serverlist") {
       const list = [...client.guilds.cache.values()].map((g, i) => `${i+1}. **${g.name}** \`${g.id}\``).join("\n");
       return interaction.reply({ content: `**Servers (${client.guilds.cache.size}):**\n${list.slice(0, 4000)}`, ephemeral: true });
     }
 
-    // =========================
-    // /leave
-    // =========================
     if (interaction.commandName === "leave") {
       const g = client.guilds.cache.get(interaction.options.getString("server-id"));
       if (!g) return interaction.reply({ content: "❌ Server not found.", ephemeral: true });
@@ -536,18 +381,12 @@ client.on("interactionCreate", async interaction => {
       catch { return interaction.reply({ content: "❌ Failed to leave.", ephemeral: true }); }
     }
 
-    // =========================
-    // /setchannel
-    // =========================
     if (interaction.commandName === "setchannel") {
       config.allowedChannelId = interaction.channelId;
       saveConfig();
       return interaction.reply({ content: `✅ **Channel Set!**\n🔗 Allowed: <#${interaction.channelId}>`, ephemeral: false });
     }
 
-    // =========================
-    // /embed
-    // =========================
     if (interaction.commandName === "embed") {
       const desc = interaction.options.getString("description");
       const title = interaction.options.getString("title");
@@ -558,55 +397,39 @@ client.on("interactionCreate", async interaction => {
       await interaction.deleteReply();
       return interaction.channel.send({ embeds: [embed] });
     }
-
   } catch (e) { console.error("❌ Interaction error:", e); }
 });
 
 // =========================
-// ✅ PREFIX COMMANDS — .get MESSAGE UPDATED
+// PREFIX COMMANDS
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
-  
   const bypass = hasBypass(message.member, message.author.id);
   const allowed = bypass || !config.allowedChannelId || message.channel.id === config.allowedChannelId;
 
-  // ========== .find ==========
   if (message.content.startsWith(".find ")) {
     if (!allowed) return message.reply("❌ not here, idiot.");
     const query = message.content.slice(6).trim();
     if (!query) return message.reply("❌ No match file for that, idiot.");
     const results = searchFiles(query);
     if (results.length === 0) return message.reply("❌ No match file for that, idiot.");
-
     const replyData = buildSearchPage(message.author.id, results, 1);
     const replyMsg = await message.reply(replyData);
     searchSessions.set(replyMsg.id, { userId: message.author.id, results, page: 1 });
     return;
   }
 
-  // ========== .get — ✅ UPDATED ERROR MESSAGE
-  // ==========
   if (message.content.startsWith(".get")) {
     if (!allowed) return message.reply("❌ not here, idiot.");
     const id = message.content.slice(4).trim();
     if (!id) return message.reply("❌ Put ID of File, idiot.");
     const file = getFileById(id);
-    
-    // ✅ CHANGED: "❌ make sure that correct, idiot."
     if (!file) return message.reply("❌ make sure that correct, idiot.");
-
-    // Send file
     if (file.isLocal && fs.existsSync(file.url)) {
-      await message.channel.send({
-        content: `<@${message.author.id}> Here is the file twin!`,
-        files: [{ attachment: file.url, name: file.name }]
-      });
+      await message.channel.send({ content: `<@${message.author.id}> Here is the file twin!`, files: [{ attachment: file.url, name: file.name }] });
     } else {
-      await message.channel.send({
-        content: `<@${message.author.id}> Here is the file twin!`,
-        files: [{ attachment: file.url, name: file.name }]
-      });
+      await message.channel.send({ content: `<@${message.author.id}> Here is the file twin!`, files: [{ attachment: file.url, name: file.name }] });
     }
   }
 });
