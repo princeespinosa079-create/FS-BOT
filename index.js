@@ -8,6 +8,7 @@ const {
   PermissionFlagsBits
 } = require("discord.js");
 
+const express = require("express");
 const fs = require("fs");
 const path = require("path");
 
@@ -22,6 +23,14 @@ if (!TOKEN || !CLIENT_ID) {
   console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID");
   process.exit(1);
 }
+
+// =========================
+// EXPRESS — PORT FIX
+// =========================
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get("/", (req, res) => res.send("FS Bot Online"));
+app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT} open — Render happy!`));
 
 // =========================
 // DATA
@@ -71,7 +80,7 @@ const libraryFiles = library.files;
 saveLibrary();
 
 // =========================
-// HELPERS
+// ✅ FILTER — IGNORE IMAGES ONLY, SCAN .lua NOW
 // =========================
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"];
 function isImageFile(name) {
@@ -82,7 +91,7 @@ function isImageFile(name) {
 function getTimePH() {
   const now = new Date();
   const ph = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-  return ph.toISOString().slice(11, 16); // HH:MM
+  return ph.toISOString().slice(11, 16);
 }
 
 // =========================
@@ -110,7 +119,7 @@ const client = new Client({
 });
 
 // =========================
-// SLASH COMMANDS — ONLY 4: setchannel, scanchannel, serverlist, leave
+// SLASH COMMANDS
 // =========================
 const commands = [
   new SlashCommandBuilder()
@@ -160,7 +169,7 @@ client.once("ready", async () => {
 });
 
 // =========================
-// SCAN CHANNEL — ALL MESSAGES + FORWARDED
+// ✅ SCAN CHANNEL — IGNORE IMAGES ONLY, SCAN .lua, ALL MESSAGES
 // =========================
 async function scanChannel(channel, interaction = null) {
   if (!channel.isTextBased()) return { added: 0, total: libraryFiles.length, scanned: 0 };
@@ -180,13 +189,13 @@ async function scanChannel(channel, interaction = null) {
     scanned += batch.size;
 
     for (const msg of batch.values()) {
-      // Normal attachments
+      // ✅ Normal attachments — IGNORE IMAGES ONLY, SCAN .lua
       for (const a of msg.attachments.values()) {
         const n = normalizeFilename(a.name);
-        if (!n || n.endsWith(".lua") || isImageFile(a.name)) continue;
+        if (!n || isImageFile(a.name)) continue; // ✅ NO MORE .lua SKIP!
         foundFiles.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
       }
-      // Forwarded files — messageSnapshots
+      // ✅ Forwarded files — messageSnapshots
       if (msg.messageSnapshots) {
         const snapshots = Array.isArray(msg.messageSnapshots) 
           ? msg.messageSnapshots 
@@ -198,7 +207,7 @@ async function scanChannel(channel, interaction = null) {
             : Array.isArray(snap.attachments) ? snap.attachments : [];
           for (const a of atts) {
             const n = normalizeFilename(a.name);
-            if (!n || n.endsWith(".lua") || isImageFile(a.name)) continue;
+            if (!n || isImageFile(a.name)) continue; // ✅ NO MORE .lua SKIP!
             foundFiles.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
           }
         }
@@ -225,7 +234,7 @@ async function scanChannel(channel, interaction = null) {
   libraryFiles.push(...[...unique.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)));
   saveLibrary();
 
-  console.log(`✅ Scan: +${newCount} new, total ${libraryFiles.length}`);
+  console.log(`✅ Scan: +${newCount} new, total ${libraryFiles.length} (images ignored, .lua scanned)`);
   return { added: newCount, total: libraryFiles.length, scanned };
 }
 
@@ -269,14 +278,14 @@ client.on("interactionCreate", async interaction => {
       await interaction.deferReply();
       const result = await scanChannel(channel, interaction);
       return interaction.editReply({
-        content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Messages scanned:** ${result.scanned}\n**New files added:** ${result.added}\n**Total in Library:** ${result.total}`
+        content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Messages scanned:** ${result.scanned}\n**New files added:** ${result.added}\n**Total in Library:** ${result.total}\nℹ️ Images ignored, .lua files scanned`
       });
     }
   } catch (e) { console.error("❌ Interaction error:", e); }
 });
 
 // =========================
-// ✅ PREFIX COMMANDS — .find + .get EXACTLY AS REQUESTED
+// PREFIX COMMANDS — .find + .get
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
@@ -284,33 +293,28 @@ client.on("messageCreate", async message => {
   const isOwner = message.author.id === OWNER_ID;
   const allowed = isOwner || !config.allowedChannelId || message.channel.id === config.allowedChannelId;
 
-  // ========== .find <query> — GRAY EMBED, 25 MAX, FOOTER WITH PAGE/TIME ==========
+  // ========== .find <query> — GRAY EMBED ==========
   if (message.content.startsWith(".find ")) {
     if (!allowed) return message.reply(`❌ Use .find in <#${config.allowedChannelId}>`);
     
     const query = message.content.slice(6).trim();
     
-    // Empty .find
     if (!query) {
       return message.reply("❌ No match found for that, idiot.");
     }
 
     const results = searchFiles(query);
     
-    // No results
     if (results.length === 0) {
       return message.reply("❌ No match found for that, idiot.");
     }
 
-    // Limit to 25 files
     const display = results.slice(0, 25);
     const totalPages = Math.ceil(results.length / 25);
     const currentPage = 1;
 
-    // Build description — PABABA (one per line)
     const desc = display.map(f => `\`${f.name}\` │ ID: \`${f.id}\``).join("\n");
 
-    // Gray Embed
     const embed = new EmbedBuilder()
       .setTitle("Finder Source Results")
       .setColor(0x808080) // GRAY
@@ -322,17 +326,16 @@ client.on("messageCreate", async message => {
     return message.reply({ embeds: [embed] });
   }
 
-  // ========== .get <id> — SEND FILE + MENTION @ON ==========
+  // ========== .get <id> — SEND FILE + @ON ==========
   if (message.content.startsWith(".get ")) {
     if (!allowed) return message.reply(`❌ Use .get in <#${config.allowedChannelId}>`);
     
     const id = message.content.slice(5).trim();
-    if (!id) return message.reply("❌ Usage: `.get <id>`");
+    if (!id) return message.reply("❌ No match found for that, idiot.");
 
     const file = getFileById(id);
     if (!file) return message.reply("❌ No match found for that, idiot.");
 
-    // Send file + mention @ON
     await message.channel.send({
       content: `@ON`,
       files: [{
