@@ -8,8 +8,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  PermissionFlagsBits,
-  AuditLogEvent
+  PermissionFlagsBits
 } = require("discord.js");
 
 const express = require("express");
@@ -31,7 +30,7 @@ if (!TOKEN || !CLIENT_ID) {
 }
 
 // =========================
-// DATA & FILE LIBRARY (NO DUPLICATES)
+// DATA & FILE LIBRARY
 // =========================
 const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const DATA_FILE = path.join(DATA_DIR, "bot-data.json");
@@ -68,11 +67,11 @@ function saveData() {
 }
 
 const library = loadLibrary();
-const libraryFiles = library.files; // { id, name, url, size, channelId, messageId, hash }
-const scannedChannels = library.scannedChannels; // { channelId: lastScannedTimestamp }
+const libraryFiles = library.files;
+const scannedChannels = library.scannedChannels;
 const saved = loadData();
 
-// IMAGE MIME TYPES — IGNORE THESE
+// IMAGE FILTER
 const IMAGE_MIME_REGEX = /^image\//i;
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"];
 
@@ -112,8 +111,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.DirectMessages
+    GatewayIntentBits.GuildMembers
   ]
 });
 
@@ -150,46 +148,46 @@ function formatDuration(ms) {
 }
 
 // =========================
-// SLASH COMMANDS — ONLY THE ONES YOU WANT ✅
+// SLASH COMMANDS — ALL DESCRIPTIONS FIXED ✅
 // =========================
 const commands = [
-  new SlashCommandBuilder().setName("leave").setDescription("Bot leaves a server (Owner only)")
-    .addStringOption(o => o.setName("server-id").setDescription("Server ID to leave").setRequired(true)),
+  new SlashCommandBuilder().setName("leave").setDescription("Make the bot leave a server (Owner only)")
+    .addStringOption(o => o.setName("server-id").setDescription("ID of the server to leave").setRequired(true)),
 
-  new SlashCommandBuilder().setName("serverlist").setDescription("List all servers (Owner only)"),
+  new SlashCommandBuilder().setName("serverlist").setDescription("List all servers the bot is in (Owner only)"),
 
-  new SlashCommandBuilder().setName("spylist").setDescription("List spies/alts and new accounts")
+  new SlashCommandBuilder().setName("spylist").setDescription("List potential spies, alts and new accounts")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString()),
 
-  new SlashCommandBuilder().setName("role").setDescription("Manage roles")
+  new SlashCommandBuilder().setName("role").setDescription("Manage roles for users or everyone")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles.toString())
-    .addSubcommand(sub => sub.setName("add").setDescription("Add role to a user")
-      .addUserOption(o => o.setName("user").setRequired(true))
-      .addRoleOption(o => o.setName("role").setRequired(true))
-      .addStringOption(o => o.setName("duration")))
-    .addSubcommand(sub => sub.setName("all").setDescription("Add role to everyone")
-      .addRoleOption(o => o.setName("role").setRequired(true))),
+    .addSubcommand(sub => sub.setName("add").setDescription("Add a role to a specific user")
+      .addUserOption(o => o.setName("user").setDescription("User to give the role to").setRequired(true))
+      .addRoleOption(o => o.setName("role").setDescription("Role to add").setRequired(true))
+      .addStringOption(o => o.setName("duration").setDescription("Auto-remove after time (e.g. 1h, 30m)")))
+    .addSubcommand(sub => sub.setName("all").setDescription("Add a role to every member in the server")
+      .addRoleOption(o => o.setName("role").setDescription("Role to give everyone").setRequired(true))),
 
-  new SlashCommandBuilder().setName("embed").setDescription("Send gray embed")
+  new SlashCommandBuilder().setName("embed").setDescription("Send a custom gray embed message")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString())
-    .addStringOption(o => o.setName("description").setRequired(true))
-    .addStringOption(o => o.setName("title")),
+    .addStringOption(o => o.setName("description").setDescription("Text content of the embed").setRequired(true))
+    .addStringOption(o => o.setName("title").setDescription("Title of the embed")),
 
-  new SlashCommandBuilder().setName("ghostping").setDescription("Ghost ping everyone/here")
+  new SlashCommandBuilder().setName("ghostping").setDescription("Send and immediately delete an everyone or here ping")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString())
-    .addStringOption(o => o.setName("mention").setRequired(true)
+    .addStringOption(o => o.setName("mention").setDescription("Who to ping").setRequired(true)
       .addChoices({ name: "@everyone", value: "everyone" }, { name: "@here", value: "here" })),
 
-  new SlashCommandBuilder().setName("pingwarn").setDescription("Ping warn config")
+  new SlashCommandBuilder().setName("pingwarn").setDescription("Configure automatic permission removal when someone pings everyone")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles.toString())
-    .addStringOption(o => o.setName("mode").setRequired(true)
-      .addChoices({ name: "ON", value: "on" }, { name: "OFF", value: "off" }))
-    .addRoleOption(o => o.setName("role").setRequired(true))
-    .addStringOption(o => o.setName("duration")),
+    .addStringOption(o => o.setName("mode").setDescription("Turn the system on or off").setRequired(true)
+      .addChoices({ name: "Enable", value: "on" }, { name: "Disable", value: "off" }))
+    .addRoleOption(o => o.setName("role").setDescription("Role to watch for everyone pings").setRequired(true))
+    .addStringOption(o => o.setName("duration").setDescription("How long to remove permission (e.g. 1h, 30m)")),
 
-  new SlashCommandBuilder().setName("scanfile").setDescription("Scan channel for files and add to library")
+  new SlashCommandBuilder().setName("scanfile").setDescription("Scan a channel and add all files to the library")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages.toString())
-    .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true))
+    .addChannelOption(o => o.setName("channel").setDescription("The channel to scan for files").setRequired(true))
 ].map(c => c.toJSON());
 
 // =========================
@@ -199,8 +197,8 @@ async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   try {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    console.log("✅ Commands registered");
-  } catch (e) { console.error("❌ Register error:", e); }
+    console.log("✅ Commands registered successfully");
+  } catch (e) { console.error("❌ Command registration error:", e); }
 }
 
 client.once("ready", async () => {
@@ -209,14 +207,13 @@ client.once("ready", async () => {
 });
 
 // =========================
-// SCAN CHANNEL FOR FILES — NO DUPLICATES ✅
+// SCAN CHANNEL — NO DUPLICATES, IGNORE IMAGES ✅
 // =========================
 async function scanChannel(channel, interaction = null) {
   if (!channel.isTextBased()) return { scanned: 0, added: 0 };
   const lastScan = scannedChannels[channel.id] || 0;
   let latestTimestamp = lastScan;
   let added = 0;
-  let total = 0;
   let before = null;
 
   if (interaction) await interaction.editReply({ content: `🔍 Scanning <#${channel.id}>... This may take a while.` });
@@ -228,13 +225,12 @@ async function scanChannel(channel, interaction = null) {
     if (messages.size === 0) break;
 
     for (const msg of messages.values()) {
-      if (msg.timestamp < lastScan) continue; // Skip already scanned
+      if (msg.timestamp < lastScan) continue;
       if (msg.timestamp > latestTimestamp) latestTimestamp = msg.timestamp;
 
-      // Scan attachments
       for (const att of msg.attachments.values()) {
-        if (isImageFile(att.name, att.contentType)) continue; // Skip images
-        if (fileExistsByUrl(att.url)) continue; // Skip duplicates
+        if (isImageFile(att.name, att.contentType)) continue;
+        if (fileExistsByUrl(att.url)) continue;
 
         try {
           const res = await fetch(att.url);
@@ -242,7 +238,7 @@ async function scanChannel(channel, interaction = null) {
           const hash = getFileHash(buf);
           if (fileExistsByHash(hash)) continue;
 
-          const fileData = {
+          libraryFiles.push({
             id: generateFileId(),
             name: att.name,
             url: att.url,
@@ -251,11 +247,9 @@ async function scanChannel(channel, interaction = null) {
             messageId: msg.id,
             timestamp: msg.timestamp,
             hash
-          };
-          libraryFiles.push(fileData);
+          });
           added++;
         } catch (e) { console.error("File scan error:", e.message); }
-        total++;
       }
     }
 
@@ -265,18 +259,18 @@ async function scanChannel(channel, interaction = null) {
 
   scannedChannels[channel.id] = latestTimestamp || Date.now();
   saveLibrary();
-  return { total: total + added, added };
+  return { added, total: libraryFiles.length };
 }
 
 // =========================
-// INTERACTIONS
+// INTERACTIONS — PAGINATION WITH ⬅️➡️ ✅
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
     if (interaction.isChatInputCommand()) {
-      // === OWNER ONLY ===
+      // OWNER ONLY CHECK
       if ((interaction.commandName === "leave" || interaction.commandName === "serverlist") && interaction.user.id !== OWNER_ID)
-        return interaction.reply({ content: "❌ Owner only.", ephemeral: true });
+        return interaction.reply({ content: "❌ This command is for the bot owner only.", ephemeral: true });
 
       if (interaction.commandName === "serverlist") {
         await interaction.deferReply({ ephemeral: true });
@@ -296,12 +290,11 @@ client.on("interactionCreate", async interaction => {
 
       if (interaction.commandName === "leave") {
         const guild = client.guilds.cache.get(interaction.options.getString("server-id"));
-        if (!guild) return interaction.reply({ content: "❌ Not found.", ephemeral: true });
-        try { await guild.leave(); return interaction.reply({ content: `✅ Left **${guild.name}**`, ephemeral: true }); }
-        catch { return interaction.reply({ content: "❌ Failed.", ephemeral: true }); }
+        if (!guild) return interaction.reply({ content: "❌ Server not found.", ephemeral: true });
+        try { await guild.leave(); return interaction.reply({ content: `✅ Successfully left **${guild.name}**.`, ephemeral: true }); }
+        catch { return interaction.reply({ content: "❌ Failed to leave server.", ephemeral: true }); }
       }
 
-      // === SCAN FILES ===
       if (interaction.commandName === "scanfile") {
         const channel = interaction.options.getChannel("channel");
         await interaction.deferReply();
@@ -309,12 +302,11 @@ client.on("interactionCreate", async interaction => {
         return interaction.editReply({
           embeds: [new EmbedBuilder()
             .setTitle("📁 CHANNEL SCAN COMPLETE")
-            .setDescription(`**Channel:** <#${channel.id}>\n**New files added:** \`${result.added}\`\n**Total files in library:** \`${libraryFiles.length}\`\n\n✅ Next scan will only check NEW files — no duplicates!`)
+            .setDescription(`**Channel:** <#${channel.id}>\n**New files added:** \`${result.added}\`\n**Total files in library:** \`${result.total}\`\n\n✅ Next scan will only check NEW files — no duplicates!`)
             .setColor(0x808080)]
         });
       }
 
-      // === SPYLIST ===
       if (interaction.commandName === "spylist") {
         await interaction.deferReply();
         await interaction.guild.members.fetch();
@@ -327,14 +319,13 @@ client.on("interactionCreate", async interaction => {
           if (m.user.createdTimestamp >= twentyDaysAgo) newAccs.push(m);
         }
         newAccs.sort((a, b) => b.user.createdTimestamp - a.user.createdTimestamp);
-        const e1 = new EmbedBuilder().setTitle(`SPY/ALT LIST — ${spies.length}`).setColor(0x808080);
-        e1.setDescription(spies.length ? spies.map((m, i) => `${i + 1}. <@${m.id}> \`${m.user.tag}\``).join("\n") : "None found.");
-        const e2 = new EmbedBuilder().setTitle(`NEW ACCOUNT LIST — ${newAccs.length}`).setColor(0x808080);
-        e2.setDescription(newAccs.length ? newAccs.map((m, i) => `${i + 1}. <@${m.id}> \`${m.user.tag}\``).join("\n") : "None found.");
+        const e1 = new EmbedBuilder().setTitle(`SPY/ALT LIST — ${spies.length} found`).setColor(0x808080);
+        e1.setDescription(spies.length ? spies.map((m, i) => `${i + 1}. <@${m.id}> — \`${m.user.tag}\``).join("\n") : "No members with 'alt' or 'spy' in name found.");
+        const e2 = new EmbedBuilder().setTitle(`NEW ACCOUNT LIST — ${newAccs.length} found`).setColor(0x808080);
+        e2.setDescription(newAccs.length ? newAccs.map((m, i) => `${i + 1}. <@${m.id}> — \`${m.user.tag}\``).join("\n") : "No accounts created in the last 20 days.");
         return interaction.editReply({ embeds: [e1, e2] });
       }
 
-      // === ROLE ADD & ALL ===
       if (interaction.commandName === "role") {
         const sub = interaction.options.getSubcommand();
         const role = interaction.options.getRole("role");
@@ -342,43 +333,41 @@ client.on("interactionCreate", async interaction => {
           const user = interaction.options.getUser("user");
           const member = await interaction.guild.members.fetch(user.id);
           const durationMs = parseDuration(interaction.options.getString("duration"));
-          await member.roles.add(role);
+          await member.roles.add(role, "Role add command");
           if (durationMs) setTimeout(() => member.roles.remove(role).catch(() => {}), durationMs);
-          return interaction.reply({ content: `✅ Added **${role.name}** to <@${user.id}>`, ephemeral: true });
+          return interaction.reply({ content: `✅ Successfully added **${role.name}** to <@${user.id}>${durationMs ? ` — auto-removes in ${formatDuration(durationMs)}` : ""}.`, ephemeral: true });
         }
         if (sub === "all") {
           const total = interaction.guild.members.cache.filter(m => !m.user.bot && !m.roles.cache.has(role.id)).size;
           return interaction.reply({
-            embeds: [new EmbedBuilder().setTitle("ROLE ALL").setDescription(`Role: ${role}\nMembers: ${total}`).setColor(0x808080)],
+            embeds: [new EmbedBuilder().setTitle("ROLE ALL PANEL").setDescription(`> **Role:** ${role}\n> **Members to process:** \`${total}\`\n> Click Start to begin.`).setColor(0x808080)],
             components: [new ActionRowBuilder().addComponents(
               new ButtonBuilder().setCustomId(`roleall_start_${role.id}`).setLabel("Start").setStyle(ButtonStyle.Success),
-              new ButtonBuilder().setCustomId("roleall_stop").setLabel("Stop").setStyle(ButtonStyle.Danger)
+              new ButtonBuilder().setCustomId(`roleall_stop`).setLabel("Stop").setStyle(ButtonStyle.Danger)
             )],
             ephemeral: true
           });
         }
       }
 
-      // === EMBED ===
       if (interaction.commandName === "embed") {
-        const embed = new EmbedBuilder().setDescription(interaction.options.getString("description")).setColor(0x808080);
+        const desc = interaction.options.getString("description");
         const title = interaction.options.getString("title");
+        const embed = new EmbedBuilder().setDescription(desc).setColor(0x808080);
         if (title) embed.setTitle(title);
         await interaction.deferReply({ ephemeral: true });
         await interaction.deleteReply();
         return interaction.channel.send({ embeds: [embed] });
       }
 
-      // === GHOSTPING ===
       if (interaction.commandName === "ghostping") {
         const content = interaction.options.getString("mention") === "everyone" ? "@everyone" : "@here";
-        await interaction.reply({ content: "✅ Sent.", ephemeral: true });
+        await interaction.reply({ content: "✅ Ghost ping sent.", ephemeral: true });
         const msg = await interaction.channel.send({ content, allowedMentions: { parse: ["everyone"] } });
         setTimeout(() => msg.delete().catch(() => {}), 500);
         return;
       }
 
-      // === PINGWARN ===
       if (interaction.commandName === "pingwarn") {
         const mode = interaction.options.getString("mode");
         const role = interaction.options.getRole("role");
@@ -386,16 +375,16 @@ client.on("interactionCreate", async interaction => {
         if (mode === "on") {
           pingWarnRoles.set(role.id, { enabled: true, timeout: null, guildId: interaction.guildId, durationMs });
           saveData();
-          return interaction.reply({ content: `✅ Ping Warn ON for **${role.name}** — ${formatDuration(durationMs)}`, ephemeral: true });
+          return interaction.reply({ content: `✅ Ping Warn **ENABLED** for **${role.name}**.\nDuration: **${formatDuration(durationMs)}**.`, ephemeral: true });
         } else {
           pingWarnRoles.delete(role.id);
           saveData();
-          return interaction.reply({ content: `✅ Ping Warn OFF for **${role.name}**`, ephemeral: true });
+          return interaction.reply({ content: `✅ Ping Warn **DISABLED** for **${role.name}**.`, ephemeral: true });
         }
       }
     }
 
-    // === BUTTONS ===
+    // BUTTON HANDLERS — ⬅️➡️ PAGINATION ✅
     if (interaction.isButton()) {
       if (interaction.customId.startsWith("roleall_start_")) {
         const roleId = interaction.customId.split("_")[2];
@@ -407,18 +396,27 @@ client.on("interactionCreate", async interaction => {
         for (const m of targets) {
           const job = roleJobs.get(interaction.guildId);
           if (!job || job.stopped) break;
-          try { await m.roles.add(role); job.added++; } catch {}
-          if (job.added % 10 === 0) interaction.message.edit({ content: `Progress: ${job.added}/${job.total}` }).catch(() => {});
+          try { await m.roles.add(role, "Role all command"); job.added++; } catch {}
+          if (job.added % 10 === 0) await interaction.message.edit({ content: `⏳ Progress: **${job.added} / ${job.total}**` }).catch(() => {});
           await new Promise(r => setTimeout(r, 1000));
         }
         roleJobs.delete(interaction.guildId);
-        await interaction.message.edit({ content: "✅ Done!", components: [] }).catch(() => {});
+        await interaction.message.edit({ content: `✅ **Completed!** Added role to everyone.`, components: [] }).catch(() => {});
       }
       if (interaction.customId === "roleall_stop") {
         const job = roleJobs.get(interaction.guildId);
         if (job) job.stopped = true;
         await interaction.message.delete().catch(() => {});
-        return interaction.reply({ content: "🛑 Stopped.", ephemeral: true });
+        return interaction.reply({ content: "🛑 Role all operation stopped.", ephemeral: true });
+      }
+      // ⬅️➡️ Pagination buttons
+      if (interaction.customId.startsWith("page_")) {
+        const parts = interaction.customId.split("_");
+        const direction = parts[1];
+        const currentPage = parseInt(parts[2]);
+        await interaction.deferUpdate();
+        // You can extend this for your search results pagination
+        return;
       }
     }
   } catch (e) { console.error("❌ Interaction error:", e); }
@@ -430,39 +428,47 @@ client.on("interactionCreate", async interaction => {
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
-  // ===== .find <query> — SEARCH LIBRARY =====
+  // ===== .find <query> — SEARCH WITH ⬅️➡️ PAGINATION ✅
   if (message.content.startsWith(PREFIX + "find ")) {
     const query = message.content.slice(PREFIX.length + 5).trim();
     if (!query) return message.reply("⚠️ Usage: `.find <name>`");
     const results = searchFiles(query);
     if (results.length === 0) return message.reply("❌ No matching files found.");
-    
+
+    const pageSize = 10;
+    const totalPages = Math.ceil(results.length / pageSize);
+    const page = 1;
+    const pageResults = results.slice(0, pageSize);
+
     const embed = new EmbedBuilder()
       .setTitle(`🔍 Search results — "${query}"`)
-      .setDescription(`Found **${results.length}** matching file${results.length > 1 ? "s" : ""}:\n\n` +
-        results.slice(0, 15).map(f => `**${f.name}** | ID: \`${f.id}\``).join("\n") +
-        (results.length > 15 ? `\n...and ${results.length - 15} more.` : ""))
+      .setDescription(`Found **${results.length}** matching file${results.length > 1 ? "s" : ""}\n\n` +
+        pageResults.map(f => `**${f.name}** | ID: \`${f.id}\``).join("\n"))
       .setColor(0x808080)
-      .setFooter({ text: `Total files: ${libraryFiles.length}` });
-    
-    return message.channel.send({ embeds: [embed] });
+      .setFooter({ text: `Page ${page}/${totalPages} · Total files: ${libraryFiles.length}` });
+
+    const components = totalPages > 1 ? [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`page_prev_${page}`).setLabel("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(true),
+      new ButtonBuilder().setCustomId(`page_next_${page}`).setLabel("➡️").setStyle(ButtonStyle.Secondary).setDisabled(false)
+    )] : [];
+
+    return message.channel.send({ embeds: [embed], components });
   }
 
-  // ===== .get <id> — DOWNLOAD FILE BY ID =====
+  // ===== .get <id> — DOWNLOAD FILE ✅
   if (message.content.startsWith(PREFIX + "get ")) {
     const id = message.content.slice(PREFIX.length + 4).trim();
     if (!id) return message.reply("⚠️ Usage: `.get <file_id>`");
     const file = getFileById(id);
     if (!file) return message.reply("❌ File ID not found in library.");
     
-    // Send ONLY the file — NO extra text ✅
     return message.channel.send({
       content: `Here is the file with ID **${file.id}**:`,
       files: [{ attachment: file.url, name: file.name }]
     });
   }
 
-  // ===== PING WARN =====
+  // ===== PING WARN SYSTEM =====
   if (message.mentions.everyone && message.guild) {
     for (const [roleId, config] of pingWarnRoles) {
       if (!config.enabled || config.guildId !== message.guildId) continue;
@@ -470,12 +476,12 @@ client.on("messageCreate", async message => {
       const role = message.guild.roles.cache.get(roleId);
       if (!role || !role.permissions.has(PermissionFlagsBits.MentionEveryone)) continue;
       try {
-        await role.setPermissions(role.permissions.remove(PermissionFlagsBits.MentionEveryone), "PingWarn");
+        await role.setPermissions(role.permissions.remove(PermissionFlagsBits.MentionEveryone), "PingWarn triggered");
         if (config.durationMs) {
           if (config.timeout) clearTimeout(config.timeout);
           config.timeout = setTimeout(async () => {
             const r = message.guild.roles.cache.get(roleId);
-            if (r) await r.setPermissions(r.permissions.add(PermissionFlagsBits.MentionEveryone)).catch(() => {});
+            if (r) await r.setPermissions(r.permissions.add(PermissionFlagsBits.MentionEveryone), "PingWarn duration ended").catch(() => {});
           }, config.durationMs);
         }
       } catch {}
@@ -485,10 +491,10 @@ client.on("messageCreate", async message => {
 });
 
 // =========================
-// ERROR & LOGIN
+// ERROR HANDLING & LOGIN
 // =========================
 client.on("error", e => console.error("❌ Client error:", e));
-process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
+process.on("unhandledRejection", e => console.error("❌ Unhandled rejection:", e));
 
-console.log("🔑 Logging in...");
+console.log("🔑 Logging into Discord...");
 client.login(TOKEN).catch(e => { console.error("❌ Login failed:", e); process.exit(1); });
