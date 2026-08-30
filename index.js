@@ -10,7 +10,6 @@ const {
   PermissionFlagsBits
 } = require("discord.js");
 
-const express = require("express");
 const fs = require("fs");
 const path = require("path");
 
@@ -27,7 +26,7 @@ if (!TOKEN || !CLIENT_ID) {
 }
 
 // =========================
-// DATA & FILE LIBRARY
+// DATA FILES
 // =========================
 const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
@@ -45,7 +44,7 @@ function loadConfig() {
 }
 
 function saveConfig() {
-  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); } catch (e) { console.error("Save config error:", e); }
+  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); } catch (e) {}
 }
 
 function loadLibrary() {
@@ -56,7 +55,7 @@ function loadLibrary() {
 }
 
 function saveLibrary() {
-  try { fs.writeFileSync(LIBRARY_FILE, JSON.stringify(library, null, 2)); } catch (e) { console.error("Save library error:", e); }
+  try { fs.writeFileSync(LIBRARY_FILE, JSON.stringify(library, null, 2)); } catch (e) {}
 }
 
 const config = loadConfig();
@@ -65,7 +64,7 @@ if (!library.files) library.files = [];
 const libraryFiles = library.files;
 
 // =========================
-// FILE FILTER — SKIP IMAGES & .lua
+// HELPERS
 // =========================
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"];
 
@@ -82,30 +81,25 @@ function formatSize(bytes) {
 }
 
 // =========================
-// ✅ SEARCH — FIXED & IMPROVED
+// ✅ SEARCH — FIXED & SIMPLE
 // =========================
 function searchFiles(query) {
   const q = query.toLowerCase().trim();
-  if (!q || libraryFiles.length === 0) return [];
-
-  const results = [];
-  for (const file of libraryFiles) {
-    const name = normalizeFilename(file.name);
-    if (name.includes(q)) results.push(file);
+  if (!q) return [];
+  if (libraryFiles.length === 0) {
+    console.log("📚 Library is empty! Total files: 0");
+    return [];
   }
+  console.log(`🔍 Searching for: "${q}" in ${libraryFiles.length} files`);
+  const results = libraryFiles.filter(file => 
+    normalizeFilename(file.name).includes(q)
+  );
+  console.log(`✅ Found ${results.length} matches`);
   return results;
 }
 
 // =========================
-// WEB SERVER
-// =========================
-const app = express();
-const PORT = process.env.PORT || 3000;
-app.get("/", (req, res) => res.send("FS Bot Online"));
-app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
-
-// =========================
-// CLIENT — INTENTS
+// CLIENT SETUP
 // =========================
 const client = new Client({
   intents: [
@@ -122,16 +116,15 @@ const searchSessions = new Map();
 // SLASH COMMANDS
 // =========================
 const commands = [
-  new SlashCommandBuilder().setName("leave").setDescription("Make bot leave a server (Owner only)")
-    .addStringOption(o => o.setName("server-id").setDescription("Server ID to leave").setRequired(true)),
-  new SlashCommandBuilder().setName("serverlist").setDescription("List all servers (Owner only)"),
+  new SlashCommandBuilder().setName("selectchannel").setDescription("Set allowed search channel")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+    .addChannelOption(o => o.setName("channel").setDescription("Channel for .fs commands").setRequired(true)),
   new SlashCommandBuilder().setName("scanchannel").setDescription("Scan channel for files")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true)),
-  // ✅ NEW: /selectchannel — set allowed search channel
-  new SlashCommandBuilder().setName("selectchannel").setDescription("Set allowed search channel")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
-    .addChannelOption(o => o.setName("channel").setDescription("Channel for .fs commands").setRequired(true))
+  new SlashCommandBuilder().setName("leave").setDescription("Leave server (Owner only)")
+    .addStringOption(o => o.setName("server-id").setRequired(true)),
+  new SlashCommandBuilder().setName("serverlist").setDescription("List servers (Owner only)")
 ].map(c => c.toJSON());
 
 // =========================
@@ -145,6 +138,8 @@ async function registerCommands() {
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(`📚 Library loaded: ${libraryFiles.length} files`);
+  console.log(`🔗 Allowed channel: ${config.allowedChannelId || "Not set"}`);
   await registerCommands();
 });
 
@@ -153,7 +148,6 @@ client.once("ready", async () => {
 // =========================
 async function scanChannel(channel, interaction = null) {
   if (!channel.isTextBased()) return { added: 0, total: libraryFiles.length, scanned: 0 };
-  
   if (interaction) await interaction.editReply({ content: `🔍 Scanning <#${channel.id}>...` });
 
   const files = [];
@@ -163,57 +157,33 @@ async function scanChannel(channel, interaction = null) {
   while (true) {
     const options = { limit: 100 };
     if (before) options.before = before;
-
     let batch;
     try { batch = await channel.messages.fetch(options); }
     catch (e) { await new Promise(r => setTimeout(r, 1000)); continue; }
-
     if (!batch.size) break;
     totalMessages += batch.size;
 
-    for (const message of batch.values()) {
-      const attachments = [];
-
+    for (const msg of batch.values()) {
+      const atts = [];
       // Normal attachments
-      if (message.attachments) {
-        for (const a of message.attachments.values()) {
-          attachments.push({
-            name: a.name || a.filename || "file",
-            url: a.url,
-            size: a.size || 0,
-            createdTimestamp: message.createdTimestamp,
-            source: "message"
-          });
-        }
+      for (const a of msg.attachments.values()) {
+        atts.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
       }
-
-      // ✅ Forwarded attachments — messageSnapshots
-      if (message.messageSnapshots && typeof message.messageSnapshots.values === "function") {
-        for (const snapshot of message.messageSnapshots.values()) {
-          if (!snapshot?.attachments) continue;
-          const atts = typeof snapshot.attachments.values === "function" 
-            ? snapshot.attachments.values() 
-            : snapshot.attachments;
-          for (const a of atts) {
-            attachments.push({
-              name: a.name || a.filename || "file",
-              url: a.url,
-              size: a.size || 0,
-              createdTimestamp: message.createdTimestamp,
-              source: "forwarded"
-            });
+      // Forwarded attachments
+      if (msg.messageSnapshots) {
+        for (const snap of msg.messageSnapshots.values?.() || []) {
+          for (const a of snap.attachments?.values?.() || snap.attachments || []) {
+            atts.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
           }
         }
       }
-
-      // Filter files
-      for (const f of attachments) {
-        const name = normalizeFilename(f.name);
-        if (!name || name.endsWith(".lua") || isImageFile(f.name)) continue;
+      // Filter
+      for (const f of atts) {
+        const n = normalizeFilename(f.name);
+        if (!n || n.endsWith(".lua") || isImageFile(f.name)) continue;
         files.push(f);
       }
     }
-
     before = batch.last()?.id;
     if (!before || batch.size < 100) break;
     await new Promise(r => setTimeout(r, 200));
@@ -221,32 +191,29 @@ async function scanChannel(channel, interaction = null) {
 
   // Deduplicate
   const unique = new Map();
-  let newFiles = 0;
   for (const f of libraryFiles) unique.set(normalizeFilename(f.name), f);
+  let newCount = 0;
   for (const f of files) {
     const key = normalizeFilename(f.name);
     if (!unique.has(key)) {
-      unique.set(key, { name: f.name, url: f.url, size: f.size, timestamp: f.createdTimestamp });
-      newFiles++;
+      unique.set(key, { name: f.name, url: f.url, size: f.size, timestamp: f.ts });
+      newCount++;
     }
   }
-
   libraryFiles.length = 0;
   libraryFiles.push(...[...unique.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)));
   saveLibrary();
-
-  return { added: newFiles, total: libraryFiles.length, scanned: totalMessages };
+  console.log(`✅ Scan done: +${newCount} new, total ${libraryFiles.length}`);
+  return { added: newCount, total: libraryFiles.length, scanned: totalMessages };
 }
 
 // =========================
-// ✅ BUILD SEARCH — 1 PER PAGE, BLUE BUTTONS
+// ✅ BUILD SEARCH — 1 PER PAGE
 // =========================
 function buildSearchPage(userId, results, page = 1) {
   const totalPages = results.length;
   const file = results[page - 1];
-
   const content = `📄 **${file.name}**\n${formatSize(file.size)}`;
-
   const components = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`search_prev_${userId}_${page}`)
@@ -263,30 +230,27 @@ function buildSearchPage(userId, results, page = 1) {
       .setStyle(ButtonStyle.Primary)
       .setDisabled(page >= totalPages)
   );
-
   return { content, components };
 }
 
 // =========================
-// INTERACTIONS
+// ✅ INTERACTIONS
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
     // Buttons
     if (interaction.isButton()) {
       const userId = interaction.user.id;
-      if (interaction.customId.startsWith("search_prev_") || interaction.customId.startsWith("search_next_")) {
-        const parts = interaction.customId.split("_");
-        const targetUserId = parts[2];
-        let page = parseInt(parts[3]);
-        if (targetUserId !== userId) return interaction.reply({ content: "❌ Not your search.", ephemeral: true });
+      if (interaction.customId.startsWith("search_")) {
+        const [, dir, targetId, pageStr] = interaction.customId.split("_");
+        if (targetId !== userId) return interaction.reply({ content: "❌ Not yours.", ephemeral: true });
         const session = searchSessions.get(userId);
         if (!session) return interaction.reply({ content: "❌ Expired.", ephemeral: true });
-        page = interaction.customId.includes("next") ? page + 1 : page - 1;
+        let page = parseInt(pageStr);
+        page = dir === "next" ? page + 1 : page - 1;
         const { content, components } = buildSearchPage(userId, session.results, page);
         session.page = page;
         await interaction.update({ content, components });
-        return;
       }
       return;
     }
@@ -310,12 +274,15 @@ client.on("interactionCreate", async interaction => {
       catch { return interaction.reply({ content: "❌ Failed.", ephemeral: true }); }
     }
 
-    // ✅ /selectchannel — set allowed search channel
+    // ✅ /selectchannel
     if (interaction.commandName === "selectchannel") {
       const channel = interaction.options.getChannel("channel");
       config.allowedChannelId = channel.id;
       saveConfig();
-      return interaction.reply({ content: `✅ Search channel set to <#${channel.id}>\nAll users can use .fs / .prince / !fs / ?fs here\nOwner can use anywhere.`, ephemeral: false });
+      return interaction.reply({ 
+        content: `✅ **Search channel set!**\n🔗 Channel: <#${channel.id}>\n👥 All users: .fs / .prince / !fs / ?fs here\n👑 Owner: works everywhere`,
+        ephemeral: false 
+      });
     }
 
     // ✅ /scanchannel
@@ -331,10 +298,12 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// ✅ PREFIX COMMANDS — CHANNEL LOCK + OWNER BYPASS
+// ✅ PREFIX COMMANDS — FIXED & SIMPLE
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
+
+  console.log(`📩 Message: ${message.content} from ${message.author.username}`);
 
   const prefixes = [".fs ", ".prince ", "!fs ", "?fs "];
   let query = null;
@@ -346,29 +315,27 @@ client.on("messageCreate", async message => {
   }
   if (query === null) return;
 
-  // ✅ CHANNEL CHECK — Owner can use anywhere, others only in allowed channel
+  console.log(`🔍 Command triggered: query="${query}"`);
+
+  // Channel check
   const isOwner = message.author.id === OWNER_ID;
   if (!isOwner && config.allowedChannelId && message.channel.id !== config.allowedChannelId) {
-    return message.reply({ 
-      content: `❌ Search commands only work in <#${config.allowedChannelId}>`,
-      allowedMentions: { repliedUser: false }
-    });
+    return message.reply(`❌ Use search commands in <#${config.allowedChannelId}>`);
   }
 
-  if (!query) return message.reply({ content: "⚠️ Usage: `.fs <name>`", allowedMentions: { repliedUser: false } });
+  if (!query) return message.reply("⚠️ Usage: `.fs <name>`");
 
-  // ✅ FIXED SEARCH — no more "No matches found" when files exist
+  // Search
   const results = searchFiles(query);
   if (results.length === 0) {
-    return message.reply({ 
-      content: `❌ No matches found for \"${query}\"\nTotal files in library: ${libraryFiles.length}`,
-      allowedMentions: { repliedUser: false }
-    });
+    return message.reply(`❌ No matches for \"${query}\"\n📚 Total files: ${libraryFiles.length}`);
   }
 
+  // Send result
   searchSessions.set(message.author.id, { results, page: 1 });
   const { content, components } = buildSearchPage(message.author.id, results, 1);
-  return message.channel.send({ content, components, allowedMentions: { repliedUser: false } });
+  await message.channel.send({ content, components });
+  console.log(`✅ Sent result to ${message.author.username}`);
 });
 
 // =========================
