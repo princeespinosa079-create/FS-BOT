@@ -5,6 +5,9 @@ const {
   Routes,
   SlashCommandBuilder,
   EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   PermissionFlagsBits
 } = require("discord.js");
 
@@ -30,7 +33,7 @@ if (!TOKEN || !CLIENT_ID) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get("/", (req, res) => res.send("FS Bot Online"));
-app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT} open — Render happy!`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT} open`));
 
 // =========================
 // DATA
@@ -80,7 +83,7 @@ const libraryFiles = library.files;
 saveLibrary();
 
 // =========================
-// ✅ FILTER — IGNORE IMAGES ONLY, SCAN .lua NOW
+// FILTER — IGNORE IMAGES ONLY
 // =========================
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"];
 function isImageFile(name) {
@@ -95,17 +98,62 @@ function getTimePH() {
 }
 
 // =========================
-// SEARCH & GET
+// ✅ SMART SEARCH — PRIORITY SYSTEM
+// .find anti desync → 1st: anti_desync.txt, 2nd: work_desync.txt, 3rd: nothing
 // =========================
 function searchFiles(query) {
   const q = query.toLowerCase().trim();
   if (!q || libraryFiles.length === 0) return [];
-  return libraryFiles.filter(file => normalizeFilename(file.name).includes(q));
+
+  const qWords = q.split(/\s+/);
+  const qNoSpecial = q.replace(/[^a-z0-9]/g, "");
+
+  const exactMatches = [];
+  const allWordsMatches = [];
+  const anyWordMatches = [];
+
+  for (const file of libraryFiles) {
+    const name = normalizeFilename(file.name);
+    const nameNoSpecial = name.replace(/[^a-z0-9]/g, "");
+
+    // 1️⃣ EXACT MATCH — anti_desync.txt = "anti desync"
+    if (name === q || nameNoSpecial === qNoSpecial || 
+        name.startsWith(q + ".") || nameNoSpecial.startsWith(qNoSpecial + ".")) {
+      exactMatches.push(file);
+      continue;
+    }
+
+    // 2️⃣ ALL WORDS MATCH — contains "anti" AND "desync"
+    let allWords = true;
+    for (const word of qWords) {
+      if (!name.includes(word)) { allWords = false; break; }
+    }
+    if (allWords && qWords.length > 1) {
+      allWordsMatches.push(file);
+      continue;
+    }
+
+    // 3️⃣ ANY WORD MATCH — contains "anti" OR "desync"
+    for (const word of qWords) {
+      if (name.includes(word)) {
+        anyWordMatches.push(file);
+        break;
+      }
+    }
+  }
+
+  // Return in PRIORITY ORDER
+  return [...exactMatches, ...allWordsMatches, ...anyWordMatches];
 }
 
 function getFileById(id) {
   return libraryFiles.find(file => file.id === id);
 }
+
+// =========================
+// PAGINATION STATE
+// =========================
+const searchSessions = new Map();
 
 // =========================
 // CLIENT
@@ -169,7 +217,7 @@ client.once("ready", async () => {
 });
 
 // =========================
-// ✅ SCAN CHANNEL — IGNORE IMAGES ONLY, SCAN .lua, ALL MESSAGES
+// SCAN CHANNEL
 // =========================
 async function scanChannel(channel, interaction = null) {
   if (!channel.isTextBased()) return { added: 0, total: libraryFiles.length, scanned: 0 };
@@ -189,13 +237,11 @@ async function scanChannel(channel, interaction = null) {
     scanned += batch.size;
 
     for (const msg of batch.values()) {
-      // ✅ Normal attachments — IGNORE IMAGES ONLY, SCAN .lua
       for (const a of msg.attachments.values()) {
         const n = normalizeFilename(a.name);
-        if (!n || isImageFile(a.name)) continue; // ✅ NO MORE .lua SKIP!
+        if (!n || isImageFile(a.name)) continue;
         foundFiles.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
       }
-      // ✅ Forwarded files — messageSnapshots
       if (msg.messageSnapshots) {
         const snapshots = Array.isArray(msg.messageSnapshots) 
           ? msg.messageSnapshots 
@@ -207,7 +253,7 @@ async function scanChannel(channel, interaction = null) {
             : Array.isArray(snap.attachments) ? snap.attachments : [];
           for (const a of atts) {
             const n = normalizeFilename(a.name);
-            if (!n || isImageFile(a.name)) continue; // ✅ NO MORE .lua SKIP!
+            if (!n || isImageFile(a.name)) continue;
             foundFiles.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
           }
         }
@@ -218,7 +264,6 @@ async function scanChannel(channel, interaction = null) {
     await new Promise(r => setTimeout(r, 150));
   }
 
-  // Deduplicate + assign IDs
   const unique = new Map();
   for (const f of libraryFiles) unique.set(normalizeFilename(f.name), f);
   let newCount = 0;
@@ -234,15 +279,74 @@ async function scanChannel(channel, interaction = null) {
   libraryFiles.push(...[...unique.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)));
   saveLibrary();
 
-  console.log(`✅ Scan: +${newCount} new, total ${libraryFiles.length} (images ignored, .lua scanned)`);
+  console.log(`✅ Scan: +${newCount} new, total ${libraryFiles.length}`);
   return { added: newCount, total: libraryFiles.length, scanned };
 }
 
 // =========================
-// SLASH COMMANDS HANDLER
+// ✅ BUILD SEARCH PAGE — BACK (GRAY) / NEXT (GREEN) BUTTONS
+// =========================
+function buildSearchPage(userId, results, page = 1) {
+  const perPage = 25;
+  const totalPages = Math.ceil(results.length / perPage);
+  const start = (page - 1) * perPage;
+  const display = results.slice(start, start + perPage);
+
+  const desc = display.map(f => `\`${f.name}\` │ ID: \`${f.id}\``).join("\n");
+
+  const embed = new EmbedBuilder()
+    .setTitle("Finder Source Results")
+    .setColor(0x808080) // GRAY
+    .setDescription(desc)
+    .setFooter({ text: `Page ${page}/${totalPages} • Today at ${getTimePH()}` });
+
+  // ✅ Buttons: Back = GRAY (Secondary), Next = GREEN (Success)
+  const components = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`search_back_${userId}_${page}`)
+      .setLabel("Back")
+      .setStyle(ButtonStyle.Secondary) // GRAY
+      .setDisabled(page <= 1),
+    new ButtonBuilder()
+      .setCustomId(`search_next_${userId}_${page}`)
+      .setLabel("Next")
+      .setStyle(ButtonStyle.Success) // GREEN
+      .setDisabled(page >= totalPages)
+  );
+
+  return { embeds: [embed], components: [components] };
+}
+
+// =========================
+// INTERACTIONS — SLASH + BUTTONS
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
+    // ✅ BUTTON HANDLER — Back/Next pagination
+    if (interaction.isButton()) {
+      const userId = interaction.user.id;
+      if (interaction.customId.startsWith("search_")) {
+        const parts = interaction.customId.split("_");
+        const direction = parts[1];
+        const targetUserId = parts[2];
+        let page = parseInt(parts[3]);
+
+        if (targetUserId !== userId) 
+          return interaction.reply({ content: "❌ Not your search, idiot.", ephemeral: true });
+
+        const session = searchSessions.get(userId);
+        if (!session) 
+          return interaction.reply({ content: "❌ Search expired. Use .find again.", ephemeral: true });
+
+        page = direction === "next" ? page + 1 : page - 1;
+        const reply = buildSearchPage(userId, session.results, page);
+        session.page = page;
+        searchSessions.set(userId, session);
+        await interaction.update(reply);
+      }
+      return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     // Owner only
@@ -267,7 +371,7 @@ client.on("interactionCreate", async interaction => {
       config.allowedChannelId = channel.id;
       saveConfig();
       return interaction.reply({ 
-        content: `✅ **Channel Set!**\n🔗 Allowed channel: <#${channel.id}>\n👥 All users can use:\n• \`.find <name>\` — search files\n• \`.get <id>\` — get file`,
+        content: `✅ **Channel Set!**\n🔗 Allowed: <#${channel.id}>\n• \`.find <name>\` — search\n• \`.get <id>\` — get file`,
         ephemeral: false 
       });
     }
@@ -278,14 +382,14 @@ client.on("interactionCreate", async interaction => {
       await interaction.deferReply();
       const result = await scanChannel(channel, interaction);
       return interaction.editReply({
-        content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Messages scanned:** ${result.scanned}\n**New files added:** ${result.added}\n**Total in Library:** ${result.total}\nℹ️ Images ignored, .lua files scanned`
+        content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${result.scanned} messages\n**Added:** ${result.added} files\n**Total:** ${result.total}\nℹ️ Images ignored, .lua scanned`
       });
     }
   } catch (e) { console.error("❌ Interaction error:", e); }
 });
 
 // =========================
-// PREFIX COMMANDS — .find + .get
+// ✅ PREFIX COMMANDS — .find + .get
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
@@ -293,51 +397,42 @@ client.on("messageCreate", async message => {
   const isOwner = message.author.id === OWNER_ID;
   const allowed = isOwner || !config.allowedChannelId || message.channel.id === config.allowedChannelId;
 
-  // ========== .find <query> — GRAY EMBED ==========
+  // ========== .find <query> — SMART SEARCH + BUTTONS ==========
   if (message.content.startsWith(".find ")) {
     if (!allowed) return message.reply(`❌ Use .find in <#${config.allowedChannelId}>`);
     
     const query = message.content.slice(6).trim();
     
     if (!query) {
-      return message.reply("❌ No match found for that, idiot.");
+      return message.reply("❌ No match file for that, idiot.");
     }
 
     const results = searchFiles(query);
     
     if (results.length === 0) {
-      return message.reply("❌ No match found for that, idiot.");
+      return message.reply("❌ No match file for that, idiot.");
     }
 
-    const display = results.slice(0, 25);
-    const totalPages = Math.ceil(results.length / 25);
-    const currentPage = 1;
+    // Save session for pagination
+    searchSessions.set(message.author.id, { results, page: 1 });
 
-    const desc = display.map(f => `\`${f.name}\` │ ID: \`${f.id}\``).join("\n");
-
-    const embed = new EmbedBuilder()
-      .setTitle("Finder Source Results")
-      .setColor(0x808080) // GRAY
-      .setDescription(desc)
-      .setFooter({ 
-        text: `Page ${currentPage}/${totalPages} • Today at ${getTimePH()}`
-      });
-
-    return message.reply({ embeds: [embed] });
+    const reply = buildSearchPage(message.author.id, results, 1);
+    return message.reply(reply);
   }
 
-  // ========== .get <id> — SEND FILE + @ON ==========
+  // ========== .get <id> — MENTION USER + "Here is the file twin!" ==========
   if (message.content.startsWith(".get ")) {
     if (!allowed) return message.reply(`❌ Use .get in <#${config.allowedChannelId}>`);
     
     const id = message.content.slice(5).trim();
-    if (!id) return message.reply("❌ No match found for that, idiot.");
+    if (!id) return message.reply("❌ No match file for that, idiot.");
 
     const file = getFileById(id);
-    if (!file) return message.reply("❌ No match found for that, idiot.");
+    if (!file) return message.reply("❌ No match file for that, idiot.");
 
+    // ✅ @user Here is the file twin! + sends the file
     await message.channel.send({
-      content: `@ON`,
+      content: `<@${message.author.id}> Here is the file twin!`,
       files: [{
         attachment: file.url,
         name: file.name
