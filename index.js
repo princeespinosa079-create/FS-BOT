@@ -4,9 +4,8 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
+  EmbedBuilder,
+  AttachmentBuilder,
   PermissionFlagsBits
 } = require("discord.js");
 
@@ -36,6 +35,10 @@ function normalizeFilename(name) {
   return String(name || "").trim().toLowerCase();
 }
 
+function generateId() {
+  return Math.random().toString(36).substring(2, 8);
+}
+
 function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
@@ -63,6 +66,12 @@ const library = loadLibrary();
 if (!library.files) library.files = [];
 const libraryFiles = library.files;
 
+// Assign IDs to files that don't have one
+for (const file of libraryFiles) {
+  if (!file.id) file.id = generateId();
+}
+saveLibrary();
+
 // =========================
 // HELPERS
 // =========================
@@ -73,21 +82,17 @@ function isImageFile(name) {
   return IMAGE_EXTENSIONS.includes(ext);
 }
 
-function formatSize(bytes) {
-  if (!bytes) return "0 B";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
-
 // =========================
-// ✅ SEARCH — FIXED
+// SEARCH & GET FUNCTIONS
 // =========================
 function searchFiles(query) {
   const q = query.toLowerCase().trim();
-  if (!q) return [];
-  if (libraryFiles.length === 0) return [];
+  if (!q || libraryFiles.length === 0) return [];
   return libraryFiles.filter(file => normalizeFilename(file.name).includes(q));
+}
+
+function getFileById(id) {
+  return libraryFiles.find(file => file.id === id);
 }
 
 // =========================
@@ -102,10 +107,8 @@ const client = new Client({
   ]
 });
 
-const searchSessions = new Map();
-
 // =========================
-// ✅ SLASH COMMANDS — ALL DESCRIPTIONS FIXED!
+// SLASH COMMANDS
 // =========================
 const commands = [
   new SlashCommandBuilder()
@@ -156,7 +159,7 @@ client.once("ready", async () => {
 });
 
 // =========================
-// ✅ SCAN CHANNEL — messageSnapshots for forwarded
+// SCAN CHANNEL — messageSnapshots for forwarded
 // =========================
 async function scanChannel(channel, interaction = null) {
   if (!channel.isTextBased()) return { added: 0, total: libraryFiles.length, scanned: 0 };
@@ -210,14 +213,20 @@ async function scanChannel(channel, interaction = null) {
     await new Promise(r => setTimeout(r, 200));
   }
 
-  // Deduplicate by filename
+  // Deduplicate by filename + assign unique ID
   const unique = new Map();
   for (const f of libraryFiles) unique.set(normalizeFilename(f.name), f);
   let newCount = 0;
   for (const f of files) {
     const key = normalizeFilename(f.name);
     if (!unique.has(key)) {
-      unique.set(key, { name: f.name, url: f.url, size: f.size, timestamp: f.ts });
+      unique.set(key, { 
+        id: generateId(),
+        name: f.name, 
+        url: f.url, 
+        size: f.size, 
+        timestamp: f.ts 
+      });
       newCount++;
     }
   }
@@ -229,58 +238,12 @@ async function scanChannel(channel, interaction = null) {
 }
 
 // =========================
-// ✅ BUILD SEARCH — 1 PER PAGE, BLUE BUTTONS
-// =========================
-function buildSearchPage(userId, results, page = 1) {
-  const totalPages = results.length;
-  const file = results[page - 1];
-  const content = `📄 **${file.name}**\n${formatSize(file.size)}`;
-  const components = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`search_prev_${userId}_${page}`)
-      .setEmoji("⬅️")
-      .setStyle(ButtonStyle.Primary)
-      .setDisabled(page <= 1),
-    new ButtonBuilder()
-      .setLabel(`${page}/${totalPages}`)
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(true),
-    new ButtonBuilder()
-      .setCustomId(`search_next_${userId}_${page}`)
-      .setEmoji("➡️")
-      .setStyle(ButtonStyle.Primary)
-      .setDisabled(page >= totalPages)
-  );
-  return { content, components };
-}
-
-// =========================
-// ✅ INTERACTIONS — FIXED
+// INTERACTIONS
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
-    // Buttons
-    if (interaction.isButton()) {
-      const userId = interaction.user.id;
-      if (interaction.customId.startsWith("search_")) {
-        const parts = interaction.customId.split("_");
-        const targetUserId = parts[2];
-        let page = parseInt(parts[3]);
-        if (targetUserId !== userId) return interaction.reply({ content: "❌ Not your search.", ephemeral: true });
-        const session = searchSessions.get(userId);
-        if (!session) return interaction.reply({ content: "❌ Session expired.", ephemeral: true });
-        page = interaction.customId.includes("next") ? page + 1 : page - 1;
-        const { content, components } = buildSearchPage(userId, session.results, page);
-        session.page = page;
-        await interaction.update({ content, components });
-      }
-      return;
-    }
-
-    // Slash Commands
     if (!interaction.isChatInputCommand()) return;
 
-    // Owner only commands
     if ((interaction.commandName === "leave" || interaction.commandName === "serverlist") && interaction.user.id !== OWNER_ID)
       return interaction.reply({ content: "❌ Owner only.", ephemeral: true });
 
@@ -296,18 +259,16 @@ client.on("interactionCreate", async interaction => {
       catch { return interaction.reply({ content: "❌ Failed to leave server.", ephemeral: true }); }
     }
 
-    // ✅ /selectchannel — set allowed search channel
     if (interaction.commandName === "selectchannel") {
       const channel = interaction.options.getChannel("channel");
       config.allowedChannelId = channel.id;
       saveConfig();
       return interaction.reply({ 
-        content: `✅ **Search channel set!**\n🔗 Channel: <#${channel.id}>\n👥 All users can use: .fs / .prince / !fs / ?fs here\n👑 Owner can use anywhere`,
+        content: `✅ **Search channel set!**\n🔗 Channel: <#${channel.id}>\n👥 Use:\n• \`.find <name>\` — search files (Gray Embed)\n• \`.get <id>\` — bot sends the file\n👑 Owner can use anywhere`,
         ephemeral: false 
       });
     }
 
-    // ✅ /scanchannel — scan for files
     if (interaction.commandName === "scanchannel") {
       const channel = interaction.options.getChannel("channel");
       await interaction.deferReply();
@@ -320,39 +281,70 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// ✅ PREFIX COMMANDS — .fs / .prince / !fs / ?fs
+// ✅ PREFIX COMMANDS — .find (Gray Embed) + .get (SEND FILE)
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
-  const prefixes = [".fs ", ".prince ", "!fs ", "?fs "];
-  let query = null;
-  for (const pfx of prefixes) {
-    if (message.content.startsWith(pfx)) {
-      query = message.content.slice(pfx.length).trim();
-      break;
-    }
-  }
-  if (query === null) return;
-
-  // Channel permission check
   const isOwner = message.author.id === OWNER_ID;
-  if (!isOwner && config.allowedChannelId && message.channel.id !== config.allowedChannelId) {
-    return message.reply(`❌ Please use search commands in <#${config.allowedChannelId}>`);
+  const canUseHere = isOwner || !config.allowedChannelId || message.channel.id === config.allowedChannelId;
+
+  // ========== .find <query> — SEARCH (Gray Embed, Title: Finder Source Results) ==========
+  if (message.content.startsWith(".find ")) {
+    if (!canUseHere) return message.reply(`❌ Use search in <#${config.allowedChannelId}>`);
+    
+    const query = message.content.slice(6).trim();
+    if (!query) return message.reply("⚠️ Usage: `.find <name>`");
+
+    const results = searchFiles(query);
+    if (results.length === 0) {
+      const emptyEmbed = new EmbedBuilder()
+        .setTitle("Finder Source Results")
+        .setColor(0x808080) // GRAY
+        .setDescription(`❌ No matches found for \"${query}\"\n📚 Total files: ${libraryFiles.length}`);
+      return message.reply({ embeds: [emptyEmbed] });
+    }
+
+    // Build results list
+    let desc = `Found **${results.length}** matching file(s) for \"${query}\":\n\n`;
+    desc += results.slice(0, 25).map(f => `**${f.name}** | ID: \`${f.id}\``).join("\n");
+    if (results.length > 25) desc += `\n\n...and **${results.length - 25}** more matches. Use a more specific search.`;
+    desc += `\n\n💡 Use \`.get <id>\` to get the file`;
+
+    // ✅ GRAY EMBED + CORRECT TITLE
+    const resultEmbed = new EmbedBuilder()
+      .setTitle("Finder Source Results")
+      .setColor(0x808080) // GRAY
+      .setDescription(desc);
+
+    return message.reply({ embeds: [resultEmbed] });
   }
 
-  if (!query) return message.reply("⚠️ Usage: `.fs <name>`");
+  // ========== .get <id> — BOT SENDS THE FILE ==========
+  if (message.content.startsWith(".get ")) {
+    if (!canUseHere) return message.reply(`❌ Use commands in <#${config.allowedChannelId}>`);
+    
+    const id = message.content.slice(5).trim();
+    if (!id) return message.reply("⚠️ Usage: `.get <id>`");
 
-  // Search files
-  const results = searchFiles(query);
-  if (results.length === 0) {
-    return message.reply(`❌ No matches found for \"${query}\"\n📚 Total files in library: ${libraryFiles.length}`);
+    const file = getFileById(id);
+    if (!file) return message.reply(`❌ No file found with ID: \`${id}\``);
+
+    try {
+      // ✅ BOT GIVES THE ACTUAL FILE — NO EXTRA TEXT, JUST THE FILE
+      await message.channel.send({
+        files: [{
+          attachment: file.url,
+          name: file.name
+        }]
+      });
+    } catch (err) {
+      console.error("❌ Failed to send file:", err);
+      // Fallback: send URL if file can't be attached
+      await message.channel.send(file.url);
+    }
+    return;
   }
-
-  // Send result — 1 per page
-  searchSessions.set(message.author.id, { results, page: 1 });
-  const { content, components } = buildSearchPage(message.author.id, results, 1);
-  await message.channel.send({ content, components });
 });
 
 // =========================
