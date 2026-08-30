@@ -31,17 +31,21 @@ if (!TOKEN || !CLIENT_ID) {
 // =========================
 const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
-const DATA_FILE = path.join(DATA_DIR, "bot-data.json");
+const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 
 function normalizeFilename(name) {
   return String(name || "").trim().toLowerCase();
 }
 
-function loadData() {
+function loadConfig() {
   try {
-    if (fs.existsSync(DATA_FILE)) return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
   } catch (e) {}
-  return { pingWarn: {} };
+  return { allowedChannelId: null };
+}
+
+function saveConfig() {
+  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); } catch (e) { console.error("Save config error:", e); }
 }
 
 function loadLibrary() {
@@ -52,30 +56,20 @@ function loadLibrary() {
 }
 
 function saveLibrary() {
-  try { fs.writeFileSync(LIBRARY_FILE, JSON.stringify(library, null, 2)); } catch (e) { console.error("Save error:", e); }
+  try { fs.writeFileSync(LIBRARY_FILE, JSON.stringify(library, null, 2)); } catch (e) { console.error("Save library error:", e); }
 }
 
-function saveData() {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({
-      pingWarn: Object.fromEntries([...pingWarnRoles].map(([k, v]) => [k, { ...v }]))
-    }, null, 2));
-  } catch (e) {}
-}
-
+const config = loadConfig();
 const library = loadLibrary();
 if (!library.files) library.files = [];
 const libraryFiles = library.files;
-const saved = loadData();
 
 // =========================
-// FILE FILTER — SKIP IMAGES & .lua ✅
+// FILE FILTER — SKIP IMAGES & .lua
 // =========================
-const IMAGE_MIME_REGEX = /^image\//i;
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"];
 
-function isImageFile(name, contentType) {
-  if (contentType && IMAGE_MIME_REGEX.test(contentType)) return true;
+function isImageFile(name) {
   const ext = path.extname((name || "").toLowerCase());
   return IMAGE_EXTENSIONS.includes(ext);
 }
@@ -88,39 +82,18 @@ function formatSize(bytes) {
 }
 
 // =========================
-// ✅ SMART SEARCH — PRIORITY SYSTEM
+// ✅ SEARCH — FIXED & IMPROVED
 // =========================
 function searchFiles(query) {
   const q = query.toLowerCase().trim();
-  if (!q) return [];
+  if (!q || libraryFiles.length === 0) return [];
 
-  const exactMatches = [], startsWithMatches = [], includesMatches = [], relatedMatches = [];
-  const qWords = q.split(/\s+/);
-  const qNoSpecial = q.replace(/[^a-z0-9]/g, "");
-
+  const results = [];
   for (const file of libraryFiles) {
-    const name = file.name.toLowerCase();
-    const nameNoSpecial = name.replace(/[^a-z0-9]/g, "");
-
-    if (name === q || nameNoSpecial === qNoSpecial || name === q + ".txt") {
-      exactMatches.push(file);
-      continue;
-    }
-    if (name.startsWith(q) || nameNoSpecial.startsWith(qNoSpecial)) {
-      startsWithMatches.push(file);
-      continue;
-    }
-    if (name.includes(q) || nameNoSpecial.includes(qNoSpecial)) {
-      includesMatches.push(file);
-      continue;
-    }
-    let score = 0;
-    for (const word of qWords) if (name.includes(word)) score++;
-    if (score > 0) relatedMatches.push({ file, score });
+    const name = normalizeFilename(file.name);
+    if (name.includes(q)) results.push(file);
   }
-
-  relatedMatches.sort((a, b) => b.score - a.score);
-  return [...exactMatches, ...startsWithMatches, ...includesMatches, ...relatedMatches.map(r => r.file)];
+  return results;
 }
 
 // =========================
@@ -132,7 +105,7 @@ app.get("/", (req, res) => res.send("FS Bot Online"));
 app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
 
 // =========================
-// CLIENT — INTENTS ✅
+// CLIENT — INTENTS
 // =========================
 const client = new Client({
   intents: [
@@ -143,60 +116,22 @@ const client = new Client({
   ]
 });
 
-// =========================
-// STATE
-// =========================
-const pingWarnRoles = new Map(Object.entries(saved.pingWarn || {}));
-const roleJobs = new Map();
 const searchSessions = new Map();
 
 // =========================
-// HELPERS
-// =========================
-function parseDuration(str) {
-  if (!str) return null;
-  let total = 0;
-  str.toLowerCase().match(/(\d+)\s*(s|m|h|d)/g)?.forEach(p => {
-    const [, n, u] = p.match(/(\d+)\s*(s|m|h|d)/);
-    total += parseInt(n) * { s: 1000, m: 60000, h: 3600000, d: 86400000 }[u];
-  });
-  return total || null;
-}
-
-// =========================
-// SLASH COMMANDS — /scanchannel ✅
+// SLASH COMMANDS
 // =========================
 const commands = [
   new SlashCommandBuilder().setName("leave").setDescription("Make bot leave a server (Owner only)")
     .addStringOption(o => o.setName("server-id").setDescription("Server ID to leave").setRequired(true)),
   new SlashCommandBuilder().setName("serverlist").setDescription("List all servers (Owner only)"),
-  new SlashCommandBuilder().setName("spylist").setDescription("List spies/alts & new accounts")
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  new SlashCommandBuilder().setName("role").setDescription("Manage roles")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
-    .addSubcommand(sub => sub.setName("add").setDescription("Add role to user")
-      .addUserOption(o => o.setName("user").setDescription("Target user").setRequired(true))
-      .addRoleOption(o => o.setName("role").setDescription("Role to add").setRequired(true))
-      .addStringOption(o => o.setName("duration").setDescription("Auto-remove time (e.g. 1h)")))
-    .addSubcommand(sub => sub.setName("all").setDescription("Add role to everyone")
-      .addRoleOption(o => o.setName("role").setDescription("Role to add").setRequired(true))),
-  new SlashCommandBuilder().setName("embed").setDescription("Send gray embed")
+  new SlashCommandBuilder().setName("scanchannel").setDescription("Scan channel for files")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addStringOption(o => o.setName("description").setDescription("Embed text").setRequired(true))
-    .addStringOption(o => o.setName("title").setDescription("Embed title")),
-  new SlashCommandBuilder().setName("ghostping").setDescription("Ghost ping everyone/here")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addStringOption(o => o.setName("mention").setDescription("Who to ping").setRequired(true)
-      .addChoices({ name: "@everyone", value: "everyone" }, { name: "@here", value: "here" })),
-  new SlashCommandBuilder().setName("pingwarn").setDescription("Ping warn config")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
-    .addStringOption(o => o.setName("mode").setDescription("ON/OFF").setRequired(true)
-      .addChoices({ name: "ON", value: "on" }, { name: "OFF", value: "off" }))
-    .addRoleOption(o => o.setName("role").setDescription("Role to watch").setRequired(true))
-    .addStringOption(o => o.setName("duration").setDescription("Penalty duration")),
-  new SlashCommandBuilder().setName("scanchannel").setDescription("Scan ALL messages including forwarded")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true))
+    .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true)),
+  // ✅ NEW: /selectchannel — set allowed search channel
+  new SlashCommandBuilder().setName("selectchannel").setDescription("Set allowed search channel")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+    .addChannelOption(o => o.setName("channel").setDescription("Channel for .fs commands").setRequired(true))
 ].map(c => c.toJSON());
 
 // =========================
@@ -214,33 +149,24 @@ client.once("ready", async () => {
 });
 
 // =========================
-// ✅ SCAN CHANNEL — YOUR LOGIC WITH messageSnapshots ✅
+// ✅ SCAN CHANNEL — messageSnapshots for forwarded
 // =========================
 async function scanChannel(channel, interaction = null) {
   if (!channel.isTextBased()) return { added: 0, total: libraryFiles.length, scanned: 0 };
   
-  if (interaction) await interaction.editReply({ 
-    content: `🔍 **Scanning started** — this may take a while...\n> Channel: <#${channel.id}>\n> Scanning: forwarded, attachments, all files` 
-  });
+  if (interaction) await interaction.editReply({ content: `🔍 Scanning <#${channel.id}>...` });
 
   const files = [];
   let before = null;
   let totalMessages = 0;
-
-  console.log(`🚀 STARTING SCAN — Channel: ${channel.name} (${channel.id})`);
 
   while (true) {
     const options = { limit: 100 };
     if (before) options.before = before;
 
     let batch;
-    try {
-      batch = await channel.messages.fetch(options);
-    } catch (e) {
-      console.error("Fetch error:", e.message);
-      await new Promise(r => setTimeout(r, 1000));
-      continue;
-    }
+    try { batch = await channel.messages.fetch(options); }
+    catch (e) { await new Promise(r => setTimeout(r, 1000)); continue; }
 
     if (!batch.size) break;
     totalMessages += batch.size;
@@ -248,143 +174,84 @@ async function scanChannel(channel, interaction = null) {
     for (const message of batch.values()) {
       const attachments = [];
 
-      // ==============================================
-      // ✅ NORMAL ATTACHMENTS
-      // ==============================================
+      // Normal attachments
       if (message.attachments) {
-        for (const attachment of message.attachments.values()) {
+        for (const a of message.attachments.values()) {
           attachments.push({
-            id: attachment.id,
-            name: attachment.name || attachment.filename || "file",
-            url: attachment.url,
-            size: attachment.size || 0,
-            messageId: message.id,
-            channelId: message.channelId,
+            name: a.name || a.filename || "file",
+            url: a.url,
+            size: a.size || 0,
             createdTimestamp: message.createdTimestamp,
             source: "message"
           });
         }
       }
 
-      // ==============================================
-      // ✅ FORWARDED MESSAGE ATTACHMENTS — messageSnapshots
-      // ==============================================
+      // ✅ Forwarded attachments — messageSnapshots
       if (message.messageSnapshots && typeof message.messageSnapshots.values === "function") {
         for (const snapshot of message.messageSnapshots.values()) {
-          if (!snapshot) continue;
-
-          const snapshotAttachments = snapshot.attachments;
-
-          if (snapshotAttachments && typeof snapshotAttachments.values === "function") {
-            for (const attachment of snapshotAttachments.values()) {
-              attachments.push({
-                id: `forwarded-${attachment.id}`,
-                name: attachment.name || attachment.filename || "file",
-                url: attachment.url,
-                size: attachment.size || 0,
-                messageId: message.id,
-                channelId: message.channelId,
-                createdTimestamp: message.createdTimestamp,
-                source: "forwarded"
-              });
-            }
-          } else if (Array.isArray(snapshotAttachments)) {
-            for (const attachment of snapshotAttachments) {
-              attachments.push({
-                id: `forwarded-${attachment.id}`,
-                name: attachment.name || attachment.filename || "file",
-                url: attachment.url,
-                size: attachment.size || 0,
-                messageId: message.id,
-                channelId: message.channelId,
-                createdTimestamp: message.createdTimestamp,
-                source: "forwarded"
-              });
-            }
+          if (!snapshot?.attachments) continue;
+          const atts = typeof snapshot.attachments.values === "function" 
+            ? snapshot.attachments.values() 
+            : snapshot.attachments;
+          for (const a of atts) {
+            attachments.push({
+              name: a.name || a.filename || "file",
+              url: a.url,
+              size: a.size || 0,
+              createdTimestamp: message.createdTimestamp,
+              source: "forwarded"
+            });
           }
         }
       }
 
-      // ==============================================
-      // ✅ PROCESS ATTACHMENTS — Skip .lua & images
-      // ==============================================
-      for (const file of attachments) {
-        const filename = String(file.name || "").trim();
-        
-        if (filename.toLowerCase().endsWith(".lua")) continue;
-        if (isImageFile(filename)) continue;
-        if (!filename) continue;
-
-        files.push(file);
+      // Filter files
+      for (const f of attachments) {
+        const name = normalizeFilename(f.name);
+        if (!name || name.endsWith(".lua") || isImageFile(f.name)) continue;
+        files.push(f);
       }
     }
 
-    const oldestMessage = batch.last();
-    if (!oldestMessage) break;
-    before = oldestMessage.id;
-    if (batch.size < 100) break;
-
+    before = batch.last()?.id;
+    if (!before || batch.size < 100) break;
     await new Promise(r => setTimeout(r, 200));
   }
 
-  // ==============================================
-  // ✅ DEDUPLICATE by filename (case-insensitive)
-  // ==============================================
-  const uniqueByName = new Map();
+  // Deduplicate
+  const unique = new Map();
   let newFiles = 0;
-
-  for (const file of libraryFiles) {
-    const key = normalizeFilename(file.name);
-    if (!key) continue;
-    if (!uniqueByName.has(key)) uniqueByName.set(key, file);
+  for (const f of libraryFiles) unique.set(normalizeFilename(f.name), f);
+  for (const f of files) {
+    const key = normalizeFilename(f.name);
+    if (!unique.has(key)) {
+      unique.set(key, { name: f.name, url: f.url, size: f.size, timestamp: f.createdTimestamp });
+      newFiles++;
+    }
   }
 
-  for (const file of files) {
-    const key = normalizeFilename(file.name);
-    if (!key) continue;
-    if (key.endsWith(".lua")) continue;
-    if (isImageFile(file.name)) continue;
-
-    if (uniqueByName.has(key)) continue;
-
-    uniqueByName.set(key, {
-      name: file.name,
-      url: file.url,
-      size: file.size,
-      channelId: file.channelId,
-      messageId: file.messageId,
-      timestamp: file.createdTimestamp
-    });
-    newFiles++;
-    console.log(`✅ [${file.source}] Added: ${file.name}`);
-  }
-
-  const sortedFiles = [...uniqueByName.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   libraryFiles.length = 0;
-  libraryFiles.push(...sortedFiles);
+  libraryFiles.push(...[...unique.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)));
   saveLibrary();
 
-  console.log(`✅ SCAN FINISHED — Messages: ${totalMessages} | New: ${newFiles} | Total Files: ${libraryFiles.length}`);
   return { added: newFiles, total: libraryFiles.length, scanned: totalMessages };
 }
 
 // =========================
-// ✅ BUILD SEARCH — EXACTLY LIKE YOUR SECOND PHOTO ✅
+// ✅ BUILD SEARCH — 1 PER PAGE, BLUE BUTTONS
 // =========================
 function buildSearchPage(userId, results, page = 1) {
-  const pageSize = 1; // 1 file per page like your screenshot
-  const totalPages = Math.ceil(results.length / pageSize);
-  const start = (page - 1) * pageSize;
-  const file = results[start];
+  const totalPages = results.length;
+  const file = results[page - 1];
 
-  // ✅ EXACT FORMAT: File name + size + page counter + blue buttons
   const content = `📄 **${file.name}**\n${formatSize(file.size)}`;
 
   const components = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`search_prev_${userId}_${page}`)
       .setEmoji("⬅️")
-      .setStyle(ButtonStyle.Primary) // Blue like your screenshot
+      .setStyle(ButtonStyle.Primary)
       .setDisabled(page <= 1),
     new ButtonBuilder()
       .setLabel(`${page}/${totalPages}`)
@@ -393,7 +260,7 @@ function buildSearchPage(userId, results, page = 1) {
     new ButtonBuilder()
       .setCustomId(`search_next_${userId}_${page}`)
       .setEmoji("➡️")
-      .setStyle(ButtonStyle.Primary) // Blue like your screenshot
+      .setStyle(ButtonStyle.Primary)
       .setDisabled(page >= totalPages)
   );
 
@@ -405,67 +272,35 @@ function buildSearchPage(userId, results, page = 1) {
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
-    // === BUTTONS ===
+    // Buttons
     if (interaction.isButton()) {
       const userId = interaction.user.id;
-
       if (interaction.customId.startsWith("search_prev_") || interaction.customId.startsWith("search_next_")) {
         const parts = interaction.customId.split("_");
         const targetUserId = parts[2];
         let page = parseInt(parts[3]);
-        
         if (targetUserId !== userId) return interaction.reply({ content: "❌ Not your search.", ephemeral: true });
         const session = searchSessions.get(userId);
-        if (!session) return interaction.reply({ content: "❌ Session expired. Try again.", ephemeral: true });
-
-        if (interaction.customId.includes("next")) page++;
-        else page--;
-
+        if (!session) return interaction.reply({ content: "❌ Expired.", ephemeral: true });
+        page = interaction.customId.includes("next") ? page + 1 : page - 1;
         const { content, components } = buildSearchPage(userId, session.results, page);
         session.page = page;
-        searchSessions.set(userId, session);
         await interaction.update({ content, components });
         return;
-      }
-
-      if (interaction.customId.startsWith("roleall_start_")) {
-        const roleId = interaction.customId.split("_")[2];
-        const role = interaction.guild.roles.cache.get(roleId);
-        if (!role || roleJobs.get(interaction.guildId)) return;
-        await interaction.deferUpdate();
-        const targets = [...interaction.guild.members.cache.filter(m => !m.user.bot && !m.roles.cache.has(role.id)).values()];
-        roleJobs.set(interaction.guildId, { running: true, stopped: false, added: 0, total: targets.length });
-        for (const m of targets) {
-          const job = roleJobs.get(interaction.guildId);
-          if (!job || job.stopped) break;
-          try { await m.roles.add(role); job.added++; } catch {}
-          if (job.added % 10 === 0) interaction.message.edit({ content: `Progress: ${job.added}/${job.total}` }).catch(() => {});
-          await new Promise(r => setTimeout(r, 1000));
-        }
-        roleJobs.delete(interaction.guildId);
-        await interaction.message.edit({ content: "✅ Done!", components: [] }).catch(() => {});
-        return;
-      }
-
-      if (interaction.customId === "roleall_stop") {
-        if (roleJobs.get(interaction.guildId)) roleJobs.get(interaction.guildId).stopped = true;
-        await interaction.message.delete().catch(() => {});
-        return interaction.reply({ content: "🛑 Stopped.", ephemeral: true });
       }
       return;
     }
 
-    // === SLASH COMMANDS ===
+    // Slash Commands
     if (!interaction.isChatInputCommand()) return;
 
+    // Owner only
     if ((interaction.commandName === "leave" || interaction.commandName === "serverlist") && interaction.user.id !== OWNER_ID)
       return interaction.reply({ content: "❌ Owner only.", ephemeral: true });
 
     if (interaction.commandName === "serverlist") {
-      await interaction.deferReply({ ephemeral: true });
-      const guilds = [...client.guilds.cache.values()];
-      const desc = `**Total:** ${guilds.length}\n\n` + guilds.map((g, i) => `${i + 1}. **${g.name}** — \`${g.id}\``).join("\n").slice(0, 4000);
-      return interaction.editReply({ embeds: [{ title: "SERVER LIST", description: desc, color: 0x808080 }] });
+      const list = [...client.guilds.cache.values()].map((g, i) => `${i+1}. **${g.name}** \`${g.id}\``).join("\n");
+      return interaction.reply({ content: `**Servers (${client.guilds.cache.size}):**\n${list.slice(0, 4000)}`, ephemeral: true });
     }
 
     if (interaction.commandName === "leave") {
@@ -475,6 +310,15 @@ client.on("interactionCreate", async interaction => {
       catch { return interaction.reply({ content: "❌ Failed.", ephemeral: true }); }
     }
 
+    // ✅ /selectchannel — set allowed search channel
+    if (interaction.commandName === "selectchannel") {
+      const channel = interaction.options.getChannel("channel");
+      config.allowedChannelId = channel.id;
+      saveConfig();
+      return interaction.reply({ content: `✅ Search channel set to <#${channel.id}>\nAll users can use .fs / .prince / !fs / ?fs here\nOwner can use anywhere.`, ephemeral: false });
+    }
+
+    // ✅ /scanchannel
     if (interaction.commandName === "scanchannel") {
       const channel = interaction.options.getChannel("channel");
       await interaction.deferReply();
@@ -483,123 +327,48 @@ client.on("interactionCreate", async interaction => {
         content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Messages scanned:** ${result.scanned}\n**Files added:** ${result.added}\n**Total in Library:** ${result.total}`
       });
     }
-
-    if (interaction.commandName === "spylist") {
-      await interaction.deferReply();
-      await interaction.guild.members.fetch();
-      const day20 = Date.now() - 20 * 86400000;
-      const spies = [], newAccs = [];
-      for (const m of interaction.guild.members.cache.values()) {
-        if (m.user.bot) continue;
-        const n = (m.user.username + " " + (m.nickname || "")).toLowerCase();
-        if (n.includes("alt") || n.includes("spy")) spies.push(`<@${m.id}> \`${m.user.tag}\``);
-        if (m.user.createdTimestamp >= day20) newAccs.push(`<@${m.id}> \`${m.user.tag}\``);
-      }
-      return interaction.editReply({
-        content: `**SPY/ALT LIST (${spies.length})**\n${spies.join("\n") || "None"}\n\n**NEW ACCOUNTS (${newAccs.length})**\n${newAccs.join("\n") || "None"}`
-      });
-    }
-
-    if (interaction.commandName === "role") {
-      const sub = interaction.options.getSubcommand();
-      const role = interaction.options.getRole("role");
-      if (sub === "add") {
-        const user = interaction.options.getUser("user");
-        const member = await interaction.guild.members.fetch(user.id);
-        const dur = parseDuration(interaction.options.getString("duration"));
-        await member.roles.add(role);
-        if (dur) setTimeout(() => member.roles.remove(role).catch(() => {}), dur);
-        return interaction.reply({ content: `✅ Added **${role.name}** to <@${user.id}>`, ephemeral: true });
-      }
-      if (sub === "all") {
-        const total = interaction.guild.members.cache.filter(m => !m.user.bot && !m.roles.cache.has(role.id)).size;
-        return interaction.reply({
-          content: `**ROLE ALL**\nRole: ${role}\nMembers: ${total}`,
-          components: [new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`roleall_start_${role.id}`).setLabel("Start").setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId("roleall_stop").setLabel("Stop").setStyle(ButtonStyle.Danger)
-          )],
-          ephemeral: true
-        });
-      }
-    }
-
-    if (interaction.commandName === "embed") {
-      const desc = interaction.options.getString("description");
-      const title = interaction.options.getString("title");
-      await interaction.deferReply({ ephemeral: true });
-      await interaction.deleteReply();
-      return interaction.channel.send({ content: title ? `**${title}**\n${desc}` : desc });
-    }
-
-    if (interaction.commandName === "ghostping") {
-      const content = interaction.options.getString("mention") === "everyone" ? "@everyone" : "@here";
-      await interaction.reply({ content: "✅ Sent.", ephemeral: true });
-      const msg = await interaction.channel.send({ content, allowedMentions: { parse: ["everyone"] } });
-      setTimeout(() => msg.delete().catch(() => {}), 500);
-    }
-
-    if (interaction.commandName === "pingwarn") {
-      const mode = interaction.options.getString("mode");
-      const role = interaction.options.getRole("role");
-      if (mode === "on") {
-        pingWarnRoles.set(role.id, { enabled: true, guildId: interaction.guildId, durationMs: parseDuration(interaction.options.getString("duration")) });
-        saveData();
-        return interaction.reply({ content: `✅ Ping Warn ON for **${role.name}**`, ephemeral: true });
-      } else {
-        pingWarnRoles.delete(role.id);
-        saveData();
-        return interaction.reply({ content: `✅ Ping Warn OFF for **${role.name}**`, ephemeral: true });
-      }
-    }
-  } catch (e) { console.error("❌ Error:", e); }
+  } catch (e) { console.error("❌ Interaction error:", e); }
 });
 
 // =========================
-// PREFIX COMMANDS — .fs / .prince / !fs / ?fs ✅ | PHOTO 2 FORMAT ✅
+// ✅ PREFIX COMMANDS — CHANNEL LOCK + OWNER BYPASS
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
-  // ✅ ALL ALIASES work
   const prefixes = [".fs ", ".prince ", "!fs ", "?fs "];
   let query = null;
-  
   for (const pfx of prefixes) {
     if (message.content.startsWith(pfx)) {
       query = message.content.slice(pfx.length).trim();
       break;
     }
   }
-  
-  if (query !== null) {
-    if (!query) return message.reply("⚠️ Usage: `.fs <name>`");
-    
-    const results = searchFiles(query);
-    if (results.length === 0) return message.reply("❌ No matches found.");
+  if (query === null) return;
 
-    searchSessions.set(message.author.id, { results, page: 1 });
-    const { content, components } = buildSearchPage(message.author.id, results, 1);
-    return message.channel.send({ content, components });
+  // ✅ CHANNEL CHECK — Owner can use anywhere, others only in allowed channel
+  const isOwner = message.author.id === OWNER_ID;
+  if (!isOwner && config.allowedChannelId && message.channel.id !== config.allowedChannelId) {
+    return message.reply({ 
+      content: `❌ Search commands only work in <#${config.allowedChannelId}>`,
+      allowedMentions: { repliedUser: false }
+    });
   }
 
-  // ===== PING WARN =====
-  if (message.mentions.everyone && message.guild) {
-    for (const [roleId, config] of pingWarnRoles) {
-      if (!config.enabled || config.guildId !== message.guildId) continue;
-      if (!message.member?.roles.cache.has(roleId)) continue;
-      const role = message.guild.roles.cache.get(roleId);
-      if (!role || !role.permissions.has(PermissionFlagsBits.MentionEveryone)) continue;
-      try {
-        await role.setPermissions(role.permissions.remove(PermissionFlagsBits.MentionEveryone));
-        if (config.durationMs) setTimeout(async () => {
-          const r = message.guild.roles.cache.get(roleId);
-          if (r) r.setPermissions(r.permissions.add(PermissionFlagsBits.MentionEveryone)).catch(() => {});
-        }, config.durationMs);
-      } catch {}
-      break;
-    }
+  if (!query) return message.reply({ content: "⚠️ Usage: `.fs <name>`", allowedMentions: { repliedUser: false } });
+
+  // ✅ FIXED SEARCH — no more "No matches found" when files exist
+  const results = searchFiles(query);
+  if (results.length === 0) {
+    return message.reply({ 
+      content: `❌ No matches found for \"${query}\"\nTotal files in library: ${libraryFiles.length}`,
+      allowedMentions: { repliedUser: false }
+    });
   }
+
+  searchSessions.set(message.author.id, { results, page: 1 });
+  const { content, components } = buildSearchPage(message.author.id, results, 1);
+  return message.channel.send({ content, components, allowedMentions: { repliedUser: false } });
 });
 
 // =========================
