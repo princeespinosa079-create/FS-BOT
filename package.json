@@ -1,14 +1,19 @@
 {
   "name": "fs-bot",
   "version": "1.0.0",
-  "description": "FS Discord Bot",
+  "description": "File Management Discord Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.21.0",
-    "express": "^5.1.0",
-    "openai": "^5.19.1"
-  }
+    "discord.js": "^14.16.0",
+    "express": "^4.21.0",
+    "yauzl": "^2.10.0"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "author": "",
+  "license": "ISC"
 }
