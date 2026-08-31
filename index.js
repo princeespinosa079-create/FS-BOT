@@ -293,11 +293,11 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName("setchannel")
-    .setDescription("Set allowed channel for .find and .get — (Requires Administrator)"),
+    .setDescription("Set allowed channel for .find and .get — Requires Administrator"),
 
   new SlashCommandBuilder()
     .setName("scanchannel")
-    .setDescription("Scan channel for files — (Owner or Scan Role Only)")
+    .setDescription("Scan channel for files — Owner or Scan Role Only")
     .addChannelOption(o =>
       o.setName("channel")
        .setDescription("Channel to scan")
@@ -306,7 +306,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("forwardall")
-    .setDescription("Copy all .txt files FAST — (Owner or Scan Role Only)")
+    .setDescription("Copy all .txt files FAST — Owner or Scan Role Only")
     .addStringOption(o =>
       o.setName("source_channel_id")
        .setDescription("Source Channel ID")
@@ -320,7 +320,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("uploadzip")
-    .setDescription("Upload zip file, auto extract — (Owner or Scan Role Only)")
+    .setDescription("Upload zip file, auto extract — Owner or Scan Role Only")
     .addAttachmentOption(o =>
       o.setName("file")
        .setDescription("Zip file to extract")
@@ -329,7 +329,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("embed")
-    .setDescription("Send a gray embed message — (Requires Manage Messages)")
+    .setDescription("Send a gray embed message — Requires Manage Messages")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .addStringOption(o =>
       o.setName("description")
@@ -344,11 +344,11 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("serverlist")
-    .setDescription("List all servers with invite — (Owner Only)"),
+    .setDescription("List all servers with invite — Owner Only"),
 
   new SlashCommandBuilder()
     .setName("leave")
-    .setDescription ("Make the bot leave a server — (Owner Only)")
+    .setDescription("Make the bot leave a server — Owner Only")
     .addStringOption(o =>
       o.setName("server-id")
        .setDescription("Server ID to leave")
