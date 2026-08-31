@@ -10,16 +10,12 @@ const {
   ButtonStyle,
   PermissionFlagsBits
 } = require("discord.js");
-
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const http = require("http");
 const crypto = require("crypto");
-
-let yauzl = null;
-try { yauzl = require("yauzl"); } catch (e) { console.log("⚠️ yauzl not installed, zip extraction disabled"); }
 
 // =========================
 // CONFIG
@@ -57,22 +53,18 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 function normalizeFilename(name) {
   return String(name || "").trim().toLowerCase();
 }
-
 function generateId() {
   return Math.random().toString(36).substring(2, 8);
 }
-
 function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
   } catch (e) {}
   return { allowedChannelId: null };
 }
-
 function saveConfig() {
   try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); } catch (e) {}
 }
-
 function loadLibrary() {
   try {
     if (fs.existsSync(LIBRARY_FILE)) {
@@ -84,7 +76,6 @@ function loadLibrary() {
   } catch (e) {}
   return { files: [] };
 }
-
 function saveLibrary() {
   try { fs.writeFileSync(LIBRARY_FILE, JSON.stringify(library, null, 2)); } catch (e) {}
 }
@@ -102,11 +93,9 @@ function isImageFile(name) {
   const ext = path.extname((name || "").toLowerCase());
   return IMAGE_EXTENSIONS.includes(ext);
 }
-
 function isTxtFile(name) {
   return path.extname((name || "").toLowerCase()) === ".txt";
 }
-
 function getTimePH() {
   const now = new Date();
   const ph = new Date(now.getTime() + 8 * 60 * 60 * 1000);
@@ -114,23 +103,20 @@ function getTimePH() {
 }
 
 // =========================
-// ✅ PERMISSION CHECK — EXACTLY AS REQUESTED
+// ✅ PERMISSION CHECK — FIXED
 // =========================
 function hasPermission(interaction, requiredPerm) {
   const userId = interaction.user.id;
   const member = interaction.member;
-
-  // OWNER ALWAYS HAS ACCESS
-  if (userId === OWNER_ID) return true;
-
-  // CHECK SCAN ROLE
   const hasFounderRole = member?.roles?.cache?.has(FOUNDER_ROLE_ID);
+
+  if (userId === OWNER_ID) return true;
 
   switch (requiredPerm) {
     case "owner_only":
       return userId === OWNER_ID;
     case "scan_role_or_owner":
-      return userId === OWNER_ID || hasScanRole;
+      return userId === OWNER_ID || hasFounderRole;
     case "administrator":
       return member?.permissions?.has(PermissionFlagsBits.Administrator);
     case "manage_messages":
@@ -139,7 +125,6 @@ function hasPermission(interaction, requiredPerm) {
       return false;
   }
 }
-
 function fileExistsByName(name) {
   const n = normalizeFilename(name);
   return libraryFiles.some(f => normalizeFilename(f.name) === n);
@@ -172,53 +157,8 @@ function searchFiles(query) {
   }
   return [...exactMatches, ...allWordsMatches, ...anyWordMatches];
 }
-
 function getFileById(id) {
   return libraryFiles.find(file => file.id === id);
-}
-
-function downloadFile(url, destPath) {
-  return new Promise((resolve, reject) => {
-    const protocol = url.startsWith("https") ? https : http;
-    const file = fs.createWriteStream(destPath);
-    protocol.get(url, response => {
-      response.pipe(file);
-      file.on("finish", () => { file.close(); resolve(destPath); });
-    }).on("error", err => { fs.unlink(destPath, () => {}); reject(err); });
-  });
-}
-
-async function extractZipToLibrary(zipPath) {
-  if (!yauzl) throw new Error("yauzl not installed. Run: npm install yauzl");
-  return new Promise((resolve, reject) => {
-    let added = 0, skipped = 0;
-    yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
-      if (err) return reject(err);
-      zipfile.readEntry();
-      zipfile.on("entry", entry => {
-        if (/\/$/.test(entry.fileName)) { zipfile.readEntry(); return; }
-        const fileName = path.basename(entry.fileName);
-        const n = normalizeFilename(fileName);
-        if (!n || isImageFile(fileName)) { skipped++; zipfile.readEntry(); return; }
-        if (fileExistsByName(fileName)) { skipped++; zipfile.readEntry(); return; }
-        const tempPath = path.join(TEMP_DIR, `${crypto.randomBytes(8).toString("hex")}_${fileName}`);
-        zipfile.openReadStream(entry, (err, readStream) => {
-          if (err) { zipfile.readEntry(); return; }
-          const writeStream = fs.createWriteStream(tempPath);
-          readStream.pipe(writeStream);
-          writeStream.on("finish", () => {
-            const stats = fs.statSync(tempPath);
-            libraryFiles.push({ id: generateId(), name: fileName, url: tempPath, isLocal: true, size: stats.size, timestamp: Date.now() });
-            added++;
-            saveLibrary();
-            zipfile.readEntry();
-          });
-        });
-      });
-      zipfile.on("end", () => { fs.unlink(zipPath, () => {}); resolve({ added, skipped, total: libraryFiles.length }); });
-      zipfile.on("error", err => reject(err));
-    });
-  });
 }
 
 // =========================
@@ -288,25 +228,23 @@ const client = new Client({
 });
 
 // =========================
-// SLASH COMMANDS
+// SLASH COMMANDS — FIXED SYNTAX, REMOVED uploadzip
 // =========================
 const commands = [
   new SlashCommandBuilder()
     .setName("setchannel")
-    .setDescription("Set allowed channel for .find and .get (Requires Administrator),
-
+    .setDescription("Set allowed channel for .find and .get (Requires Administrator)"),
   new SlashCommandBuilder()
     .setName("scanchannel")
-    .setDescription("Scan channel for files (Owner or Founder Role Only")
+    .setDescription("Scan channel for files (Owner or Founder Role Only)")
     .addChannelOption(o =>
       o.setName("channel")
        .setDescription("Channel to scan")
        .setRequired(true)
     ),
-
   new SlashCommandBuilder()
     .setName("forwardall")
-    .setDescription("Copy all .txt files FAST (Owner or Founder Role Only")
+    .setDescription("Copy all .txt files FAST (Owner or Founder Role Only)")
     .addStringOption(o =>
       o.setName("source_channel_id")
        .setDescription("Source Channel ID")
@@ -317,19 +255,9 @@ const commands = [
        .setDescription("Destination Channel ID")
        .setRequired(true)
     ),
-
-  new SlashCommandBuilder()
-    .setName("uploadzip")
-    .setDescription("Upload zip file, auto extract (Owner or Founder Role Only")
-    .addAttachmentOption(o =>
-      o.setName("file")
-       .setDescription("Zip file to extract")
-       .setRequired(true)
-    ),
-
   new SlashCommandBuilder()
     .setName("embed")
-    .setDescription("Send a gray embed message (Requires Manage Messages")
+    .setDescription("Send a gray embed message (Requires Manage Messages)")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .addStringOption(o =>
       o.setName("description")
@@ -341,14 +269,12 @@ const commands = [
        .setDescription("Optional title")
        .setRequired(false)
     ),
-
   new SlashCommandBuilder()
     .setName("serverlist")
-    .setDescription("List all servers with invite (Owner Only),
-
+    .setDescription("List all servers with invite (Owner Only)"),
   new SlashCommandBuilder()
     .setName("leave")
-    .setDescription("Make the bot leave a server (Owner Only)
+    .setDescription("Make the bot leave a server (Owner Only)")
     .addStringOption(o =>
       o.setName("server-id")
        .setDescription("Server ID to leave")
@@ -364,7 +290,6 @@ async function registerCommands() {
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
   console.log("✅ Commands registered");
 }
-
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   console.log(`📚 Library: ${libraryFiles.length} files`);
@@ -447,13 +372,11 @@ function buildSearchPage(ownerUserId, results, page = 1) {
 // =========================
 async function getGuildInvite(guild) {
   try {
-    // Try to get existing invite first
     const invites = await guild.invites.fetch().catch(() => []);
     if (invites.size > 0) {
       const invite = invites.first();
       return `https://discord.gg/${invite.code}`;
     }
-    // Create new invite in first available channel
     const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has(PermissionFlagsBits.CreateInstantInvite));
     if (channel) {
       const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: "Server list invite" }).catch(() => null);
@@ -466,7 +389,7 @@ async function getGuildInvite(guild) {
 }
 
 // =========================
-// INTERACTIONS
+// INTERACTIONS — FIXED PERM CHECK
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
@@ -485,172 +408,78 @@ client.on("interactionCreate", async interaction => {
       }
       return;
     }
-
     if (!interaction.isChatInputCommand()) return;
 
-    // =========================
-    // /serverlist — OWNER ONLY + INVITE LINKS
-    // =========================
     if (interaction.commandName === "serverlist") {
-      if (!hasPermission(interaction, "owner_only")) {
-        return interaction.reply({ content: "❌ Owner only.", ephemeral: true });
-      }
+      if (!hasPermission(interaction, "owner_only")) return interaction.reply({ content: "❌ Owner only.", ephemeral: true });
       await interaction.deferReply({ ephemeral: true });
-      
       const guilds = [...client.guilds.cache.values()];
       let list = `**📋 Servers (${guilds.length}):**\n\n`;
-      
       for (let i = 0; i < guilds.length; i++) {
         const g = guilds[i];
         const invite = await getGuildInvite(g);
         list += `${i+1}. **${g.name}**\n   ID: \`${g.id}\`\n   Invite: ${invite}\n\n`;
-        if (list.length > 3500) {
-          list += "\n... (truncated)";
-          break;
-        }
+        if (list.length > 3500) { list += "\n... (truncated)"; break; }
       }
-      
       return interaction.editReply({ content: list });
     }
 
-    // =========================
-    // /leave — OWNER ONLY
-    // =========================
     if (interaction.commandName === "leave") {
-      if (!hasPermission(interaction, "owner_only")) {
-        return interaction.reply({ content: "❌ Owner only.", ephemeral: true });
-      }
+      if (!hasPermission(interaction, "owner_only")) return interaction.reply({ content: "❌ Owner only.", ephemeral: true });
       const g = client.guilds.cache.get(interaction.options.getString("server-id"));
       if (!g) return interaction.reply({ content: "❌ Server not found.", ephemeral: true });
       try { await g.leave(); return interaction.reply({ content: `✅ Left **${g.name}**`, ephemeral: true }); }
       catch { return interaction.reply({ content: "❌ Failed to leave.", ephemeral: true }); }
     }
 
-    // =========================
-    // /scanchannel — OWNER OR SCAN ROLE
-    // =========================
     if (interaction.commandName === "scanchannel") {
-      if (!hasPermission(interaction, "founder_role_or_owner")) {
-        return interaction.reply({ content: "❌ Owner or Founder Role only.", ephemeral: true });
-      }
+      if (!hasPermission(interaction, "scan_role_or_owner")) return interaction.reply({ content: "❌ Owner or Founder Role only.", ephemeral: true });
       const channel = interaction.options.getChannel("channel");
       await interaction.deferReply();
       const r = await scanChannel(channel);
       return interaction.editReply({ content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${r.scanned}\n✅ **Added:** ${r.added}\n⏭️ **Skipped:** ${r.skipped}\n📚 **Total:** ${r.total}` });
     }
 
-    // =========================
-    // /forwardall — OWNER OR FOUNDER ROLE + MAX SPEED
-    // =========================
     if (interaction.commandName === "forwardall") {
-      if (!hasPermission(interaction, "scan_role_or_owner")) {
-        return interaction.reply({ content: "❌ Owner or Founder Role only.", ephemeral: true });
-      }
-      
+      if (!hasPermission(interaction, "scan_role_or_owner")) return interaction.reply({ content: "❌ Owner or Founder Role only.", ephemeral: true });
       const sourceId = interaction.options.getString("source_channel_id").trim();
       const destId = interaction.options.getString("destination_channel_id").trim();
-
       await interaction.deferReply();
-
       const sourceChannel = await fetchChannelById(sourceId);
-      if (!sourceChannel || !sourceChannel.isTextBased()) {
-        return interaction.editReply({ content: `❌ **Invalid Source Channel:** ${sourceId}` });
-      }
-
+      if (!sourceChannel || !sourceChannel.isTextBased()) return interaction.editReply({ content: `❌ **Invalid Source Channel:** ${sourceId}` });
       const destChannel = await fetchChannelById(destId);
-      if (!destChannel || !destChannel.isTextBased()) {
-        return interaction.editReply({ content: `❌ **Invalid Destination Channel:** ${destId}` });
-      }
-
-      await interaction.editReply({
-        content: `🔄 **Starting FULL COPY of .txt files** from <#${sourceId}> to <#${destId}>\n⚡ **Speed Mode: MAX**`
-      });
-
+      if (!destChannel || !destChannel.isTextBased()) return interaction.editReply({ content: `❌ **Invalid Destination Channel:** ${destId}` });
+      await interaction.editReply({ content: `🔄 **Starting FULL COPY of .txt files** from <#${sourceId}> to <#${destId}>\n⚡ **Speed Mode: MAX**` });
       const { files: txtFiles, scanned } = await scanTxtFiles(sourceChannel);
-
-      if (txtFiles.length === 0) {
-        return interaction.editReply({
-          content: `❌ No .txt files found in <#${sourceId}>\nScanned ${scanned} messages.`
-        });
-      }
-
-      // ⚡ MAX SPEED — BATCH SEND
+      if (txtFiles.length === 0) return interaction.editReply({ content: `❌ No .txt files found in <#${sourceId}>\nScanned ${scanned} messages.` });
       let sent = 0, failed = 0;
       const total = txtFiles.length;
       const BATCH_SIZE = 10;
-
       for (let i = 0; i < txtFiles.length; i += BATCH_SIZE) {
         const batch = txtFiles.slice(i, i + BATCH_SIZE);
         const promises = batch.map(async (file) => {
           try {
             await destChannel.send({ files: [{ attachment: file.url, name: file.name }] });
             return { success: true };
-          } catch (e) {
-            return { success: false };
-          }
+          } catch (e) { return { success: false }; }
         });
-
         const results = await Promise.allSettled(promises);
-        results.forEach(r => {
-          if (r.status === "fulfilled" && r.value.success) sent++;
-          else failed++;
-        });
-
-        await interaction.editReply({
-          content: `🔄 **Forwarding...** ⚡ ${sent}/${total}\nFrom: <#${sourceId}> → To: <#${destId}>`
-        });
-
-        if (i + BATCH_SIZE < txtFiles.length) {
-          await new Promise(r => setTimeout(r, 50));
-        }
+        results.forEach(r => { if (r.status === "fulfilled" && r.value.success) sent++; else failed++; });
+        await interaction.editReply({ content: `🔄 **Forwarding...** ⚡ ${sent}/${total}\nFrom: <#${sourceId}> → To: <#${destId}>` });
+        if (i + BATCH_SIZE < txtFiles.length) await new Promise(r => setTimeout(r, 50));
       }
-
-      return interaction.editReply({
-        content: `✅ **FORWARD COMPLETE — MAX SPEED** ⚡\n**Channel:** <#${sourceId}>\n**Scanned:** ${scanned}\n**Files Found:** ${total}\n✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n📤 **Destination:** <#${destId}>`
-      });
+      return interaction.editReply({ content: `✅ **FORWARD COMPLETE — MAX SPEED** ⚡\n**Channel:** <#${sourceId}>\n**Scanned:** ${scanned}\n**Files Found:** ${total}\n✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n📤 **Destination:** <#${destId}>` });
     }
 
-    // =========================
-    // /uploadzip — OWNER OR FOUNDER ROLE
-    // =========================
-    if (interaction.commandName === "uploadzip") {
-      if (!hasPermission(interaction, "scan_role_or_owner")) {
-        return interaction.reply({ content: "❌ Owner or Founder Role only.", ephemeral: true });
-      }
-      const attachment = interaction.options.getAttachment("file");
-      if (!attachment.name.toLowerCase().endsWith(".zip")) return interaction.reply({ content: "❌ Must be a .zip file.", ephemeral: true });
-      await interaction.deferReply();
-      const zipPath = path.join(TEMP_DIR, `${crypto.randomBytes(8).toString("hex")}.zip`);
-      try {
-        await downloadFile(attachment.url, zipPath);
-        const result = await extractZipToLibrary(zipPath);
-        return interaction.editReply({ content: `📦 **ZIP EXTRACTED**\n**File:** \`${attachment.name}\`\n✅ **Added:** ${result.added}\n⏭️ **Skipped:** ${result.skipped}\n📚 **Total:** ${result.total}` });
-      } catch (err) {
-        console.error("Zip error:", err);
-        fs.unlink(zipPath, () => {});
-        return interaction.editReply({ content: `❌ Failed to extract zip: ${err.message}` });
-      }
-    }
-
-    // =========================
-    // /setchannel — ADMINISTRATOR
-    // =========================
     if (interaction.commandName === "setchannel") {
-      if (!hasPermission(interaction, "administrator")) {
-        return interaction.reply({ content: "❌ Requires Administrator permission.", ephemeral: true });
-      }
+      if (!hasPermission(interaction, "administrator")) return interaction.reply({ content: "❌ Requires Administrator permission.", ephemeral: true });
       config.allowedChannelId = interaction.channelId;
       saveConfig();
       return interaction.reply({ content: `✅ **Channel Set!**\n🔗 Allowed: <#${interaction.channelId}>`, ephemeral: false });
     }
 
-    // =========================
-    // /embed — MANAGE MESSAGES
-    // =========================
     if (interaction.commandName === "embed") {
-      if (!hasPermission(interaction, "manage_messages")) {
-        return interaction.reply({ content: "❌ Requires Manage Messages permission.", ephemeral: true });
-      }
+      if (!hasPermission(interaction, "manage_messages")) return interaction.reply({ content: "❌ Requires Manage Messages permission.", ephemeral: true });
       const desc = interaction.options.getString("description");
       const title = interaction.options.getString("title");
       const embed = new EmbedBuilder().setColor(0x808080).setDescription(desc);
@@ -660,18 +489,17 @@ client.on("interactionCreate", async interaction => {
       await interaction.deleteReply();
       return interaction.channel.send({ embeds: [embed] });
     }
-
   } catch (e) { console.error("❌ Interaction error:", e); }
 });
 
 // =========================
-// PREFIX COMMANDS
+// PREFIX COMMANDS — FIXED SCAN_ROLE_ID
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
   const userId = message.author.id;
-  const hasScanRole = message.member?.roles?.cache?.has(SCAN_ROLE_ID);
-  const bypass = userId === OWNER_ID || hasScanRole;
+  const hasFounderRole = message.member?.roles?.cache?.has(FOUNDER_ROLE_ID);
+  const bypass = userId === OWNER_ID || hasFounderRole;
   const allowed = bypass || !config.allowedChannelId || message.channel.id === config.allowedChannelId;
 
   if (message.content.startsWith(".find ")) {
@@ -692,11 +520,7 @@ client.on("messageCreate", async message => {
     if (!id) return message.reply("❌ put id of file, idiot.");
     const file = getFileById(id);
     if (!file) return message.reply("❌ make sure that correct, idiot.");
-    if (file.isLocal && fs.existsSync(file.url)) {
-      await message.channel.send({ content: `<@${message.author.id}> **Here is the file twin!**`, files: [{ attachment: file.url, name: file.name }] });
-    } else {
-      await message.channel.send({ content: `<@${message.author.id}> **Here is the file twin!**`, files: [{ attachment: file.url, name: file.name }] });
-    }
+    await message.channel.send({ content: `<@${message.author.id}> **Here is the file twin!**`, files: [{ attachment: file.url, name: file.name }] });
   }
 });
 
