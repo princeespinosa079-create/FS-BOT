@@ -27,7 +27,7 @@ try { yauzl = require("yauzl"); } catch (e) { console.log("⚠️ yauzl not inst
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OWNER_ID = "1302080645987569694";
-const SCAN_ROLE_ID = "1509953862226935948";
+const FOUNDER_ROLE_ID = "1509953862226935948";
 
 if (!TOKEN || !CLIENT_ID) {
   console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID");
@@ -124,7 +124,7 @@ function hasPermission(interaction, requiredPerm) {
   if (userId === OWNER_ID) return true;
 
   // CHECK SCAN ROLE
-  const hasScanRole = member?.roles?.cache?.has(SCAN_ROLE_ID);
+  const hasFounderRole = member?.roles?.cache?.has(FOUNDER_ROLE_ID);
 
   switch (requiredPerm) {
     case "owner_only":
@@ -293,11 +293,11 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName("setchannel")
-    .setDescription("Set allowed channel for .find and .get — Requires Administrator"),
+    .setDescription("Set allowed channel for .find and .get (Requires Administrator),
 
   new SlashCommandBuilder()
     .setName("scanchannel")
-    .setDescription("Scan channel for files — Owner or Scan Role Only")
+    .setDescription("Scan channel for files (Owner or Founder Role Only")
     .addChannelOption(o =>
       o.setName("channel")
        .setDescription("Channel to scan")
@@ -306,7 +306,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("forwardall")
-    .setDescription("Copy all .txt files FAST — Owner or Scan Role Only")
+    .setDescription("Copy all .txt files FAST (Owner or Founder Role Only")
     .addStringOption(o =>
       o.setName("source_channel_id")
        .setDescription("Source Channel ID")
@@ -320,7 +320,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("uploadzip")
-    .setDescription("Upload zip file, auto extract — Owner or Scan Role Only")
+    .setDescription("Upload zip file, auto extract (Owner or Founder Role Only")
     .addAttachmentOption(o =>
       o.setName("file")
        .setDescription("Zip file to extract")
@@ -329,7 +329,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("embed")
-    .setDescription("Send a gray embed message — Requires Manage Messages")
+    .setDescription("Send a gray embed message (Requires Manage Messages")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .addStringOption(o =>
       o.setName("description")
@@ -344,11 +344,11 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("serverlist")
-    .setDescription("List all servers with invite — Owner Only"),
+    .setDescription("List all servers with invite (Owner Only),
 
   new SlashCommandBuilder()
     .setName("leave")
-    .setDescription("Make the bot leave a server — Owner Only")
+    .setDescription("Make the bot leave a server (Owner Only)
     .addStringOption(o =>
       o.setName("server-id")
        .setDescription("Server ID to leave")
@@ -476,9 +476,9 @@ client.on("interactionCreate", async interaction => {
       if (customId.startsWith("search_back_") || customId.startsWith("search_next_")) {
         const parts = customId.split("_");
         const direction = parts[1], ownerUserId = parts[2], currentPage = parseInt(parts[3]);
-        if (ownerUserId !== userId) return interaction.reply({ content: "❌ stfu, this is not your search", ephemeral: true });
+        if (ownerUserId !== userId) return interaction.reply({ content: "❌ stfu, this is not your search.", ephemeral: true });
         const session = searchSessions.get(interaction.message.id);
-        if (!session) return interaction.reply({ content: "❌ Search expired, idiot. Use .find again.", ephemeral: true });
+        if (!session) return interaction.reply({ content: "❌ search expired, idiot, use .find again.", ephemeral: true });
         const newPage = direction === "next" ? currentPage + 1 : currentPage - 1;
         searchSessions.set(interaction.message.id, { ...session, page: newPage });
         await interaction.update(buildSearchPage(ownerUserId, session.results, newPage));
@@ -530,8 +530,8 @@ client.on("interactionCreate", async interaction => {
     // /scanchannel — OWNER OR SCAN ROLE
     // =========================
     if (interaction.commandName === "scanchannel") {
-      if (!hasPermission(interaction, "scan_role_or_owner")) {
-        return interaction.reply({ content: "❌ Owner or Scan Role only.", ephemeral: true });
+      if (!hasPermission(interaction, "founder_role_or_owner")) {
+        return interaction.reply({ content: "❌ Owner or Founder Role only.", ephemeral: true });
       }
       const channel = interaction.options.getChannel("channel");
       await interaction.deferReply();
@@ -540,11 +540,11 @@ client.on("interactionCreate", async interaction => {
     }
 
     // =========================
-    // /forwardall — OWNER OR SCAN ROLE + MAX SPEED
+    // /forwardall — OWNER OR FOUNDER ROLE + MAX SPEED
     // =========================
     if (interaction.commandName === "forwardall") {
       if (!hasPermission(interaction, "scan_role_or_owner")) {
-        return interaction.reply({ content: "❌ Owner or Scan Role only.", ephemeral: true });
+        return interaction.reply({ content: "❌ Owner or Founder Role only.", ephemeral: true });
       }
       
       const sourceId = interaction.options.getString("source_channel_id").trim();
@@ -611,11 +611,11 @@ client.on("interactionCreate", async interaction => {
     }
 
     // =========================
-    // /uploadzip — OWNER OR SCAN ROLE
+    // /uploadzip — OWNER OR FOUNDER ROLE
     // =========================
     if (interaction.commandName === "uploadzip") {
       if (!hasPermission(interaction, "scan_role_or_owner")) {
-        return interaction.reply({ content: "❌ Owner or Scan Role only.", ephemeral: true });
+        return interaction.reply({ content: "❌ Owner or Founder Role only.", ephemeral: true });
       }
       const attachment = interaction.options.getAttachment("file");
       if (!attachment.name.toLowerCase().endsWith(".zip")) return interaction.reply({ content: "❌ Must be a .zip file.", ephemeral: true });
@@ -677,9 +677,9 @@ client.on("messageCreate", async message => {
   if (message.content.startsWith(".find ")) {
     if (!allowed) return message.reply("❌ not here, idiot.");
     const query = message.content.slice(6).trim();
-    if (!query) return message.reply("❌ No match file for that, idiot.");
+    if (!query) return message.reply("❌ no match file for that, idiot.");
     const results = searchFiles(query);
-    if (results.length === 0) return message.reply("❌ No match file for that, idiot.");
+    if (results.length === 0) return message.reply("❌ no match file for that, idiot.");
     const replyData = buildSearchPage(message.author.id, results, 1);
     const replyMsg = await message.reply(replyData);
     searchSessions.set(replyMsg.id, { userId: message.author.id, results, page: 1 });
@@ -689,13 +689,13 @@ client.on("messageCreate", async message => {
   if (message.content.startsWith(".get")) {
     if (!allowed) return message.reply("❌ not here, idiot.");
     const id = message.content.slice(4).trim();
-    if (!id) return message.reply("❌ Put ID of File, idiot.");
+    if (!id) return message.reply("❌ put id of file, idiot.");
     const file = getFileById(id);
     if (!file) return message.reply("❌ make sure that correct, idiot.");
     if (file.isLocal && fs.existsSync(file.url)) {
-      await message.channel.send({ content: `<@${message.author.id}> Here is the file twin!`, files: [{ attachment: file.url, name: file.name }] });
+      await message.channel.send({ content: `<@${message.author.id}> **Here is the file twin!**`, files: [{ attachment: file.url, name: file.name }] });
     } else {
-      await message.channel.send({ content: `<@${message.author.id}> Here is the file twin!`, files: [{ attachment: file.url, name: file.name }] });
+      await message.channel.send({ content: `<@${message.author.id}> **Here is the file twin!**`, files: [{ attachment: file.url, name: file.name }] });
     }
   }
 });
