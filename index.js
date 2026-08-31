@@ -13,9 +13,6 @@ const {
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const https = require("https");
-const http = require("http");
-const crypto = require("crypto");
 
 // =========================
 // CONFIG
@@ -25,18 +22,18 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const OWNER_ID = "1302080645987569694";
 const FOUNDER_ROLE_ID = "1509953862226935948";
 
-if (!TOKEN || !CLIENT_ID) {
-  console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID");
-  process.exit(1);
-}
+console.log("🔧 Checking environment variables...");
+if (!TOKEN) { console.error("❌ DISCORD_TOKEN is missing!"); process.exit(1); }
+if (!CLIENT_ID) { console.error("❌ CLIENT_ID is missing!"); process.exit(1); }
+console.log("✅ Env vars OK");
 
 // =========================
-// EXPRESS — PORT FIX
+// EXPRESS — HEALTH CHECK
 // =========================
 const app = express();
-const PORT = process.env.PORT || 3000;
-app.get("/", (req, res) => res.send("FS Bot Online"));
-app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT} open`));
+const PORT = process.env.PORT || 10000;
+app.get("/", (req, res) => res.send("FS Bot Online — Discord Bot Running"));
+app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Web server on port ${PORT}`));
 
 // =========================
 // DATA DIRS
@@ -50,21 +47,13 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 // =========================
 // HELPERS
 // =========================
-function normalizeFilename(name) {
-  return String(name || "").trim().toLowerCase();
-}
-function generateId() {
-  return Math.random().toString(36).substring(2, 8);
-}
+function normalizeFilename(name) { return String(name || "").trim().toLowerCase(); }
+function generateId() { return Math.random().toString(36).substring(2, 8); }
 function loadConfig() {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
-  } catch (e) {}
+  try { if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")); } catch (e) {}
   return { allowedChannelId: null };
 }
-function saveConfig() {
-  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); } catch (e) {}
-}
+function saveConfig() { try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); } catch (e) {} }
 function loadLibrary() {
   try {
     if (fs.existsSync(LIBRARY_FILE)) {
@@ -76,9 +65,7 @@ function loadLibrary() {
   } catch (e) {}
   return { files: [] };
 }
-function saveLibrary() {
-  try { fs.writeFileSync(LIBRARY_FILE, JSON.stringify(library, null, 2)); } catch (e) {}
-}
+function saveLibrary() { try { fs.writeFileSync(LIBRARY_FILE, JSON.stringify(library, null, 2)); } catch (e) {} }
 
 const config = loadConfig();
 const library = loadLibrary();
@@ -93,9 +80,7 @@ function isImageFile(name) {
   const ext = path.extname((name || "").toLowerCase());
   return IMAGE_EXTENSIONS.includes(ext);
 }
-function isTxtFile(name) {
-  return path.extname((name || "").toLowerCase()) === ".txt";
-}
+function isTxtFile(name) { return path.extname((name || "").toLowerCase()) === ".txt"; }
 function getTimePH() {
   const now = new Date();
   const ph = new Date(now.getTime() + 8 * 60 * 60 * 1000);
@@ -103,26 +88,19 @@ function getTimePH() {
 }
 
 // =========================
-// ✅ PERMISSION CHECK — FIXED
+// PERMISSION CHECK
 // =========================
 function hasPermission(interaction, requiredPerm) {
   const userId = interaction.user.id;
   const member = interaction.member;
   const hasFounderRole = member?.roles?.cache?.has(FOUNDER_ROLE_ID);
-
   if (userId === OWNER_ID) return true;
-
   switch (requiredPerm) {
-    case "owner_only":
-      return userId === OWNER_ID;
-    case "scan_role_or_owner":
-      return userId === OWNER_ID || hasFounderRole;
-    case "administrator":
-      return member?.permissions?.has(PermissionFlagsBits.Administrator);
-    case "manage_messages":
-      return member?.permissions?.has(PermissionFlagsBits.ManageMessages);
-    default:
-      return false;
+    case "owner_only": return userId === OWNER_ID;
+    case "scan_role_or_owner": return userId === OWNER_ID || hasFounderRole;
+    case "administrator": return member?.permissions?.has(PermissionFlagsBits.Administrator);
+    case "manage_messages": return member?.permissions?.has(PermissionFlagsBits.ManageMessages);
+    default: return false;
   }
 }
 function fileExistsByName(name) {
@@ -143,23 +121,16 @@ function searchFiles(query) {
     const name = normalizeFilename(file.name);
     const nameNoSpecial = name.replace(/[^a-z0-9]/g, "");
     if (name === q || nameNoSpecial === qNoSpecial || name.startsWith(q + ".") || nameNoSpecial.startsWith(qNoSpecial + ".")) {
-      exactMatches.push(file);
-      continue;
+      exactMatches.push(file); continue;
     }
     let allWords = true;
-    for (const word of qWords) {
-      if (!name.includes(word)) { allWords = false; break; }
-    }
+    for (const word of qWords) { if (!name.includes(word)) { allWords = false; break; } }
     if (allWords && qWords.length > 1) { allWordsMatches.push(file); continue; }
-    for (const word of qWords) {
-      if (name.includes(word)) { anyWordMatches.push(file); break; }
-    }
+    for (const word of qWords) { if (name.includes(word)) { anyWordMatches.push(file); break; } }
   }
   return [...exactMatches, ...allWordsMatches, ...anyWordMatches];
 }
-function getFileById(id) {
-  return libraryFiles.find(file => file.id === id);
-}
+function getFileById(id) { return libraryFiles.find(file => file.id === id); }
 
 // =========================
 // FETCH CHANNEL BY ID
@@ -170,14 +141,11 @@ async function fetchChannelById(channelId) {
     let channel = client.channels.cache.get(channelId);
     if (!channel) channel = await client.channels.fetch(channelId, { force: true });
     return channel;
-  } catch (e) {
-    console.error(`Failed to fetch channel ${channelId}:`, e.message);
-    return null;
-  }
+  } catch (e) { console.error(`Failed to fetch channel ${channelId}:`, e.message); return null; }
 }
 
 // =========================
-// SCAN .txt FILES — FAST
+// SCAN .txt FILES
 // =========================
 async function scanTxtFiles(channel) {
   if (!channel.isTextBased()) return { files: [], scanned: 0 };
@@ -192,19 +160,13 @@ async function scanTxtFiles(channel) {
     if (!batch.size) break;
     scanned += batch.size;
     for (const msg of batch.values()) {
-      for (const a of msg.attachments.values()) {
-        if (!isTxtFile(a.name)) continue;
-        foundFiles.push({ name: a.name, url: a.url, size: a.size });
-      }
+      for (const a of msg.attachments.values()) { if (!isTxtFile(a.name)) continue; foundFiles.push({ name: a.name, url: a.url, size: a.size }); }
       if (msg.messageSnapshots) {
         const snapshots = Array.isArray(msg.messageSnapshots) ? msg.messageSnapshots : [...(msg.messageSnapshots.values?.() || [])];
         for (const snap of snapshots) {
           if (!snap?.attachments) continue;
           const atts = typeof snap.attachments.values === "function" ? snap.attachments.values() : Array.isArray(snap.attachments) ? snap.attachments : [];
-          for (const a of atts) {
-            if (!isTxtFile(a.name)) continue;
-            foundFiles.push({ name: a.name, url: a.url, size: a.size });
-          }
+          for (const a of atts) { if (!isTxtFile(a.name)) continue; foundFiles.push({ name: a.name, url: a.url, size: a.size }); }
         }
       }
     }
@@ -221,83 +183,58 @@ async function scanTxtFiles(channel) {
 const searchSessions = new Map();
 
 // =========================
-// CLIENT
+// CLIENT — INTENTS FIXED
 // =========================
+console.log("🤖 Creating Discord client...");
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
+console.log("✅ Client created");
 
 // =========================
-// SLASH COMMANDS — FIXED SYNTAX, REMOVED uploadzip
+// SLASH COMMANDS
 // =========================
 const commands = [
-  new SlashCommandBuilder()
-    .setName("setchannel")
-    .setDescription("Set allowed channel for .find and .get (Requires Administrator)"),
-  new SlashCommandBuilder()
-    .setName("scanchannel")
-    .setDescription("Scan channel for files (Owner or Founder Role Only)")
-    .addChannelOption(o =>
-      o.setName("channel")
-       .setDescription("Channel to scan")
-       .setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName("forwardall")
-    .setDescription("Copy all .txt files FAST (Owner or Founder Role Only)")
-    .addStringOption(o =>
-      o.setName("source_channel_id")
-       .setDescription("Source Channel ID")
-       .setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName("destination_channel_id")
-       .setDescription("Destination Channel ID")
-       .setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName("embed")
-    .setDescription("Send a gray embed message (Requires Manage Messages)")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addStringOption(o =>
-      o.setName("description")
-       .setDescription("Embed text content")
-       .setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName("title")
-       .setDescription("Optional title")
-       .setRequired(false)
-    ),
-  new SlashCommandBuilder()
-    .setName("serverlist")
-    .setDescription("List all servers with invite (Owner Only)"),
-  new SlashCommandBuilder()
-    .setName("leave")
-    .setDescription("Make the bot leave a server (Owner Only)")
-    .addStringOption(o =>
-      o.setName("server-id")
-       .setDescription("Server ID to leave")
-       .setRequired(true)
-    )
+  new SlashCommandBuilder().setName("setchannel").setDescription("Set allowed channel for .find and .get (Requires Administrator)"),
+  new SlashCommandBuilder().setName("scanchannel").setDescription("Scan channel for files (Owner or Founder Role Only)").addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true)),
+  new SlashCommandBuilder().setName("forwardall").setDescription("Copy all .txt files FAST (Owner or Founder Role Only)")
+    .addStringOption(o => o.setName("source_channel_id").setDescription("Source Channel ID").setRequired(true))
+    .addStringOption(o => o.setName("destination_channel_id").setDescription("Destination Channel ID").setRequired(true)),
+  new SlashCommandBuilder().setName("embed").setDescription("Send a gray embed message (Requires Manage Messages)").setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+    .addStringOption(o => o.setName("description").setDescription("Embed text content").setRequired(true))
+    .addStringOption(o => o.setName("title").setDescription("Optional title").setRequired(false)),
+  new SlashCommandBuilder().setName("serverlist").setDescription("List all servers with invite (Owner Only)"),
+  new SlashCommandBuilder().setName("leave").setDescription("Make the bot leave a server (Owner Only)").addStringOption(o => o.setName("server-id").setDescription("Server ID to leave").setRequired(true))
 ].map(c => c.toJSON());
 
 // =========================
-// REGISTER
+// REGISTER COMMANDS
 // =========================
 async function registerCommands() {
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-  console.log("✅ Commands registered");
+  try {
+    console.log("📋 Registering slash commands...");
+    const rest = new REST({ version: "10" }).setToken(TOKEN);
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log("✅ Commands registered");
+  } catch (e) { console.error("❌ Failed to register commands:", e); }
 }
+
+// =========================
+// READY EVENT
+// =========================
 client.once("ready", async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(`✅✅✅ LOGGED IN AS ${client.user.tag} ✅✅✅`);
   console.log(`📚 Library: ${libraryFiles.length} files`);
+  console.log(`🌐 Serving in ${client.guilds.cache.size} servers`);
   await registerCommands();
 });
 
 // =========================
-// SCAN CHANNEL
+// SCAN CHANNEL FUNCTION
 // =========================
 async function scanChannel(channel) {
   if (!channel.isTextBased()) return { added: 0, skipped: 0, total: libraryFiles.length, scanned: 0 };
@@ -368,28 +305,23 @@ function buildSearchPage(ownerUserId, results, page = 1) {
 }
 
 // =========================
-// ✅ CREATE INVITE LINK FOR SERVER
+// GET GUILD INVITE
 // =========================
 async function getGuildInvite(guild) {
   try {
     const invites = await guild.invites.fetch().catch(() => []);
-    if (invites.size > 0) {
-      const invite = invites.first();
-      return `https://discord.gg/${invite.code}`;
-    }
+    if (invites.size > 0) return `https://discord.gg/${invites.first().code}`;
     const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has(PermissionFlagsBits.CreateInstantInvite));
     if (channel) {
-      const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: "Server list invite" }).catch(() => null);
+      const invite = await channel.createInvite({ maxAge: 0, maxUses: 0 }).catch(() => null);
       if (invite) return `https://discord.gg/${invite.code}`;
     }
     return "No permission";
-  } catch {
-    return "No permission";
-  }
+  } catch { return "No permission"; }
 }
 
 // =========================
-// INTERACTIONS — FIXED PERM CHECK
+// INTERACTIONS
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
@@ -458,10 +390,8 @@ client.on("interactionCreate", async interaction => {
       for (let i = 0; i < txtFiles.length; i += BATCH_SIZE) {
         const batch = txtFiles.slice(i, i + BATCH_SIZE);
         const promises = batch.map(async (file) => {
-          try {
-            await destChannel.send({ files: [{ attachment: file.url, name: file.name }] });
-            return { success: true };
-          } catch (e) { return { success: false }; }
+          try { await destChannel.send({ files: [{ attachment: file.url, name: file.name }] }); return { success: true }; }
+          catch (e) { return { success: false }; }
         });
         const results = await Promise.allSettled(promises);
         results.forEach(r => { if (r.status === "fulfilled" && r.value.success) sent++; else failed++; });
@@ -493,7 +423,7 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =========================
-// PREFIX COMMANDS — FIXED SCAN_ROLE_ID
+// PREFIX COMMANDS
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
@@ -525,9 +455,19 @@ client.on("messageCreate", async message => {
 });
 
 // =========================
-// LOGIN
+// LOGIN — WITH ERROR HANDLING
 // =========================
 client.on("error", e => console.error("❌ Client error:", e));
-process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
-console.log("🔑 Logging in...");
-client.login(TOKEN).catch(e => { console.error("❌ Login failed:", e); process.exit(1); });
+client.on("warn", w => console.warn("⚠️ Client warning:", w));
+process.on("unhandledRejection", e => console.error("❌ Unhandled Rejection:", e));
+
+console.log("🔑 Attempting Discord login...");
+client.login(TOKEN)
+  .then(() => console.log("🔑 Login promise resolved — waiting for ready event..."))
+  .catch(e => {
+    console.error("❌❌❌ LOGIN FAILED ❌❌❌");
+    console.error("Error name:", e.name);
+    console.error("Error message:", e.message);
+    console.error("Full error:", e);
+    process.exit(1);
+  });
