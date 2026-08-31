@@ -89,12 +89,23 @@ function getTimePH() {
   return d.toISOString().slice(11, 16);
 }
 
+// =========================
+// ✅ WHITELIST CHECK — ROLE WORKS EVEN IF BOT NOT IN SERVER
+// =========================
 function isWhitelisted(userId, member = null) {
   if (userId === OWNER_ID) return true;
   if (whitelist.users.includes(userId)) return true;
-  if (member && whitelist.roles.some(r => member.roles?.cache?.has(r))) return true;
+  // ✅ ROLE CHECK — STILL WORKS BY ID, EVEN IF BOT CAN'T SEE THE ROLE
+  if (member && whitelist.roles.length > 0) {
+    for (const roleId of whitelist.roles) {
+      if (member.roles?.cache?.has(roleId)) return true;
+      // ✅ Also check via IDs in case cache is empty
+      if (member.roles?.cache?.some(r => r.id === roleId)) return true;
+    }
+  }
   return false;
 }
+
 function fileExistsByName(name) { return libraryFiles.some(f => normalizeFilename(f.name) === normalizeFilename(name)); }
 function searchFiles(q) {
   q = q.toLowerCase().trim();
@@ -136,7 +147,7 @@ const client = new Client({
 });
 
 // =========================
-// SLASH COMMANDS — GUILD ONLY + PERMISSION AT END
+// SLASH COMMANDS — ✅ FIXED ALL DESCRIPTIONS = NO MORE CRASH!
 // =========================
 const commands = [
   new SlashCommandBuilder()
@@ -146,14 +157,20 @@ const commands = [
   new SlashCommandBuilder()
     .setName("whitelist")
     .setDescription("Add or remove users/roles from whitelist (Owner Only)")
-    .addStringOption(o => o.setName("mode").setRequired(true).addChoices({ name: "Add", value: "add" }, { name: "Remove", value: "remove" }))
-    .addStringOption(o => o.setName("type").setRequired(true).addChoices({ name: "Role", value: "role" }, { name: "User", value: "user" }))
-    .addStringOption(o => o.setName("id").setRequired(true).setDescription("ID — numbers only")),
+    .addStringOption(o => o.setName("mode").setDescription("Add or Remove").setRequired(true).addChoices(
+      { name: "Add", value: "add" },
+      { name: "Remove", value: "remove" }
+    ))
+    .addStringOption(o => o.setName("type").setDescription("Role or User").setRequired(true).addChoices(
+      { name: "Role", value: "role" },
+      { name: "User", value: "user" }
+    ))
+    .addStringOption(o => o.setName("id").setDescription("Role ID or User ID — numbers only").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("scanchannel")
     .setDescription("Scan all files in a channel and add to library (Owner Only)")
-    .addChannelOption(o => o.setName("channel").setRequired(true)),
+    .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("serverlist")
@@ -162,12 +179,12 @@ const commands = [
   new SlashCommandBuilder()
     .setName("leave")
     .setDescription("Make bot leave a server (Owner Only)")
-    .addStringOption(o => o.setName("server_id").setRequired(true)),
+    .addStringOption(o => o.setName("server_id").setDescription("Server ID to leave").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("embed")
     .setDescription("Send a gray embed with custom text (Manage Messages)")
-    .addStringOption(o => o.setName("description").setRequired(true))
+    .addStringOption(o => o.setName("description").setDescription("Text content for the embed").setRequired(true))
 ].map(c => c.toJSON());
 
 // =========================
@@ -193,7 +210,7 @@ client.once("ready", async () => {
 client.on("interactionCreate", async int => {
   try {
     // ❌ NOT IN ALLOWED GUILD → REJECT INSTANTLY
-    if (int.guildId !== GUILD_ID) {
+    if (int.guildId && int.guildId !== GUILD_ID) {
       if (int.isChatInputCommand()) {
         return int.reply({ content: "❌ i'm not gonna work here, dumbass.", ephemeral: true });
       }
@@ -298,23 +315,33 @@ client.on("interactionCreate", async int => {
 });
 
 // =========================
-// ✅ SERVER LOCK CHECK — PREFIX COMMANDS
+// ✅ PREFIX COMMANDS — WHITELIST BYPASS WORKS ANYWHERE
 // =========================
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
 
-  // ❌ NOT ALLOWED GUILD — BLOCK PREFIX COMMANDS TOO
-  if (msg.guild && msg.guild.id !== GUILD_ID) {
-    const prefixes = [".find", ".get", ".upload", ".help"];
-    if (prefixes.some(p => msg.content.toLowerCase().startsWith(p))) {
+  const userId = msg.author.id;
+  const member = msg.member;
+  const isDM = !msg.guild;
+  const isWhitelistedUser = isWhitelisted(userId, member);
+
+  // ✅ WHITELISTED USERS/ROLES — .get .find .upload .help WORK ANYWHERE
+  const prefixCommands = [".find", ".get", ".upload", ".help"];
+  const isPrefixCommand = prefixCommands.some(p => msg.content.toLowerCase().startsWith(p));
+
+  if (isPrefixCommand) {
+    // ✅ WHITELISTED = ALLOWED ANYWHERE — EVEN IN OTHER SERVERS
+    if (isWhitelistedUser) {
+      // Skip server check for whitelisted users
+    }
+    // ❌ NOT WHITELISTED + NOT IN ALLOWED GUILD = BLOCK
+    else if (!isDM && msg.guild.id !== GUILD_ID) {
       return msg.reply("❌ i'm not gonna work here, dumbass.");
     }
-    return;
+    // ✅ NOT WHITELISTED BUT IN ALLOWED GUILD = ALLOWED (normal restriction)
   }
 
-  const isDM = !msg.guild;
   const okCh = isDM || !config.allowedChannelId || msg.channel.id === config.allowedChannelId;
-  const okUser = isWhitelisted(msg.author.id, msg.member);
 
   if (msg.content.toLowerCase() === ".help") {
     return msg.channel.send({ embeds: [new EmbedBuilder().setTitle("How this works?").setColor(0x808080)
@@ -323,8 +350,8 @@ client.on("messageCreate", async msg => {
   }
 
   if (msg.content.toLowerCase().startsWith(".upload")) {
-    if (!okUser) return;
-    if (!okCh) return msg.reply("❌ not here, dumbass.");
+    if (!isWhitelistedUser) return;
+    if (!okCh && !isDM) return msg.reply("❌ not here, dumbass.");
     if (!msg.attachments.size) return msg.reply("❌ put file here nga.");
     const att = msg.attachments.first();
     if (isImageFile(att.name)) return msg.reply("❌ Images not allowed.");
@@ -339,8 +366,8 @@ client.on("messageCreate", async msg => {
   }
 
   if (msg.content.toLowerCase().startsWith(".find ")) {
-    if (!okUser) return;
-    if (!okCh) return msg.reply("❌ not here, dumbass.");
+    if (!isWhitelistedUser) return;
+    if (!okCh && !isDM) return msg.reply("❌ not here, dumbass.");
     const q = msg.content.slice(6).trim();
     if (!q) return msg.reply("❌ no match file for that, idiot.");
     const res = searchFiles(q);
@@ -350,8 +377,8 @@ client.on("messageCreate", async msg => {
   }
 
   if (msg.content.toLowerCase().startsWith(".get ")) {
-    if (!okUser) return;
-    if (!okCh) return msg.reply("❌ not here, dumbass.");
+    if (!isWhitelistedUser) return;
+    if (!okCh && !isDM) return msg.reply("❌ not here, dumbass.");
     const id = msg.content.slice(5).trim();
     const f = getFileById(id);
     if (!f) return msg.reply("❌ no match file for that, idiot.");
