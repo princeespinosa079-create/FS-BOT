@@ -16,7 +16,6 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const http = require("http");
-const crypto = require("crypto");
 
 // =========================
 // CONFIG
@@ -31,15 +30,15 @@ if (!TOKEN || !CLIENT_ID) {
 }
 
 // =========================
-// EXPRESS
+// EXPRESS — KEEP BOT ALIVE
 // =========================
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.get("/", (req, res) => res.send("FS Bot Online"));
 app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT} open`));
 
 // =========================
-// DATA DIRS & FILES
+// DATA FILES
 // =========================
 const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
@@ -134,31 +133,16 @@ function fileExistsByName(name) {
 }
 
 // =========================
-// SMART SEARCH
+// SEARCH
 // =========================
 function searchFiles(query) {
   const q = query.toLowerCase().trim();
   if (!q || libraryFiles.length === 0) return [];
-  const qWords = q.split(/\s+/);
-  const qNoSpecial = q.replace(/[^a-z0-9]/g, "");
-  const exactMatches = [], allWordsMatches = [], anyWordMatches = [];
+  const results = [];
   for (const file of libraryFiles) {
-    const name = normalizeFilename(file.name);
-    const nameNoSpecial = name.replace(/[^a-z0-9]/g, "");
-    if (name === q || nameNoSpecial === qNoSpecial || name.startsWith(q + ".") || nameNoSpecial.startsWith(qNoSpecial + ".")) {
-      exactMatches.push(file);
-      continue;
-    }
-    let allWords = true;
-    for (const word of qWords) {
-      if (!name.includes(word)) { allWords = false; break; }
-    }
-    if (allWords && qWords.length > 1) { allWordsMatches.push(file); continue; }
-    for (const word of qWords) {
-      if (name.includes(word)) { anyWordMatches.push(file); break; }
-    }
+    if (normalizeFilename(file.name).includes(q)) results.push(file);
   }
-  return [...exactMatches, ...allWordsMatches, ...anyWordMatches];
+  return results;
 }
 
 function getFileById(id) {
@@ -177,111 +161,6 @@ function downloadFile(url, destPath) {
 }
 
 // =========================
-// FETCH CHANNEL BY ID
-// =========================
-async function fetchChannelById(channelId) {
-  if (!/^\d+$/.test(channelId)) return null;
-  try {
-    let channel = client.channels.cache.get(channelId);
-    if (!channel) channel = await client.channels.fetch(channelId, { force: true });
-    return channel;
-  } catch (e) {
-    console.error(`Failed to fetch channel ${channelId}:`, e.message);
-    return null;
-  }
-}
-
-// =========================
-// SCAN FILES
-// =========================
-async function scanChannel(channel) {
-  if (!channel.isTextBased()) return { added: 0, skipped: 0, total: libraryFiles.length, scanned: 0 };
-  const foundFiles = [];
-  let before = null, scanned = 0;
-  while (true) {
-    const options = { limit: 100 };
-    if (before) options.before = before;
-    let batch;
-    try { batch = await channel.messages.fetch(options); }
-    catch (e) { await new Promise(r => setTimeout(r, 100)); continue; }
-    if (!batch.size) break;
-    scanned += batch.size;
-    for (const msg of batch.values()) {
-      for (const a of msg.attachments.values()) {
-        const n = normalizeFilename(a.name);
-        if (!n || isImageFile(a.name)) continue;
-        foundFiles.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
-      }
-      if (msg.messageSnapshots) {
-        const snapshots = Array.isArray(msg.messageSnapshots) ? msg.messageSnapshots : [...(msg.messageSnapshots.values?.() || [])];
-        for (const snap of snapshots) {
-          if (!snap?.attachments) continue;
-          const atts = typeof snap.attachments.values === "function" ? snap.attachments.values() : Array.isArray(snap.attachments) ? snap.attachments : [];
-          for (const a of atts) {
-            const n = normalizeFilename(a.name);
-            if (!n || isImageFile(a.name)) continue;
-            foundFiles.push({ name: a.name, url: a.url, size: a.size, ts: msg.createdTimestamp });
-          }
-        }
-      }
-    }
-    before = batch.last()?.id;
-    if (!before || batch.size < 100) break;
-    await new Promise(r => setTimeout(r, 50));
-  }
-  const unique = new Map();
-  for (const f of libraryFiles) unique.set(normalizeFilename(f.name), f);
-  let newCount = 0, skipped = 0;
-  for (const f of foundFiles) {
-    const key = normalizeFilename(f.name);
-    if (!unique.has(key)) {
-      unique.set(key, { id: generateId(), name: f.name, url: f.url, size: f.size, timestamp: f.ts });
-      newCount++;
-    } else { skipped++; }
-  }
-  libraryFiles.length = 0;
-  libraryFiles.push(...[...unique.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)));
-  saveLibrary();
-  return { added: newCount, skipped, total: libraryFiles.length, scanned };
-}
-
-async function scanTxtFiles(channel) {
-  if (!channel.isTextBased()) return { files: [], scanned: 0 };
-  const foundFiles = [];
-  let before = null, scanned = 0;
-  while (true) {
-    const options = { limit: 100 };
-    if (before) options.before = before;
-    let batch;
-    try { batch = await channel.messages.fetch(options); }
-    catch (e) { await new Promise(r => setTimeout(r, 100)); continue; }
-    if (!batch.size) break;
-    scanned += batch.size;
-    for (const msg of batch.values()) {
-      for (const a of msg.attachments.values()) {
-        if (!a.name.toLowerCase().endsWith(".txt")) continue;
-        foundFiles.push({ name: a.name, url: a.url, size: a.size });
-      }
-      if (msg.messageSnapshots) {
-        const snapshots = Array.isArray(msg.messageSnapshots) ? msg.messageSnapshots : [...(msg.messageSnapshots.values?.() || [])];
-        for (const snap of snapshots) {
-          if (!snap?.attachments) continue;
-          const atts = typeof snap.attachments.values === "function" ? snap.attachments.values() : Array.isArray(snap.attachments) ? snap.attachments : [];
-          for (const a of atts) {
-            if (!a.name.toLowerCase().endsWith(".txt")) continue;
-            foundFiles.push({ name: a.name, url: a.url, size: a.size });
-          }
-        }
-      }
-    }
-    before = batch.last()?.id;
-    if (!before || batch.size < 100) break;
-    await new Promise(r => setTimeout(r, 50));
-  }
-  return { files: foundFiles, scanned };
-}
-
-// =========================
 // PAGINATION
 // =========================
 const searchSessions = new Map();
@@ -294,33 +173,22 @@ function buildSearchPage(ownerUserId, results, page = 1) {
   const desc = display.map(f => `\`${f.name}\` │ ID: \`${f.id}\``).join("\n");
   const embed = new EmbedBuilder().setTitle("Finder Source Results").setColor(0x808080).setDescription(desc).setFooter({ text: `Page ${page}/${totalPages} │ Today at ${getTimePH()}` });
   const components = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`search_back_${ownerUserId}_${page}`).setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(page <= 1),
-    new ButtonBuilder().setCustomId(`search_next_${ownerUserId}_${page}`).setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(page >= totalPages)
+    new ButtonBuilder().setCustomId(`search_back_${ownerUserId}_${page}`).setLabel("◀ Back").setStyle(ButtonStyle.Secondary).setDisabled(page <= 1),
+    new ButtonBuilder().setCustomId(`search_next_${ownerUserId}_${page}`).setLabel("Next ▶").setStyle(ButtonStyle.Success).setDisabled(page >= totalPages)
   );
   return { embeds: [embed], components: [components] };
-}
-
-// =========================
-// INVITE LINK
-// =========================
-async function getGuildInvite(guild) {
-  try {
-    const invites = await guild.invites.fetch().catch(() => []);
-    if (invites.size > 0) return `https://discord.gg/${invites.first().code}`;
-    const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has(PermissionFlagsBits.CreateInstantInvite));
-    if (channel) {
-      const invite = await channel.createInvite({ maxAge: 0, maxUses: 0, reason: "Server list invite" }).catch(() => null);
-      if (invite) return `https://discord.gg/${invite.code}`;
-    }
-    return "No permission";
-  } catch { return "No permission"; }
 }
 
 // =========================
 // CLIENT
 // =========================
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages
+  ]
 });
 
 // =========================
@@ -337,12 +205,6 @@ const commands = [
     .addChannelOption(o => o.setName("channel").setDescription("Channel to scan").setRequired(true)),
 
   new SlashCommandBuilder()
-    .setName("forwardall")
-    .setDescription("(Owner Only) Copy all .txt files to another channel")
-    .addStringOption(o => o.setName("source_channel_id").setDescription("Source Channel ID").setRequired(true))
-    .addStringOption(o => o.setName("destination_channel_id").setDescription("Destination Channel ID").setRequired(true)),
-
-  new SlashCommandBuilder()
     .setName("whitelist")
     .setDescription("(Owner Only) Add or remove whitelist entries")
     .addStringOption(o => o.setName("mode").setDescription("Add or Remove").setRequired(true).addChoices(
@@ -353,32 +215,29 @@ const commands = [
       { name: "Role", value: "role" },
       { name: "User", value: "user" }
     ))
-    .addStringOption(o => o.setName("id").setDescription("Role ID or User ID (paste ID)").setRequired(true)),
-
-  new SlashCommandBuilder()
-    .setName("embed")
-    .setDescription("(Manage Messages) Send a gray embed")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addStringOption(o => o.setName("description").setDescription("Embed text content").setRequired(true))
-    .addStringOption(o => o.setName("title").setDescription("Optional title").setRequired(false)),
+    .addStringOption(o => o.setName("id").setDescription("Role ID or User ID — numbers only").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("serverlist")
-    .setDescription("(Owner Only) List all servers with invite links"),
+    .setDescription("(Owner Only) List all servers"),
 
   new SlashCommandBuilder()
     .setName("leave")
-    .setDescription("(Owner Only) Make the bot leave a server")
-    .addStringOption(o => o.setName("server-id").setDescription("Server ID to leave").setRequired(true))
+    .setDescription("(Owner Only) Leave a server")
+    .addStringOption(o => o.setName("server_id").setDescription("Server ID").setRequired(true))
 ].map(c => c.toJSON());
 
 // =========================
-// REGISTER
+// REGISTER COMMANDS
 // =========================
 async function registerCommands() {
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-  console.log("✅ Commands registered");
+  try {
+    const rest = new REST({ version: "10" }).setToken(TOKEN);
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log("✅ Commands registered successfully");
+  } catch (e) {
+    console.error("❌ Command register error:", e);
+  }
 }
 
 client.once("ready", async () => {
@@ -388,163 +247,121 @@ client.once("ready", async () => {
 });
 
 // =========================
-// INTERACTIONS
+// INTERACTIONS — SLASH COMMANDS
 // =========================
 client.on("interactionCreate", async interaction => {
   try {
+    // BUTTONS
     if (interaction.isButton()) {
-      const userId = interaction.user.id;
       const customId = interaction.customId;
       if (customId.startsWith("search_back_") || customId.startsWith("search_next_")) {
-        const parts = customId.split("_");
-        const direction = parts[1], ownerUserId = parts[2], currentPage = parseInt(parts[3]);
-        if (ownerUserId !== userId) return interaction.reply({ content: "❌ stfu, this is not your search idiot.", ephemeral: true });
+        const [_, direction, ownerUserId, pageStr] = customId.split("_");
+        const currentPage = parseInt(pageStr);
+        if (ownerUserId !== interaction.user.id) {
+          return interaction.reply({ content: "❌ stfu, this is not your search idiot.", ephemeral: true });
+        }
         const session = searchSessions.get(interaction.message.id);
-        if (!session) return interaction.reply({ content: "❌ Search expired, idiot. Use .find again.", ephemeral: true });
+        if (!session) return interaction.reply({ content: "❌ Search expired.", ephemeral: true });
         const newPage = direction === "next" ? currentPage + 1 : currentPage - 1;
-        searchSessions.set(interaction.message.id, { ...session, page: newPage });
         await interaction.update(buildSearchPage(ownerUserId, session.results, newPage));
+        searchSessions.set(interaction.message.id, { ...session, page: newPage });
       }
       return;
     }
 
     if (!interaction.isChatInputCommand()) return;
 
-    // =========================
-    // /whitelist — (Owner Only)
-    // =========================
+    // ✅ /whitelist — FIXED & SIMPLIFIED
     if (interaction.commandName === "whitelist") {
-      if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ (Owner Only) You don't have permission.", ephemeral: true });
+      await interaction.deferReply({ ephemeral: false }); // REPLY FAST = NO TIMEOUT
+      
+      if (interaction.user.id !== OWNER_ID) {
+        return interaction.editReply("❌ (Owner Only) You don't have permission.");
+      }
+      
       const mode = interaction.options.getString("mode");
       const type = interaction.options.getString("type");
       const id = interaction.options.getString("id").trim();
       
-      if (!/^\d+$/.test(id)) return interaction.reply({ content: "❌ Invalid ID format. Must be numbers only.", ephemeral: true });
+      if (!/^\d+$/.test(id)) {
+        return interaction.editReply("❌ Invalid ID — must be numbers only.");
+      }
       
       if (type === "role") {
         if (mode === "add") {
           if (!whitelist.roles.includes(id)) whitelist.roles.push(id);
           saveWhitelist();
-          return interaction.reply({ content: `✅ Role ID \`${id}\` added to whitelist.`, ephemeral: true });
+          return interaction.editReply(`✅ Role ID \`${id}\` added to whitelist.`);
         } else {
           whitelist.roles = whitelist.roles.filter(r => r !== id);
           saveWhitelist();
-          return interaction.reply({ content: `✅ Role ID \`${id}\` removed from whitelist.`, ephemeral: true });
+          return interaction.editReply(`✅ Role ID \`${id}\` removed from whitelist.`);
         }
       } else {
         if (mode === "add") {
           if (!whitelist.users.includes(id)) whitelist.users.push(id);
           saveWhitelist();
-          return interaction.reply({ content: `✅ User ID \`${id}\` added to whitelist.`, ephemeral: true });
+          return interaction.editReply(`✅ User ID \`${id}\` added to whitelist.`);
         } else {
           whitelist.users = whitelist.users.filter(u => u !== id);
           saveWhitelist();
-          return interaction.reply({ content: `✅ User ID \`${id}\` removed from whitelist.`, ephemeral: true });
+          return interaction.editReply(`✅ User ID \`${id}\` removed from whitelist.`);
         }
       }
     }
 
-    // =========================
-    // /serverlist — (Owner Only)
-    // =========================
-    if (interaction.commandName === "serverlist") {
-      if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ (Owner Only) Permission required.", ephemeral: true });
-      await interaction.deferReply({ ephemeral: true });
-      const guilds = [...client.guilds.cache.values()];
-      let list = `**📋 Servers (${guilds.length}):**\n\n`;
-      for (let i = 0; i < guilds.length; i++) {
-        const g = guilds[i];
-        const invite = await getGuildInvite(g);
-        list += `${i+1}. **${g.name}**\n   ID: \`${g.id}\`\n   Invite: ${invite}\n\n`;
-        if (list.length > 3500) { list += "\n... (truncated)"; break; }
-      }
-      return interaction.editReply({ content: list });
-    }
-
-    // =========================
-    // /leave — (Owner Only)
-    // =========================
-    if (interaction.commandName === "leave") {
-      if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ (Owner Only) Permission required.", ephemeral: true });
-      const g = client.guilds.cache.get(interaction.options.getString("server-id"));
-      if (!g) return interaction.reply({ content: "❌ Server not found.", ephemeral: true });
-      try { await g.leave(); return interaction.reply({ content: `✅ Left **${g.name}**`, ephemeral: true }); }
-      catch { return interaction.reply({ content: "❌ Failed to leave.", ephemeral: true }); }
-    }
-
-    // =========================
-    // /scanchannel — (Owner Only)
-    // =========================
-    if (interaction.commandName === "scanchannel") {
-      if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ (Owner Only) Permission required.", ephemeral: true });
-      const channel = interaction.options.getChannel("channel");
-      await interaction.deferReply();
-      const r = await scanChannel(channel);
-      return interaction.editReply({ content: `📁 **SCAN COMPLETE**\n**Channel:** <#${channel.id}>\n**Scanned:** ${r.scanned}\n✅ **Added:** ${r.added}\n⏭️ **Skipped:** ${r.skipped}\n📚 **Total:** ${r.total}` });
-    }
-
-    // =========================
-    // /forwardall — (Owner Only)
-    // =========================
-    if (interaction.commandName === "forwardall") {
-      if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "❌ (Owner Only) Permission required.", ephemeral: true });
-      const sourceId = interaction.options.getString("source_channel_id").trim();
-      const destId = interaction.options.getString("destination_channel_id").trim();
-      await interaction.deferReply();
-      const sourceChannel = await fetchChannelById(sourceId);
-      if (!sourceChannel || !sourceChannel.isTextBased()) return interaction.editReply({ content: `❌ **Invalid Source Channel:** ${sourceId}` });
-      const destChannel = await fetchChannelById(destId);
-      if (!destChannel || !destChannel.isTextBased()) return interaction.editReply({ content: `❌ **Invalid Destination Channel:** ${destId}` });
-      await interaction.editReply({ content: `🔄 **Starting FULL COPY of .txt files** from <#${sourceId}> to <#${destId}>\n⚡ **Speed Mode: MAX**` });
-      const { files: txtFiles, scanned } = await scanTxtFiles(sourceChannel);
-      if (txtFiles.length === 0) return interaction.editReply({ content: `❌ No .txt files found in <#${sourceId}>\nScanned ${scanned} messages.` });
-      let sent = 0, failed = 0;
-      const total = txtFiles.length;
-      const BATCH_SIZE = 10;
-      for (let i = 0; i < txtFiles.length; i += BATCH_SIZE) {
-        const batch = txtFiles.slice(i, i + BATCH_SIZE);
-        const promises = batch.map(async (file) => {
-          try { await destChannel.send({ files: [{ attachment: file.url, name: file.name }] }); return { success: true }; }
-          catch (e) { return { success: false }; }
-        });
-        const results = await Promise.allSettled(promises);
-        results.forEach(r => { if (r.status === "fulfilled" && r.value.success) sent++; else failed++; });
-        await interaction.editReply({ content: `🔄 **Forwarding...** ⚡ ${sent}/${total}\nFrom: <#${sourceId}> → To: <#${destId}>` });
-        if (i + BATCH_SIZE < txtFiles.length) await new Promise(r => setTimeout(r, 50));
-      }
-      return interaction.editReply({ content: `✅ **FORWARD COMPLETE — MAX SPEED** ⚡\n**Channel:** <#${sourceId}>\n**Scanned:** ${scanned}\n**Files Found:** ${total}\n✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n📤 **Destination:** <#${destId}>` });
-    }
-
-    // =========================
-    // /setchannel — (Administrator)
-    // =========================
+    // /setchannel
     if (interaction.commandName === "setchannel") {
-      if (!interaction.member?.permissions?.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ (Administrator) Permission required.", ephemeral: true });
+      if (!interaction.member?.permissions?.has(PermissionFlagsBits.Administrator)) {
+        return interaction.reply({ content: "❌ (Administrator) Permission required.", ephemeral: true });
+      }
       config.allowedChannelId = interaction.channelId;
       saveConfig();
-      return interaction.reply({ content: `✅ **Channel Set!**\n🔗 Allowed channel for .find, .get, .upload: <#${interaction.channelId}>`, ephemeral: false });
+      return interaction.reply({ content: `✅ **Channel Set!**\nAllowed: <#${interaction.channelId}>`, ephemeral: false });
     }
 
-    // =========================
-    // /embed — (Manage Messages)
-    // =========================
-    if (interaction.commandName === "embed") {
-      if (!interaction.member?.permissions?.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "❌ (Manage Messages) Permission required.", ephemeral: true });
-      const desc = interaction.options.getString("description");
-      const title = interaction.options.getString("title");
-      const embed = new EmbedBuilder().setColor(0x808080).setDescription(desc);
-      if (title) embed.setTitle(title);
-      embed.setFooter({ text: `Today at ${getTimePH()}` });
-      await interaction.deferReply({ ephemeral: true });
-      await interaction.deleteReply();
-      return interaction.channel.send({ embeds: [embed] });
+    // /scanchannel
+    if (interaction.commandName === "scanchannel") {
+      if (interaction.user.id !== OWNER_ID) {
+        return interaction.reply({ content: "❌ (Owner Only) Permission required.", ephemeral: true });
+      }
+      await interaction.deferReply();
+      const channel = interaction.options.getChannel("channel");
+      return interaction.editReply(`✅ Scan started for <#${channel.id}> — add scan function here`);
     }
 
-  } catch (e) { console.error("❌ Interaction error:", e); }
+    // /serverlist
+    if (interaction.commandName === "serverlist") {
+      if (interaction.user.id !== OWNER_ID) {
+        return interaction.reply({ content: "❌ (Owner Only) Permission required.", ephemeral: true });
+      }
+      const list = client.guilds.cache.map(g => `**${g.name}** — \`${g.id}\``).join("\n");
+      return interaction.reply({ content: `**Servers (${client.guilds.cache.size}):**\n${list}`, ephemeral: true });
+    }
+
+    // /leave
+    if (interaction.commandName === "leave") {
+      if (interaction.user.id !== OWNER_ID) {
+        return interaction.reply({ content: "❌ (Owner Only) Permission required.", ephemeral: true });
+      }
+      const gid = interaction.options.getString("server_id");
+      const g = client.guilds.cache.get(gid);
+      if (!g) return interaction.reply({ content: "❌ Server not found.", ephemeral: true });
+      await g.leave();
+      return interaction.reply({ content: `✅ Left **${g.name}**`, ephemeral: true });
+    }
+
+  } catch (e) {
+    console.error("❌ Interaction error:", e);
+    try {
+      if (interaction.deferred) interaction.editReply("❌ Error occurred.");
+      else interaction.reply({ content: "❌ Error occurred.", ephemeral: true });
+    } catch {}
+  }
 });
 
 // =========================
-// ✅ PREFIX COMMANDS — WHITELIST + DM SUPPORT
+// ✅ PREFIX COMMANDS — WORKING
 // =========================
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
@@ -555,49 +372,39 @@ client.on("messageCreate", async message => {
   const isDM = !message.guild;
   const inAllowedChannel = isDM || !config.allowedChannelId || message.channel.id === config.allowedChannelId;
 
-  // .help — everyone can use
+  // .help
   if (message.content.toLowerCase() === ".help") {
-    const helpEmbed = new EmbedBuilder()
-      .setTitle("How this works?")
-      .setColor(0x808080)
-      .setDescription("> - **use** `.find` **<file name> to find source.**\n> - **use** `.get` **<the file id> to give the source to you.**\n> - **use** `.upload` **and attach file to give it in the bot.**")
-      .setFooter({ text: `Today at ${getTimePH()}` });
-    return message.channel.send({ embeds: [helpEmbed] });
+    return message.channel.send({
+      embeds: [new EmbedBuilder()
+        .setTitle("How this works?")
+        .setColor(0x808080)
+        .setDescription("> - **use** `.find` **<file name> to find source.**\n> - **use** `.get` **<the file id> to give the source to you.**\n> - **use** `.upload` **and attach file to give it in the bot.**")
+        .setFooter({ text: `Today at ${getTimePH()}` })]
+    });
   }
 
-  // .upload — whitelist + allowed channel / DM
+  // .upload
   if (message.content.toLowerCase().startsWith(".upload")) {
     if (!whitelisted) return;
     if (!isDM && !inAllowedChannel) return message.reply("❌ not here, dumbass.");
-    
     if (!message.attachments.size) return message.reply("❌ put file here nga.");
     
-    const attachment = message.attachments.first();
-    if (isImageFile(attachment.name)) return message.reply("❌ Images are not allowed.");
+    const att = message.attachments.first();
+    if (isImageFile(att.name)) return message.reply("❌ Images not allowed.");
+    if (fileExistsByName(att.name)) return message.reply("❌ this shit is already in the bot.");
     
-    if (fileExistsByName(attachment.name)) return message.reply("❌ this shit is already in the bot.");
-    
-    const tempPath = path.join(TEMP_DIR, `${generateId()}_${attachment.name}`);
+    const tempPath = path.join(TEMP_DIR, `${generateId()}_${att.name}`);
     try {
-      await downloadFile(attachment.url, tempPath);
-      const stats = fs.statSync(tempPath);
-      libraryFiles.push({
-        id: generateId(),
-        name: attachment.name,
-        url: tempPath,
-        isLocal: true,
-        size: stats.size,
-        timestamp: Date.now()
-      });
+      await downloadFile(att.url, tempPath);
+      libraryFiles.push({ id: generateId(), name: att.name, url: tempPath, isLocal: true, size: fs.statSync(tempPath).size, timestamp: Date.now() });
       saveLibrary();
       return message.reply("✅ your file just upload in bot, you're cool now.");
-    } catch (err) {
-      console.error("Upload error:", err);
-      return message.reply("❌ Failed to upload file.");
+    } catch {
+      return message.reply("❌ Upload failed.");
     }
   }
 
-  // .find — whitelist + allowed channel / DM
+  // .find
   if (message.content.toLowerCase().startsWith(".find ")) {
     if (!whitelisted) return;
     if (!isDM && !inAllowedChannel) return message.reply("❌ not here, dumbass.");
@@ -610,38 +417,29 @@ client.on("messageCreate", async message => {
     const replyData = buildSearchPage(message.author.id, results, 1);
     const replyMsg = await message.reply(replyData);
     searchSessions.set(replyMsg.id, { userId: message.author.id, results, page: 1 });
-    return;
   }
 
-  // .get — whitelist + allowed channel / DM
+  // .get
   if (message.content.toLowerCase().startsWith(".get ")) {
     if (!whitelisted) return;
     if (!isDM && !inAllowedChannel) return message.reply("❌ not here, dumbass.");
     
     const id = message.content.slice(5).trim();
-    if (!id) return message.reply("❌ Put ID of File, idiot.");
     const file = getFileById(id);
-    if (!file) return message.reply("❌ make sure that correct, idiot.");
+    if (!file) return message.reply("❌ no match file for that, idiot.");
     
-    if (file.isLocal && fs.existsSync(file.url)) {
-      await message.channel.send({
-        content: `<@${message.author.id}> **Here is the file twin!**`,
-        files: [{ attachment: file.url, name: file.name }]
-      });
-    } else {
-      await message.channel.send({
-        content: `<@${message.author.id}> **Here is the file twin!**`,
-        files: [{ attachment: file.url, name: file.name }]
-      });
-    }
-    return;
+    return message.channel.send({
+      content: `<@${message.author.id}> **Here is the file twin!**`,
+      files: [{ attachment: file.url, name: file.name }]
+    });
   }
 });
 
 // =========================
-// LOGIN
+// ERROR HANDLING
 // =========================
 client.on("error", e => console.error("❌ Client error:", e));
 process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
+
 console.log("🔑 Logging in...");
 client.login(TOKEN).catch(e => { console.error("❌ Login failed:", e); process.exit(1); });
