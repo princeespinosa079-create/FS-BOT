@@ -26,7 +26,9 @@ const OWNER_ID = "1302080645987569694";
 const ACCESS_ROLE_ID = "1539883004950876160";
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
+  console.error(
+    "❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID."
+  );
   process.exit(1);
 }
 
@@ -34,21 +36,31 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 // STORAGE
 // ============================================================
 
-const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
+const DATA_DIR = fs.existsSync("/data")
+  ? "/data"
+  : __dirname;
 
-const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
-const CONFIG_FILE = path.join(DATA_DIR, "config.json");
+const LIBRARY_FILE = path.join(
+  DATA_DIR,
+  "file-library.json"
+);
+
+const CONFIG_FILE = path.join(
+  DATA_DIR,
+  "config.json"
+);
 
 function readJSON(file, fallback) {
   try {
-    if (!fs.existsSync(file)) return fallback;
-
-    const data = JSON.parse(fs.readFileSync(file, "utf8"));
-    return data;
-  } catch (error) {
+    return fs.existsSync(file)
+      ? JSON.parse(
+          fs.readFileSync(file, "utf8")
+        )
+      : fallback;
+  } catch (e) {
     console.error(
-      `❌ Failed reading ${path.basename(file)}:`,
-      error.message
+      `❌ ${path.basename(file)}:`,
+      e.message
     );
 
     return fallback;
@@ -56,54 +68,54 @@ function readJSON(file, fallback) {
 }
 
 function writeJSON(file, data) {
-  try {
-    const temp = `${file}.tmp`;
+  const tmp = `${file}.tmp`;
 
+  try {
     fs.writeFileSync(
-      temp,
-      JSON.stringify(data, null, 2),
-      "utf8"
+      tmp,
+      JSON.stringify(data, null, 2)
     );
 
-    fs.renameSync(temp, file);
-  } catch (error) {
+    fs.renameSync(tmp, file);
+  } catch (e) {
     console.error(
-      `❌ Failed saving ${path.basename(file)}:`,
-      error.message
+      `❌ Saving ${path.basename(file)}:`,
+      e.message
     );
   }
 }
 
-let config = readJSON(CONFIG_FILE, {
-  allowedChannelId: null
-});
+let config = readJSON(
+  CONFIG_FILE,
+  {
+    allowedChannelId: null
+  }
+);
 
-if (!config || typeof config !== "object") {
+if (
+  !config ||
+  typeof config !== "object"
+) {
   config = {
     allowedChannelId: null
   };
 }
 
-let libraryData = readJSON(LIBRARY_FILE, {
-  files: []
-});
+let library = readJSON(
+  LIBRARY_FILE,
+  {
+    files: []
+  }
+);
 
-if (Array.isArray(libraryData)) {
-  libraryData = {
-    files: libraryData
+if (Array.isArray(library)) {
+  library = {
+    files: library
   };
 }
 
-if (!Array.isArray(libraryData.files)) {
-  libraryData.files = [];
-}
-
-function saveLibrary() {
-  writeJSON(LIBRARY_FILE, libraryData);
-}
-
-function saveConfig() {
-  writeJSON(CONFIG_FILE, config);
+if (!Array.isArray(library.files)) {
+  library.files = [];
 }
 
 // ============================================================
@@ -118,142 +130,200 @@ const client = new Client({
   ]
 });
 
-let isReady = false;
-let commandsRegistered = false;
-
 const runningScans = new Set();
 
+let isReady = false;
+let lastReady = Date.now();
+let registering = false;
+let reconnecting = false;
+
 // ============================================================
-// HELPERS
+// BASIC HELPERS
 // ============================================================
 
-function isAllowedUser(member) {
+const saveLibrary = () =>
+  writeJSON(
+    LIBRARY_FILE,
+    library
+  );
+
+const saveConfig = () =>
+  writeJSON(
+    CONFIG_FILE,
+    config
+);
+
+function isAllowed(member) {
   if (!member) return false;
 
   return (
     member.id === OWNER_ID ||
-    member.roles?.cache?.has(ACCESS_ROLE_ID)
+    member.roles?.cache?.has(
+      ACCESS_ROLE_ID
+    )
   );
 }
 
-function allowedChannel(messageOrInteraction) {
+function channelAllowed(target) {
   if (!config.allowedChannelId) {
     return true;
   }
 
   return (
-    messageOrInteraction.channelId ===
+    target.channelId ===
     config.allowedChannelId
   );
 }
 
-function getTodayTime() {
-  return new Date().toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Asia/Manila"
-  });
+// Real Discord reply.
+// Mention User = ON.
+function replyUser(message, payload) {
+  const body =
+    typeof payload === "string"
+      ? {
+          content: payload
+        }
+      : {
+          ...payload
+        };
+
+  body.allowedMentions = {
+    ...(body.allowedMentions || {}),
+    repliedUser: true
+  };
+
+  return message.reply(body);
 }
 
-function normalizeName(name) {
+// ============================================================
+// FILE SEARCH HELPERS
+// ============================================================
+
+function normalize(name) {
   return String(name || "")
     .toLowerCase()
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/\.[^/.]+$/, "")
-    .replace(/[_\-.()[\]{}]+/g, " ")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
+    .replace(
+      /[_\-.()[\]{}]+/g,
+      " "
+    )
+    .replace(
+      /[^a-z0-9\s]/g,
+      " "
+    )
+    .replace(
+      /\s+/g,
+      " "
+    )
     .trim();
 }
 
-function fileExtension(name) {
-  const match = String(name || "")
-    .match(/\.([a-z0-9]+)$/i);
+function ext(name) {
+  const match =
+    String(name || "")
+      .match(
+        /\.([a-z0-9]+)$/i
+      );
 
-  return match ? match[1].toLowerCase() : "";
+  return match
+    ? match[1].toLowerCase()
+    : "";
 }
 
-function isImage(name, contentType) {
-  const filename = String(name || "").toLowerCase();
-  const type = String(contentType || "").toLowerCase();
-
+function isImage(
+  name,
+  contentType
+) {
   return (
-    type.startsWith("image/") ||
+    String(
+      contentType || ""
+    )
+      .toLowerCase()
+      .startsWith("image/") ||
+
     /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|avif|heic|heif)$/i
-      .test(filename)
+      .test(
+        String(name || "")
+      )
   );
 }
 
-function isTextFile(name) {
-  return fileExtension(name) === "txt";
-}
-
-function makeId() {
+function idForFile() {
   let id;
 
   do {
-    id = Math.random()
-      .toString(36)
-      .slice(2, 10);
+    id =
+      Math.random()
+        .toString(36)
+        .slice(2, 10);
   } while (
-    libraryData.files.some(file => file.id === id)
+    library.files.some(
+      file => file.id === id
+    )
   );
 
   return id;
 }
 
-function getFileById(id) {
-  const clean = String(id || "").trim();
-
-  return (
-    libraryData.files.find(
-      file => file.id === clean
-    ) || null
-  );
+function getFile(id) {
+  return library.files.find(
+    file =>
+      file.id ===
+      String(id || "").trim()
+  ) || null;
 }
 
-// ============================================================
-// SEARCH
-// ============================================================
+function findFiles(query) {
+  query = normalize(query);
 
-function searchFiles(query) {
-  const q = normalizeName(query);
+  if (!query) {
+    return [];
+  }
 
-  if (!q) return [];
+  const tokens =
+    query
+      .split(" ")
+      .filter(Boolean);
 
-  const tokens = q
-    .split(" ")
-    .filter(Boolean);
-
-  return libraryData.files
+  return library.files
     .map(file => {
-      const name = normalizeName(file.filename);
+      const name =
+        normalize(
+          file.filename
+        );
 
       let score = 0;
 
-      if (name === q) {
+      if (name === query) {
         score += 1000;
       }
 
-      if (name.includes(q)) {
+      if (
+        name.includes(query)
+      ) {
         score += 500;
       }
 
-      for (const token of tokens) {
-        if (name.includes(token)) {
+      for (
+        const token of tokens
+      ) {
+        if (
+          name.includes(token)
+        ) {
           score += 100;
-        } else {
-          const words = name.split(" ");
-
-          if (
-            words.some(word =>
-              word.startsWith(token)
+        } else if (
+          name
+            .split(" ")
+            .some(
+              word =>
+                word.startsWith(
+                  token
+                )
             )
-          ) {
-            score += 60;
-          }
+        ) {
+          score += 60;
         }
       }
 
@@ -262,19 +332,34 @@ function searchFiles(query) {
         score
       };
     })
-    .filter(item => item.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .map(item => item.file);
+    .filter(
+      item =>
+        item.score > 0
+    )
+    .sort(
+      (a, b) =>
+        b.score - a.score
+    )
+    .map(
+      item => item.file
+    );
 }
 
 // ============================================================
-// SAFE MESSAGE FETCH
+// DISCORD MESSAGE FETCH
 // ============================================================
 
-async function fetchMessagesSafely(channel, before = null) {
-  let lastError = null;
+async function fetchMessages(
+  channel,
+  before
+) {
+  let lastError;
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (
+    let attempt = 1;
+    attempt <= 3;
+    attempt++
+  ) {
     try {
       const options = {
         limit: 100
@@ -284,18 +369,24 @@ async function fetchMessagesSafely(channel, before = null) {
         options.before = before;
       }
 
-      return await channel.messages.fetch(options);
+      return await channel.messages.fetch(
+        options
+      );
     } catch (error) {
       lastError = error;
 
       console.warn(
-        `⚠️ Message fetch failed ${attempt}/3:`,
-        error?.message || error
+        `⚠️ Fetch messages ${attempt}/3:`,
+        error.message
       );
 
       if (attempt < 3) {
-        await new Promise(resolve =>
-          setTimeout(resolve, 500 * attempt)
+        await new Promise(
+          resolve =>
+            setTimeout(
+              resolve,
+              500 * attempt
+            )
         );
       }
     }
@@ -303,19 +394,49 @@ async function fetchMessagesSafely(channel, before = null) {
 
   throw (
     lastError ||
-    new Error("Could not fetch messages.")
+    new Error(
+      "Could not fetch messages."
+    )
   );
 }
 
 // ============================================================
-// ATTACHMENTS
+// ATTACHMENT COLLECTION
 // ============================================================
 
-function collectAttachments(message) {
+function attachmentsOf(message) {
   const result = [];
 
-  if (message.attachments?.size) {
-    for (const attachment of message.attachments.values()) {
+  for (
+    const attachment of
+    message.attachments
+      ?.values?.() || []
+  ) {
+    if (
+      isImage(
+        attachment.name,
+        attachment.contentType
+      )
+    ) {
+      continue;
+    }
+
+    result.push({
+      attachment,
+      forwarded: false
+    });
+  }
+
+  for (
+    const snapshot of
+    message.messageSnapshots
+      ?.values?.() || []
+  ) {
+    for (
+      const attachment of
+      snapshot.attachments
+        ?.values?.() || []
+    ) {
       if (
         isImage(
           attachment.name,
@@ -327,39 +448,8 @@ function collectAttachments(message) {
 
       result.push({
         attachment,
-        forwarded: false
+        forwarded: true
       });
-    }
-  }
-
-  // Forwarded message snapshots
-  if (message.messageSnapshots?.size) {
-    for (
-      const snapshot
-      of message.messageSnapshots.values()
-    ) {
-      if (!snapshot?.attachments?.size) {
-        continue;
-      }
-
-      for (
-        const attachment
-        of snapshot.attachments.values()
-      ) {
-        if (
-          isImage(
-            attachment.name,
-            attachment.contentType
-          )
-        ) {
-          continue;
-        }
-
-        result.push({
-          attachment,
-          forwarded: true
-        });
-      }
     }
   }
 
@@ -370,10 +460,11 @@ function collectAttachments(message) {
 // SCAN CHANNEL
 // ============================================================
 
-async function scanChannel(channel) {
+async function scanChannel(
+  channel
+) {
   if (
-    !channel ||
-    !channel.isTextBased() ||
+    !channel?.isTextBased?.() ||
     !channel.messages
   ) {
     throw new Error(
@@ -381,30 +472,41 @@ async function scanChannel(channel) {
     );
   }
 
-  if (runningScans.has(channel.id)) {
+  if (
+    runningScans.has(
+      channel.id
+    )
+  ) {
     throw new Error(
       "That channel is already being scanned."
     );
   }
 
-  runningScans.add(channel.id);
+  runningScans.add(
+    channel.id
+  );
 
   try {
-    const existingNames = new Set(
-      libraryData.files.map(file =>
-        normalizeName(file.filename)
-      )
-    );
+    // NEVER delete the existing library.
+    const existingNames =
+      new Set(
+        library.files.map(
+          file =>
+            normalize(
+              file.filename
+            )
+        )
+      );
 
     const found = [];
 
     let before = null;
-    let messageCount = 0;
+    let messages = 0;
     let pages = 0;
 
     while (true) {
       const batch =
-        await fetchMessagesSafely(
+        await fetchMessages(
           channel,
           before
         );
@@ -415,42 +517,57 @@ async function scanChannel(channel) {
         break;
       }
 
-      for (const message of batch.values()) {
-        messageCount++;
+      for (
+        const message of
+        batch.values()
+      ) {
+        messages++;
 
-        const attachments =
-          collectAttachments(message);
-
-        for (const item of attachments) {
-          const attachment = item.attachment;
+        for (
+          const item of
+          attachmentsOf(
+            message
+          )
+        ) {
+          const attachment =
+            item.attachment;
 
           const filename =
             attachment.name ||
             "unknown_file";
 
           const normalized =
-            normalizeName(filename);
-
-          if (!normalized) {
-            continue;
-          }
-
-          // Same filename = already scanned
-          if (existingNames.has(normalized)) {
-            continue;
-          }
+            normalize(
+              filename
+            );
 
           const url =
             attachment.url ||
             attachment.proxyURL ||
             attachment.proxy_url;
 
-          if (!url) {
+          if (
+            !normalized ||
+            !url
+          ) {
             continue;
           }
 
-          const entry = {
-            id: makeId(),
+          // Same filename = already scanned.
+          if (
+            existingNames.has(
+              normalized
+            )
+          ) {
+            continue;
+          }
+
+          existingNames.add(
+            normalized
+          );
+
+          found.push({
+            id: idForFile(),
             filename,
             url,
             size: Number(
@@ -461,22 +578,25 @@ async function scanChannel(channel) {
               null,
             channelId:
               message.channelId,
-            messageId: message.id,
+            messageId:
+              message.id,
             attachmentId:
-              String(attachment.id),
-            forwarded: item.forwarded,
+              String(
+                attachment.id
+              ),
+            forwarded:
+              item.forwarded,
             createdTimestamp:
               message.createdTimestamp ||
               Date.now(),
-            scannedAt: Date.now()
-          };
-
-          existingNames.add(normalized);
-          found.push(entry);
+            scannedAt:
+              Date.now()
+          });
         }
       }
 
-      const oldest = batch.last();
+      const oldest =
+        batch.last();
 
       if (
         !oldest ||
@@ -485,49 +605,64 @@ async function scanChannel(channel) {
         break;
       }
 
-      before = oldest.id;
+      before =
+        oldest.id;
 
-      // Yield to Node event loop
-      await new Promise(resolve =>
-        setImmediate(resolve)
+      // Give Discord events a chance to run.
+      await new Promise(
+        resolve =>
+          setImmediate(
+            resolve
+          )
       );
     }
 
-    // Keep existing library
-    libraryData.files.push(...found);
+    library.files.push(
+      ...found
+    );
 
-    libraryData.files.sort(
+    library.files.sort(
       (a, b) =>
-        Number(a.createdTimestamp || 0) -
-        Number(b.createdTimestamp || 0)
+        Number(
+          a.createdTimestamp || 0
+        ) -
+        Number(
+          b.createdTimestamp || 0
+        )
     );
 
     saveLibrary();
 
     console.log(
       `📂 Scan complete | #${channel.name} | ` +
-      `${messageCount} messages | ` +
+      `${messages} messages | ` +
       `${found.length} new files | ` +
       `${pages} pages`
     );
 
     return {
-      messageCount,
-      fileCount: found.length,
-      totalFiles:
-        libraryData.files.length
+      messages,
+      found:
+        found.length,
+      total:
+        library.files.length
     };
   } finally {
-    runningScans.delete(channel.id);
+    runningScans.delete(
+      channel.id
+    );
   }
 }
 
 // ============================================================
-// DOWNLOAD
+// FORWARD TXT FILES
 // ============================================================
 
-async function downloadURL(url) {
-  const response = await fetch(url);
+async function downloadURL(
+  url
+) {
+  const response =
+    await fetch(url);
 
   if (!response.ok) {
     throw new Error(
@@ -540,16 +675,12 @@ async function downloadURL(url) {
   );
 }
 
-// ============================================================
-// FORWARD TXT FILES
-// ============================================================
-
-async function forwardTxtFiles(
+async function forwardTxt(
   source,
   destination
 ) {
   if (
-    !source?.isTextBased() ||
+    !source?.isTextBased?.() ||
     !source.messages
   ) {
     throw new Error(
@@ -557,19 +688,21 @@ async function forwardTxtFiles(
     );
   }
 
-  if (!destination?.isTextBased()) {
+  if (
+    !destination?.isTextBased?.()
+  ) {
     throw new Error(
       "Destination channel is not writable."
     );
   }
 
   let before = null;
-  let messageCount = 0;
+  let messages = 0;
   let sent = 0;
 
   while (true) {
     const batch =
-      await fetchMessagesSafely(
+      await fetchMessages(
         source,
         before
       );
@@ -578,24 +711,27 @@ async function forwardTxtFiles(
       break;
     }
 
-    for (const message of batch.values()) {
-      messageCount++;
+    for (
+      const message of
+      batch.values()
+    ) {
+      messages++;
 
       for (
-        const attachment
-        of message.attachments.values()
+        const attachment of
+        message.attachments.values()
       ) {
-        const filename =
-          attachment.name ||
-          "file.txt";
-
-        if (!isTextFile(filename)) {
+        if (
+          ext(
+            attachment.name
+          ) !== "txt"
+        ) {
           continue;
         }
 
         if (
           isImage(
-            filename,
+            attachment.name,
             attachment.contentType
           )
         ) {
@@ -613,7 +749,9 @@ async function forwardTxtFiles(
               new AttachmentBuilder(
                 buffer,
                 {
-                  name: filename
+                  name:
+                    attachment.name ||
+                    "file.txt"
                 }
               )
             ]
@@ -622,14 +760,15 @@ async function forwardTxtFiles(
           sent++;
         } catch (error) {
           console.error(
-            `⚠️ Failed forwarding ${filename}:`,
-            error?.message || error
+            `⚠️ Forward ${attachment.name}:`,
+            error.message
           );
         }
       }
     }
 
-    const oldest = batch.last();
+    const oldest =
+      batch.last();
 
     if (
       !oldest ||
@@ -638,15 +777,19 @@ async function forwardTxtFiles(
       break;
     }
 
-    before = oldest.id;
+    before =
+      oldest.id;
 
-    await new Promise(resolve =>
-      setImmediate(resolve)
+    await new Promise(
+      resolve =>
+        setImmediate(
+          resolve
+        )
     );
   }
 
   return {
-    messageCount,
+    messages,
     sent
   };
 }
@@ -655,23 +798,24 @@ async function forwardTxtFiles(
 // SLASH COMMANDS
 // ============================================================
 
-const slashCommands = [
+const commands = [
   new SlashCommandBuilder()
     .setName("scanchannel")
     .setDescription(
       "Scan a channel for files."
     )
-    .addChannelOption(option =>
-      option
-        .setName("channel")
-        .setDescription(
-          "Channel to scan."
-        )
-        .addChannelTypes(
-          ChannelType.GuildText,
-          ChannelType.GuildAnnouncement
-        )
-        .setRequired(true)
+    .addChannelOption(
+      option =>
+        option
+          .setName("channel")
+          .setDescription(
+            "Channel to scan."
+          )
+          .addChannelTypes(
+            ChannelType.GuildText,
+            ChannelType.GuildAnnouncement
+          )
+          .setRequired(true)
     ),
 
   new SlashCommandBuilder()
@@ -679,21 +823,23 @@ const slashCommands = [
     .setDescription(
       "Send a gray embed."
     )
-    .addStringOption(option =>
-      option
-        .setName("description")
-        .setDescription(
-          "Embed description."
-        )
-        .setRequired(true)
+    .addStringOption(
+      option =>
+        option
+          .setName("description")
+          .setDescription(
+            "Embed description."
+          )
+          .setRequired(true)
     )
-    .addStringOption(option =>
-      option
-        .setName("title")
-        .setDescription(
-          "Embed title."
-        )
-        .setRequired(false)
+    .addStringOption(
+      option =>
+        option
+          .setName("title")
+          .setDescription(
+            "Embed title."
+          )
+          .setRequired(false)
     ),
 
   new SlashCommandBuilder()
@@ -701,38 +847,41 @@ const slashCommands = [
     .setDescription(
       "Forward all TXT files."
     )
-    .addChannelOption(option =>
-      option
-        .setName("source")
-        .setDescription(
-          "Source channel."
-        )
-        .addChannelTypes(
-          ChannelType.GuildText,
-          ChannelType.GuildAnnouncement
-        )
-        .setRequired(true)
+    .addChannelOption(
+      option =>
+        option
+          .setName("source")
+          .setDescription(
+            "Source channel."
+          )
+          .addChannelTypes(
+            ChannelType.GuildText,
+            ChannelType.GuildAnnouncement
+          )
+          .setRequired(true)
     )
-    .addChannelOption(option =>
-      option
-        .setName("destination")
-        .setDescription(
-          "Destination channel."
-        )
-        .addChannelTypes(
-          ChannelType.GuildText,
-          ChannelType.GuildAnnouncement
-        )
-        .setRequired(true)
+    .addChannelOption(
+      option =>
+        option
+          .setName("destination")
+          .setDescription(
+            "Destination channel."
+          )
+          .addChannelTypes(
+            ChannelType.GuildText,
+            ChannelType.GuildAnnouncement
+          )
+          .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("setchannel")
     .setDescription(
-      "Set this channel for .get and .find."
+      "Set the normal channel for .get/.find."
     )
-].map(command =>
-  command.toJSON()
+].map(
+  command =>
+    command.toJSON()
 );
 
 // ============================================================
@@ -740,17 +889,23 @@ const slashCommands = [
 // ============================================================
 
 async function registerCommands() {
-  if (commandsRegistered) {
+  if (registering) {
     return;
   }
 
-  const rest = new REST({
-    version: "10"
-  }).setToken(TOKEN);
+  registering = true;
+
+  const rest =
+    new REST({
+      version: "10",
+      timeout: 15000
+    }).setToken(
+      TOKEN
+    );
 
   try {
     console.log(
-      "🧹 Clearing old global slash commands..."
+      "🧹 Removing old global commands..."
     );
 
     await rest.put(
@@ -763,7 +918,7 @@ async function registerCommands() {
     );
 
     console.log(
-      "🧹 Replacing guild slash commands..."
+      "🧩 Registering guild commands..."
     );
 
     await rest.put(
@@ -772,71 +927,87 @@ async function registerCommands() {
         GUILD_ID
       ),
       {
-        body: slashCommands
+        body: commands
       }
     );
-
-    commandsRegistered = true;
 
     console.log(
       "✅ Slash commands registered."
     );
   } catch (error) {
+    registering = false;
+
     console.error(
       "❌ Slash registration failed:",
-      error?.message || error
+      error.message
     );
   }
 }
 
 // ============================================================
-// READY
+// READY / GATEWAY
 // ============================================================
 
-client.once("ready", async () => {
-  isReady = true;
+client.once(
+  "ready",
+  () => {
+    isReady = true;
+    lastReady = Date.now();
 
-  console.log(
-    "=========================================="
-  );
-
-  console.log(
-    `✅ DISCORD READY: ${client.user.tag}`
-  );
-
-  console.log(
-    `🏠 Guilds: ${client.guilds.cache.size}`
-  );
-
-  console.log(
-    `📚 Library files: ${libraryData.files.length}`
-  );
-
-  console.log(
-    "⚡ Discord gateway is ready."
-  );
-
-  console.log(
-    "=========================================="
-  );
-
-  // Register AFTER gateway is ready.
-  // This no longer blocks Discord event handling.
-  registerCommands().catch(error => {
-    console.error(
-      "❌ Command registration error:",
-      error
+    console.log(
+      "=========================================="
     );
-  });
-});
+
+    console.log(
+      `✅ DISCORD READY: ${client.user.tag}`
+    );
+
+    console.log(
+      `🏠 Guilds: ${client.guilds.cache.size}`
+    );
+
+    console.log(
+      `📚 Library: ${library.files.length} files`
+    );
+
+    console.log(
+      "⚡ Bot is ready for commands."
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    registerCommands()
+      .catch(error =>
+        console.error(
+          "❌ Registration:",
+          error.message
+        )
+      );
+  }
+);
 
 client.on(
   "shardReady",
   shardId => {
     isReady = true;
+    lastReady = Date.now();
 
     console.log(
       `🟢 Gateway shard ${shardId} ready.`
+    );
+  }
+);
+
+client.on(
+  "shardResume",
+  shardId => {
+    isReady = true;
+    lastReady = Date.now();
+
+    console.log(
+      `🟢 Gateway shard ${shardId} resumed.`
     );
   }
 );
@@ -859,19 +1030,8 @@ client.on(
 
     console.warn(
       `🔴 Gateway shard ${shardId} disconnected:`,
-      event?.code || "unknown"
-    );
-  }
-);
-
-client.on(
-  "shardResume",
-  (shardId, replayedEvents) => {
-    isReady = true;
-
-    console.log(
-      `🟢 Gateway shard ${shardId} resumed ` +
-      `(${replayedEvents} events replayed).`
+      event?.code ||
+        "unknown"
     );
   }
 );
@@ -880,7 +1040,7 @@ client.on(
   "error",
   error => {
     console.error(
-      "❌ Discord client error:",
+      "❌ Discord error:",
       error
     );
   }
@@ -897,34 +1057,93 @@ client.on(
 );
 
 // ============================================================
-// SLASH COMMAND HANDLER
+// GATEWAY WATCHDOG
+// ============================================================
+
+setInterval(
+  async () => {
+    if (isReady) {
+      return;
+    }
+
+    if (reconnecting) {
+      return;
+    }
+
+    if (
+      Date.now() -
+        lastReady <
+      60000
+    ) {
+      return;
+    }
+
+    reconnecting = true;
+
+    console.warn(
+      "🟡 Gateway has been unavailable for 60 seconds."
+    );
+
+    try {
+      console.warn(
+        "🔄 Reconnecting to Discord..."
+      );
+
+      client.destroy();
+
+      await new Promise(
+        resolve =>
+          setTimeout(
+            resolve,
+            1500
+          )
+      );
+
+      await client.login(
+        TOKEN
+      );
+
+      console.log(
+        "🟢 Discord reconnect attempted."
+      );
+    } catch (error) {
+      console.error(
+        "❌ Reconnect failed:",
+        error.message
+      );
+    } finally {
+      reconnecting = false;
+    }
+  },
+  30000
+).unref?.();
+
+// ============================================================
+// SLASH INTERACTIONS
 // ============================================================
 
 client.on(
   "interactionCreate",
   async interaction => {
-    if (!interaction.isChatInputCommand()) {
+    if (
+      !interaction.isChatInputCommand()
+    ) {
       return;
     }
 
     console.log(
-      `⚡ Slash command received: /${interaction.commandName}`
+      `📨 /${interaction.commandName} received | ${interaction.id}`
     );
 
     try {
       // ======================================================
-      // CRITICAL FIX
-      // ACKNOWLEDGE IMMEDIATELY
+      // CRITICAL:
+      // ACK THE INTERACTION FIRST.
       // ======================================================
-      //
-      // Discord gives interactions only a few seconds
-      // to receive an acknowledgement.
-      //
-      // We defer FIRST, before scans, permissions,
-      // channel work, etc.
-      //
+
       await interaction.deferReply({
-        flags: MessageFlags.Ephemeral
+        flags:
+          MessageFlags.Ephemeral
       });
 
       // ======================================================
@@ -938,7 +1157,7 @@ client.on(
         await interaction.editReply({
           content:
             "❌ This bot is not configured for this server."
-        }).catch(() => {});
+        });
 
         return;
       }
@@ -948,20 +1167,20 @@ client.on(
       // ======================================================
 
       if (
-        !isAllowedUser(
+        !isAllowed(
           interaction.member
         )
       ) {
         await interaction.editReply({
           content:
             "❌ You don't have permission to use this command."
-        }).catch(() => {});
+        });
 
         return;
       }
 
       // ======================================================
-      // /SETCHANNEL
+      // /setchannel
       // ======================================================
 
       if (
@@ -975,14 +1194,15 @@ client.on(
 
         await interaction.editReply({
           content:
-            `✅ .get and .find are now active in <#${interaction.channelId}>.`
-        }).catch(() => {});
+            `✅ Normal .get/.find channel set to <#${interaction.channelId}>.\n` +
+            `👑 **Owner + Access Role can still use .get/.find everywhere.**`
+        });
 
         return;
       }
 
       // ======================================================
-      // /EMBED
+      // /embed
       // ======================================================
 
       if (
@@ -1007,26 +1227,43 @@ client.on(
             )
             .setFooter({
               text:
-                `Today at ${getTodayTime()}`
+                `Today at ${new Date().toLocaleTimeString(
+                  "en-US",
+                  {
+                    hour: "2-digit",
+                    minute:
+                      "2-digit",
+                    hour12:
+                      false,
+                    timeZone:
+                      "Asia/Manila"
+                  }
+                )}`
             });
 
         if (title) {
-          embed.setTitle(title);
+          embed.setTitle(
+            title
+          );
         }
 
-        // Already acknowledged.
-        await interaction.deleteReply()
+        // Delete the private acknowledgement.
+        await interaction
+          .deleteReply()
           .catch(() => {});
 
+        // Send the real public embed.
         await interaction.channel.send({
-          embeds: [embed]
+          embeds: [
+            embed
+          ]
         });
 
         return;
       }
 
       // ======================================================
-      // /SCANCHANNEL
+      // /scanchannel
       // ======================================================
 
       if (
@@ -1040,75 +1277,79 @@ client.on(
 
         if (
           !channel ||
-          !channel.isTextBased() ||
+          !channel.isTextBased?.() ||
           !channel.messages
         ) {
           await interaction.editReply({
             content:
               "❌ That isn't a readable text channel."
-          }).catch(() => {});
+          });
 
           return;
         }
 
         if (
-          runningScans.has(channel.id)
+          runningScans.has(
+            channel.id
+          )
         ) {
           await interaction.editReply({
             content:
               "⚠️ That channel is already being scanned."
-          }).catch(() => {});
+          });
 
           return;
         }
 
-        // Tell user immediately.
+        // The command has already been acknowledged.
         await interaction.editReply({
           content:
             `⚡ **Scan started** for <#${channel.id}>.\n` +
-            `The scan is running in the background.`
-        }).catch(() => {});
+            `Running in the background.`
+        });
 
         // IMPORTANT:
-        // Do NOT await the scan here.
+        // Do NOT await this.
         scanChannel(channel)
-          .then(async result => {
-            await interaction.editReply({
-              content:
-                `✅ **Scan complete.**\n\n` +
-                `📂 Channel: <#${channel.id}>\n` +
-                `💬 Messages scanned: \`${result.messageCount}\`\n` +
-                `📄 New files: \`${result.fileCount}\`\n` +
-                `📚 Total library files: \`${result.totalFiles}\`\n` +
-                `🖼️ Images: ignored\n` +
-                `♻️ Existing library files were kept.`
-            }).catch(error => {
-              console.error(
-                "❌ Scan reply update failed:",
-                error?.message || error
-              );
-            });
-          })
-          .catch(async error => {
-            console.error(
-              "❌ Scan error:",
-              error
-            );
-
-            await interaction.editReply({
-              content:
-                `❌ **Scan failed.**\n` +
-                `\`${String(
-                  error?.message || error
-                ).slice(0, 1500)}\``
-            }).catch(() => {});
-          });
+          .then(result =>
+            interaction
+              .editReply({
+                content:
+                  `✅ **Scan complete.**\n\n` +
+                  `📂 Channel: <#${channel.id}>\n` +
+                  `💬 Messages: \`${result.messages}\`\n` +
+                  `📄 New files: \`${result.found}\`\n` +
+                  `📚 Total library: \`${result.total}\`\n` +
+                  `🖼️ Images ignored\n` +
+                  `♻️ Existing files kept.`
+              })
+              .catch(
+                () => {}
+              )
+          )
+          .catch(error =>
+            interaction
+              .editReply({
+                content:
+                  `❌ **Scan failed.**\n` +
+                  `\`${String(
+                    error.message ||
+                      error
+                  ).slice(
+                    0,
+                    1500
+                  )}\``
+              })
+              .catch(
+                () => {}
+              )
+          );
 
         return;
       }
 
       // ======================================================
-      // /FORWARDALL
+      // /forwardall
       // ======================================================
 
       if (
@@ -1125,66 +1366,52 @@ client.on(
             "destination"
           );
 
-        if (
-          !source ||
-          !destination
-        ) {
-          await interaction.editReply({
-            content:
-              "❌ Invalid source or destination channel."
-          }).catch(() => {});
-
-          return;
-        }
-
-        // Immediate update.
         await interaction.editReply({
           content:
-            `⚡ **Forwarding started.**\n` +
-            `From <#${source.id}> → <#${destination.id}>`
-        }).catch(() => {});
+            `⚡ Forwarding TXT files from <#${source.id}> → <#${destination.id}>...`
+        });
 
-        // Background operation.
-        forwardTxtFiles(
+        forwardTxt(
           source,
           destination
         )
-          .then(async result => {
-            await interaction.editReply({
-              content:
-                `✅ **Forward complete.**\n\n` +
-                `📂 Source: <#${source.id}>\n` +
-                `📂 Destination: <#${destination.id}>\n` +
-                `💬 Messages checked: \`${result.messageCount}\`\n` +
-                `📄 TXT files forwarded: \`${result.sent}\``
-            }).catch(() => {});
-          })
-          .catch(async error => {
-            console.error(
-              "❌ Forward error:",
-              error
-            );
-
-            await interaction.editReply({
-              content:
-                `❌ **Forward failed.**\n` +
-                `\`${String(
-                  error?.message || error
-                ).slice(0, 1500)}\``
-            }).catch(() => {});
-          });
+          .then(result =>
+            interaction
+              .editReply({
+                content:
+                  `✅ **Forward complete.**\n\n` +
+                  `📂 Source: <#${source.id}>\n` +
+                  `📂 Destination: <#${destination.id}>\n` +
+                  `💬 Messages: \`${result.messages}\`\n` +
+                  `📄 TXT files: \`${result.sent}\``
+              })
+              .catch(
+                () => {}
+              )
+          )
+          .catch(error =>
+            interaction
+              .editReply({
+                content:
+                  `❌ **Forward failed.**\n` +
+                  `\`${String(
+                    error.message ||
+                      error
+                  ).slice(
+                    0,
+                    1500
+                  )}\``
+              })
+              .catch(
+                () => {}
+              )
+          );
 
         return;
       }
-
-      await interaction.editReply({
-        content:
-          "❌ Unknown command."
-      }).catch(() => {});
-
     } catch (error) {
       console.error(
-        "❌ Interaction handler error:",
+        "❌ Interaction error:",
         error
       );
 
@@ -1192,47 +1419,29 @@ client.on(
         interaction.deferred ||
         interaction.replied
       ) {
-        await interaction.editReply({
-          content:
-            "❌ An error occurred while processing the command."
-        }).catch(() => {});
+        await interaction
+          .editReply({
+            content:
+              "❌ An error occurred while processing the command."
+          })
+          .catch(
+            () => {}
+          );
       } else {
-        await interaction.reply({
-          content:
-            "❌ An error occurred.",
-          flags:
-            MessageFlags.Ephemeral
-        }).catch(() => {});
+        await interaction
+          .reply({
+            content:
+              "❌ An error occurred.",
+            flags:
+              MessageFlags.Ephemeral
+          })
+          .catch(
+            () => {}
+          );
       }
     }
   }
 );
-
-// ============================================================
-// PREFIX REPLY HELPER
-// Mention User = ON
-// ============================================================
-
-function replyToUser(
-  message,
-  payload
-) {
-  const body =
-    typeof payload === "string"
-      ? {
-          content: payload
-        }
-      : {
-          ...payload
-        };
-
-  body.allowedMentions = {
-    ...(body.allowedMentions || {}),
-    repliedUser: true
-  };
-
-  return message.reply(body);
-}
 
 // ============================================================
 // PREFIX COMMANDS
@@ -1241,13 +1450,10 @@ function replyToUser(
 client.on(
   "messageCreate",
   message => {
-    // Keep this handler extremely fast.
-
-    if (message.author.bot) {
-      return;
-    }
-
-    if (!message.guild) {
+    if (
+      message.author.bot ||
+      !message.guild
+    ) {
       return;
     }
 
@@ -1257,7 +1463,7 @@ client.on(
       ).trim();
 
     // ========================================================
-    // .GET
+    // .get
     // ========================================================
 
     if (
@@ -1265,54 +1471,61 @@ client.on(
         content
       )
     ) {
-      const parts =
-        content.split(/\s+/);
+      const id =
+        content.split(
+          /\s+/
+        )[1];
 
-      const id = parts[1];
-
-      // Wrong channel
+      // OWNER + ACCESS ROLE:
+      // .get works EVERYWHERE.
+      //
+      // Everyone else:
+      // .get only works in /setchannel channel.
       if (
-        !allowedChannel(message)
+        !isAllowed(
+          message.member
+        ) &&
+        !channelAllowed(
+          message
+        )
       ) {
-        replyToUser(
+        replyUser(
           message,
           "❌ not here, dumbass."
-        ).catch(() => {});
+        ).catch(
+          () => {}
+        );
 
         return;
       }
 
-      // No ID
       if (!id) {
-        replyToUser(
+        replyUser(
           message,
           "❌ put id of file, idiot."
-        ).catch(() => {});
+        ).catch(
+          () => {}
+        );
 
         return;
       }
 
-      // Find immediately from memory
       const file =
-        getFileById(id);
+        getFile(id);
 
-      // Wrong ID
       if (!file) {
-        replyToUser(
+        replyUser(
           message,
           "❌ your id is wrong, try find working id, dumbass."
-        ).catch(() => {});
+        ).catch(
+          () => {}
+        );
 
         return;
       }
 
-      // ======================================================
-      // FAST PATH
-      // ======================================================
-      //
-      // Send the saved Discord CDN URL directly.
-      //
-      replyToUser(
+      // FAST PATH.
+      replyUser(
         message,
         {
           content:
@@ -1329,94 +1542,92 @@ client.on(
             }
           ]
         }
-      ).catch(async () => {
-        // ====================================================
-        // URL REFRESH FALLBACK
-        // ====================================================
+      ).catch(
+        async () => {
+          // Refresh the Discord attachment only
+          // if the old URL no longer works.
 
-        try {
-          const channel =
-            await client.channels.fetch(
-              file.channelId
-            );
+          try {
+            const channel =
+              await client.channels.fetch(
+                file.channelId
+              );
 
-          const original =
-            await channel.messages.fetch(
-              file.messageId
-            );
+            const original =
+              await channel.messages.fetch(
+                file.messageId
+              );
 
-          let fresh =
-            original.attachments.get(
-              file.attachmentId
-            );
+            let fresh =
+              original.attachments.get(
+                file.attachmentId
+              );
 
-          if (
-            !fresh &&
-            original.messageSnapshots?.size
-          ) {
-            for (
-              const snapshot
-              of original.messageSnapshots.values()
-            ) {
-              fresh =
-                snapshot.attachments?.get(
-                  file.attachmentId
-                );
+            if (!fresh) {
+              for (
+                const snapshot of
+                original.messageSnapshots
+                  ?.values?.() ||
+                []
+              ) {
+                fresh =
+                  snapshot.attachments?.get(
+                    file.attachmentId
+                  );
 
-              if (fresh) {
-                break;
+                if (fresh) {
+                  break;
+                }
               }
             }
-          }
 
-          if (!fresh?.url) {
-            throw new Error(
-              "Attachment no longer exists."
+            if (
+              !fresh?.url
+            ) {
+              throw new Error(
+                "Attachment unavailable."
+              );
+            }
+
+            file.url =
+              fresh.url;
+
+            saveLibrary();
+
+            await replyUser(
+              message,
+              {
+                content:
+                  "**Here is the file twin!**",
+
+                files: [
+                  {
+                    attachment:
+                      fresh.url,
+
+                    name:
+                      file.filename ||
+                      "file"
+                  }
+                ]
+              }
+            );
+          } catch {
+            await replyUser(
+              message,
+              "❌ I found the file, but its Discord attachment is no longer available."
+            ).catch(
+              () => {}
             );
           }
-
-          file.url =
-            fresh.url;
-
-          saveLibrary();
-
-          await replyToUser(
-            message,
-            {
-              content:
-                "**Here is the file twin!**",
-
-              files: [
-                {
-                  attachment:
-                    fresh.url,
-
-                  name:
-                    file.filename ||
-                    "file"
-                }
-              ]
-            }
-          );
-
-        } catch (error) {
-          console.error(
-            "❌ Failed refreshing attachment:",
-            error?.message || error
-          );
-
-          await replyToUser(
-            message,
-            "❌ I found the file, but its Discord attachment is no longer available."
-          ).catch(() => {});
         }
-      });
+      );
 
       return;
     }
 
     // ========================================================
-    // .FIND
+    // .find
     // ========================================================
 
     if (
@@ -1424,14 +1635,25 @@ client.on(
         content
       )
     ) {
-      // Wrong channel
+      // OWNER + ACCESS ROLE:
+      // .find works EVERYWHERE.
+      //
+      // Everyone else:
+      // .find only works in /setchannel channel.
       if (
-        !allowedChannel(message)
+        !isAllowed(
+          message.member
+        ) &&
+        !channelAllowed(
+          message
+        )
       ) {
-        replyToUser(
+        replyUser(
           message,
           "❌ not here, dumbass."
-        ).catch(() => {});
+        ).catch(
+          () => {}
+        );
 
         return;
       }
@@ -1441,61 +1663,71 @@ client.on(
           .slice(5)
           .trim();
 
-      // No search
       if (!query) {
-        replyToUser(
+        replyUser(
           message,
           "❌ not here, dumbass."
-        ).catch(() => {});
+        ).catch(
+          () => {}
+        );
 
         return;
       }
 
-      // Search memory
       const results =
-        searchFiles(query);
+        findFiles(query);
 
-      // No match
       if (!results.length) {
-        replyToUser(
+        replyUser(
           message,
           "❌ no matching name for that, dumbass."
-        ).catch(() => {});
+        ).catch(
+          () => {}
+        );
 
         return;
       }
 
       const shown =
-        results.slice(0, 20);
-
-      const lines =
-        shown.map(
-          (file, index) =>
-            `**${index + 1}.** ` +
-            `\`${file.filename}\` ` +
-            `— ID: \`${file.id}\``
+        results.slice(
+          0,
+          20
         );
 
       const embed =
         new EmbedBuilder()
-          .setColor(0x808080)
+          .setColor(
+            0x808080
+          )
           .setTitle(
             "File Search"
           )
           .setDescription(
-            lines.join("\n")
+            shown
+              .map(
+                (file, index) =>
+                  `**${index + 1}.** ` +
+                  `\`${file.filename}\` — ` +
+                  `ID: \`${file.id}\``
+              )
+              .join("\n")
           )
           .setFooter({
             text:
               `${results.length} result(s)`
           });
 
-      replyToUser(
+      // Real reply + Mention User ON.
+      replyUser(
         message,
         {
-          embeds: [embed]
+          embeds: [
+            embed
+          ]
         }
-      ).catch(() => {});
+      ).catch(
+        () => {}
+      );
 
       return;
     }
@@ -1503,52 +1735,58 @@ client.on(
 );
 
 // ============================================================
-// EXPRESS SERVER
+// RENDER WEB SERVER
 // ============================================================
 
-const app = express();
+const app =
+  express();
 
 const PORT =
-  Number(process.env.PORT) ||
-  10000;
+  Number(
+    process.env.PORT
+  ) || 10000;
 
 app.get(
   "/",
   (req, res) => {
-    res.status(200).send(
-      isReady
-        ? "FS Bot is online and connected to Discord."
-        : "FS Bot process is online, Discord is connecting."
-    );
+    res
+      .status(200)
+      .send(
+        isReady
+          ? "FS Bot is online and connected to Discord."
+          : "FS Bot process is online, Discord is connecting."
+      );
   }
 );
 
 app.get(
   "/health",
   (req, res) => {
-    res.status(200).json({
-      process: "online",
+    res
+      .status(200)
+      .json({
+        process:
+          "online",
 
-      discord:
-        isReady
-          ? "ready"
-          : "not-ready",
+        discord:
+          isReady
+            ? "ready"
+            : "not-ready",
 
-      bot:
-        client.user?.tag ||
-        null,
+        bot:
+          client.user?.tag ||
+          null,
 
-      guild:
-        GUILD_ID,
+        guild:
+          GUILD_ID,
 
-      libraryFiles:
-        libraryData.files.length,
+        libraryFiles:
+          library.files
+            .length,
 
-      allowedChannelId:
-        config.allowedChannelId,
-
-      commandsRegistered
-    });
+        allowedChannelId:
+          config.allowedChannelId
+      });
   }
 );
 
@@ -1594,7 +1832,8 @@ console.log(
   "🔑 Connecting to Discord..."
 );
 
-client.login(TOKEN)
+client
+  .login(TOKEN)
   .catch(error => {
     console.error(
       "❌ Discord login failed:",
