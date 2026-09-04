@@ -99,10 +99,16 @@ function isImage(name, contentType) {
   return String(contentType || "").toLowerCase().startsWith("image/") ||
     /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|avif|heic|heif)$/i.test(String(name || ""));
 }
+// ✅ 4-CHAR ALPHANUMERIC ID — like "3gv8", "k9q5"
 function idForFile() {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let id;
-  do { id = Math.random().toString(36).slice(2, 10); }
-  while (library.files.some(file => file.id === id));
+  do {
+    id = "";
+    for (let i = 0; i < 4; i++) {
+      id += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+  } while (library.files.some(file => file.id === id));
   return id;
 }
 function getFile(id) {
@@ -235,16 +241,18 @@ async function forwardTxt(source, destination) {
 // SLASH COMMANDS
 // ============================================================
 const commands = [
-  new SlashCommandBuilder().setName("scanchannel").setDescription("Scan channel for files.")
+  new SlashCommandBuilder().setName("scanchannel").setDescription("Scan a channel for files.")
     .addChannelOption(o => o.setName("channel").setDescription("Channel to scan.")
       .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true)),
-  new SlashCommandBuilder().setName("embed").setDescription("Send gray embed.")
-    .addStringOption(o => o.setName("description").setRequired(true))
-    .addStringOption(o => o.setName("title").setRequired(false)),
+  new SlashCommandBuilder().setName("embed").setDescription("Send a gray embed.")
+    .addStringOption(o => o.setName("description").setDescription("Embed description.").setRequired(true))
+    .addStringOption(o => o.setName("title").setDescription("Embed title.").setRequired(false)),
   new SlashCommandBuilder().setName("forwardall").setDescription("Forward all TXT files.")
-    .addChannelOption(o => o.setName("source").addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true))
-    .addChannelOption(o => o.setName("destination").addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true)),
-  new SlashCommandBuilder().setName("setchannel").setDescription("Set channel for .get/.find.")
+    .addChannelOption(o => o.setName("source").setDescription("Source channel.")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true))
+    .addChannelOption(o => o.setName("destination").setDescription("Destination channel.")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true)),
+  new SlashCommandBuilder().setName("setchannel").setDescription("Set normal channel for .get/.find.")
 ].map(c => c.toJSON());
 // ============================================================
 // REGISTER COMMANDS
@@ -361,7 +369,7 @@ client.on("interactionCreate", async interaction => {
       if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ Already scanning." }); return; }
       await interaction.editReply({ content: `⚡ Scanning <#${ch.id}>...` });
       scanChannel(ch).then(r => interaction.editReply({
-        content: `✅ Done!\n📂 <#${r.messages}>\n💬 Msgs: \`${r.messages}\`\n📄 New: \`${r.found}\`\n📚 Total: \`${r.total}\``
+        content: `✅ Done!\n📂 <#${ch.id}>\n💬 Msgs: \`${r.messages}\`\n📄 New: \`${r.found}\`\n📚 Total: \`${r.total}\``
       }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ Fail: ${e.message.slice(0,1500)}` }).catch(() => {}));
       return;
     }
@@ -445,7 +453,7 @@ app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
 setInterval(() => {
   try { require("http").get(`http://localhost:${PORT}/health`, r => console.log(`❤️ Keep-alive OK | ${r.statusCode}`)); }
   catch(e) { console.log(`❤️ Keep-alive: ${e.message}`); }
-}, 4 * 60 * 1000); // Pings every 4 minutes
+}, 4 * 60 * 1000);
 
 // ============================================================
 // ERROR HANDLERS
