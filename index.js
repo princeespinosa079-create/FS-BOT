@@ -60,7 +60,7 @@ const client = new Client({
 });
 const runningScans = new Set();
 const paginationMenus = new Map();
-const EXPIRY_MS = 5 * 60 * 1000; // 5 MINUTES
+const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false;
 let lastReady = Date.now();
 let registering = false;
@@ -84,7 +84,7 @@ function replyUser(message, payload) {
   return message.reply(body);
 }
 // ============================================================
-// FILE SEARCH HELPERS
+// FILE HELPERS
 // ============================================================
 function normalize(name) {
   return String(name || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
@@ -99,7 +99,7 @@ function isImage(name, contentType) {
   return String(contentType || "").toLowerCase().startsWith("image/") ||
     /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|avif|heic|heif)$/i.test(String(name || ""));
 }
-// ✅ 4-CHAR ALPHANUMERIC ID — like "3gv8", "k9q5"
+// ✅ 4-CHAR ALPHANUMERIC ID
 function idForFile() {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let id;
@@ -448,12 +448,20 @@ app.get("/health", (req, res) => res.status(200).json({
 app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
 
 // ============================================================
-// ✅ KEEP-ALIVE — PREVENTS RENDER SLEEP
+// ✅ STRONG KEEP-ALIVE — PINGS EXTERNAL URL EVERY 3 MIN
 // ============================================================
-setInterval(() => {
-  try { require("http").get(`http://localhost:${PORT}/health`, r => console.log(`❤️ Keep-alive OK | ${r.statusCode}`)); }
-  catch(e) { console.log(`❤️ Keep-alive: ${e.message}`); }
-}, 4 * 60 * 1000);
+const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
+if (keepAliveUrl) {
+  setInterval(() => {
+    try {
+      require("https").get(`${keepAliveUrl}/health`, (r) => {
+        console.log(`❤️ Keep-alive: ${r.statusCode}`);
+      }).on("error", (e) => {
+        console.log(`❤️ Keep-alive: ${e.message}`);
+      });
+    } catch(e) {}
+  }, 3 * 60 * 1000);
+}
 
 // ============================================================
 // ERROR HANDLERS
