@@ -3,27 +3,21 @@ const http = require('http');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// HTTP server for Render health check
+// HTTP server for Render - MUST start immediately
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('OK - Bot alive\n');
+  res.end('OK\n');
 });
 
 server.listen(PORT, () => {
-  console.log(`HTTP server running on port ${PORT} - Render health check OK`);
+  console.log(`HTTP server on port ${PORT} - Render OK`);
 });
 
-// Validate env vars
-if (!TOKEN) {
-  console.error('❌ ERROR: DISCORD_TOKEN is missing! Set it in Render Environment Variables.');
-}
-if (!CLIENT_ID) {
-  console.error('❌ ERROR: CLIENT_ID is missing! Set it in Render Environment Variables.');
-}
+// Check env vars
 if (!TOKEN || !CLIENT_ID) {
-  console.error('Bot cannot start without these variables.');
+  console.error('❌ MISSING ENV VARS: Set DISCORD_TOKEN and CLIENT_ID in Render Environment!');
 }
 
 const commandState = { sayEnabled: true };
@@ -33,7 +27,10 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
-  ]
+  ],
+  // Auto-reconnect settings
+  restRequestTimeout: 60000,
+  retryLimit: 3
 });
 
 async function registerCommands() {
@@ -61,17 +58,20 @@ async function registerCommands() {
   ];
 
   try {
-    console.log('Registering slash commands...');
+    console.log('Registering commands...');
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    console.log('✅ Slash commands registered!');
+    console.log('✅ Commands registered!');
   } catch (error) {
-    console.error('❌ Failed to register commands:', error.message);
+    console.error('❌ Command register failed:', error.message);
   }
 }
 
 client.once('ready', () => {
-  console.log(`✅ Logged in as ${client.user.tag}!`);
-  console.log(`Bot online in ${client.guilds.cache.size} server(s)`);
+  console.log('========================================');
+  console.log(`✅ ONLINE: ${client.user.tag}`);
+  console.log(`🏠 Servers: ${client.guilds.cache.size}`);
+  console.log(`💬 /say: ${commandState.sayEnabled ? 'ENABLED' : 'DISABLED'}`);
+  console.log('========================================');
   registerCommands();
 });
 
@@ -80,7 +80,7 @@ client.on('interactionCreate', async (interaction) => {
 
   if (interaction.commandName === 'toggle-say') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
-      return interaction.reply({ content: 'Admin only!', ephemeral: true });
+      return interaction.reply({ content: '❌ Admin only!', ephemeral: true });
     }
     commandState.sayEnabled = !commandState.sayEnabled;
     const embed = new EmbedBuilder()
@@ -120,18 +120,35 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ embeds: [embed] });
     } catch (err) {
       console.error('Error:', err);
-      await interaction.reply({ content: 'Error creating embed!', ephemeral: true });
+      await interaction.reply({ content: '❌ Error creating embed!', ephemeral: true });
     }
   }
 });
 
+// Auto-reconnect handlers
+client.on('shardDisconnect', (e, id) => {
+  console.log(`🔌 Shard ${id} disconnected. Reconnecting...`);
+});
+
+client.on('shardReconnecting', (id) => {
+  console.log(`🔄 Shard ${id} reconnecting...`);
+});
+
+client.on('shardResume', (id, events) => {
+  console.log(`✅ Shard ${id} resumed. ${events} events replayed.`);
+});
+
 client.on('error', (e) => console.error('Discord error:', e.message));
-client.on('shardError', (e) => console.error('Connection error:', e.message));
 process.on('unhandledRejection', (e) => console.error('Unhandled:', e));
 
-// Login with detailed error
-console.log('Attempting to log in to Discord...');
-client.login(TOKEN).catch(err => {
-  console.error('❌ LOGIN FAILED:', err.message);
-  console.error('Check your token and make sure Message Content Intent is enabled in the Developer Portal.');
-});
+// Login with delay to avoid rate limiting on deploys
+console.log('Starting Discord bot...');
+setTimeout(() => {
+  client.login(TOKEN).catch(err => {
+    console.error('❌ LOGIN FAILED:', err.message);
+    if (err.message.includes('rate limited') || err.message.includes('429')) {
+      console.error('⏰ Rate limited! Waiting 60s before retry...');
+      setTimeout(() => client.login(TOKEN).catch(e => console.error('Retry failed:', e.message)), 60000);
+    }
+  });
+}, 3000);
