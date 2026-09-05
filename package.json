@@ -1,18 +1,19 @@
 {
-  "name": "fs-bot",
+  "name": "discord-say-bot",
   "version": "1.0.0",
-  "description": "File Management Discord Bot",
+  "description": "A Discord bot with /say embed command featuring enable/disable toggle and customizable footer",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.16.0",
-    "express": "^4.21.0"
+    "discord.js": "^14.15.0"
   },
   "engines": {
-    "node": ">=18.17.0"
+    "node": ">=18.0.0"
   },
+  "keywords": ["discord", "bot", "discord.js", "say", "embed"],
   "author": "",
-  "license": "ISC"
+  "license": "MIT"
 }
