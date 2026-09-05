@@ -1,14 +1,26 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
+const http = require('http');
 
 // Configuration
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const PORT = process.env.PORT || 3000;
 
 if (!TOKEN || !CLIENT_ID) {
   console.error('ERROR: DISCORD_TOKEN and CLIENT_ID environment variables are required!');
   console.error('Create a .env file or set them in your hosting provider (e.g., Render).');
   process.exit(1);
 }
+
+// Simple HTTP server for Render health check
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Discord Bot is running!\n');
+});
+
+server.listen(PORT, () => {
+  console.log(`Health check server listening on port ${PORT}`);
+});
 
 // Command state: enable/disable toggle
 const commandState = {
@@ -30,7 +42,6 @@ async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
   const commands = [
-    // /say command - sends an embed message
     new SlashCommandBuilder()
       .setName('say')
       .setDescription('Send a message as an embed')
@@ -64,7 +75,6 @@ async function registerCommands() {
           .setRequired(false))
       .toJSON(),
 
-    // /toggle-say command - enable/disable the /say command
     new SlashCommandBuilder()
       .setName('toggle-say')
       .setDescription('Enable or disable the /say command (Admin only)')
@@ -98,7 +108,6 @@ client.on('interactionCreate', async (interaction) => {
 
   const { commandName } = interaction;
 
-  // /toggle-say command
   if (commandName === 'toggle-say') {
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
       return interaction.reply({
@@ -124,9 +133,7 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ embeds: [toggleEmbed] });
   }
 
-  // /say command
   if (commandName === 'say') {
-    // Check if command is disabled
     if (!commandState.sayEnabled) {
       const disabledEmbed = new EmbedBuilder()
         .setTitle('Command Disabled')
@@ -138,7 +145,6 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     try {
-      // Get options
       const title = interaction.options.getString('title');
       const description = interaction.options.getString('description');
       const color = interaction.options.getString('color') || '#3498db';
@@ -147,10 +153,8 @@ client.on('interactionCreate', async (interaction) => {
       const thumbnail = interaction.options.getString('thumbnail');
       const image = interaction.options.getString('image');
 
-      // Validate hex color
       const hexColor = /^#([0-9A-F]{3}){1,2}$/i.test(color) ? color : '#3498db';
 
-      // Build the embed
       const sayEmbed = new EmbedBuilder()
         .setTitle(title)
         .setDescription(description)
@@ -161,17 +165,9 @@ client.on('interactionCreate', async (interaction) => {
         })
         .setTimestamp();
 
-      // Add optional thumbnail
-      if (thumbnail) {
-        try { sayEmbed.setThumbnail(thumbnail); } catch (e) {}
-      }
+      if (thumbnail) { try { sayEmbed.setThumbnail(thumbnail); } catch (e) {} }
+      if (image) { try { sayEmbed.setImage(image); } catch (e) {} }
 
-      // Add optional main image
-      if (image) {
-        try { sayEmbed.setImage(image); } catch (e) {}
-      }
-
-      // Send the embed
       await interaction.reply({ embeds: [sayEmbed] });
 
     } catch (error) {
@@ -184,14 +180,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Handle errors gracefully
-client.on('error', (error) => {
-  console.error('Discord client error:', error);
-});
+client.on('error', (error) => console.error('Discord client error:', error));
+process.on('unhandledRejection', (error) => console.error('Unhandled promise rejection:', error));
 
-process.on('unhandledRejection', (error) => {
-  console.error('Unhandled promise rejection:', error);
-});
-
-// Login to Discord
 client.login(TOKEN);
