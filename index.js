@@ -99,6 +99,11 @@ function isImage(name, contentType) {
   return String(contentType || "").toLowerCase().startsWith("image/") ||
     /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|avif|heic|heif)$/i.test(String(name || ""));
 }
+// ✅ ONLY .txt and .lua allowed
+function isAllowedFileType(name, contentType) {
+  const e = ext(name);
+  return (e === "txt" || e === "lua") && !isImage(name, contentType);
+}
 // ✅ 4-CHAR ALPHANUMERIC ID
 function idForFile() {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -113,6 +118,28 @@ function idForFile() {
 }
 function getFile(id) {
   return library.files.find(file => file.id === String(id || "").trim()) || null;
+}
+// ✅ FRESH URL FETCHER — fixes "This content is no longer available"
+async function getFreshUrl(file) {
+  try {
+    const ch = await client.channels.fetch(file.channelId);
+    const orig = await ch.messages.fetch(file.messageId);
+    let fresh = orig.attachments.get(file.attachmentId);
+    if (!fresh) {
+      for (const s of orig.messageSnapshots?.values?.() || []) {
+        fresh = s.attachments?.get(file.attachmentId);
+        if (fresh) break;
+      }
+    }
+    if (fresh?.url) {
+      file.url = fresh.url;
+      saveLibrary();
+      return fresh.url;
+    }
+  } catch (e) {
+    console.warn(`⚠️ Could not refresh URL for ${file.filename}:`, e.message);
+  }
+  return null;
 }
 function findFiles(query) {
   query = normalize(query);
@@ -148,14 +175,19 @@ async function fetchMessages(channel, before) {
   }
   throw lastError || new Error("Could not fetch messages.");
 }
+// ✅ NOW ONLY ALLOWS .txt and .lua — skips images, videos, etc.
 function attachmentsOf(message) {
   const result = [];
   for (const a of message.attachments?.values?.() || []) {
-    if (!isImage(a.name, a.contentType)) result.push({ attachment: a, forwarded: false });
+    if (isAllowedFileType(a.name, a.contentType)) {
+      result.push({ attachment: a, forwarded: false });
+    }
   }
   for (const s of message.messageSnapshots?.values?.() || []) {
     for (const a of s.attachments?.values?.() || []) {
-      if (!isImage(a.name, a.contentType)) result.push({ attachment: a, forwarded: true });
+      if (isAllowedFileType(a.name, a.contentType)) {
+        result.push({ attachment: a, forwarded: true });
+      }
     }
   }
   return result;
@@ -205,7 +237,7 @@ async function scanChannel(channel) {
   } finally { runningScans.delete(channel.id); }
 }
 // ============================================================
-// FORWARD TXT
+// FORWARD TXT + LUA
 // ============================================================
 async function downloadURL(url) {
   const res = await fetch(url);
@@ -222,10 +254,10 @@ async function forwardTxt(source, destination) {
     for (const msg of batch.values()) {
       messages++;
       for (const a of msg.attachments.values()) {
-        if (ext(a.name) !== "txt" || isImage(a.name, a.contentType)) continue;
+        if (!isAllowedFileType(a.name, a.contentType)) continue;
         try {
           const buf = await downloadURL(a.url);
-          await destination.send({ files: [new AttachmentBuilder(buf, { name: a.name || "file.txt" })] });
+          await destination.send({ files: [new AttachmentBuilder(buf, { name: a.name || "file" })] });
           sent++;
         } catch (e) { console.error(`⚠️ Forward: ${e.message}`); }
       }
@@ -238,21 +270,48 @@ async function forwardTxt(source, destination) {
   return { messages, sent };
 }
 // ============================================================
-// SLASH COMMANDS
+// SLASH COMMANDS — ✅ /embed → /say, nice descriptions, Owner/Access only
 // ============================================================
 const commands = [
-  new SlashCommandBuilder().setName("scanchannel").setDescription("Scan a channel for files.")
-    .addChannelOption(o => o.setName("channel").setDescription("Channel to scan.")
-      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true)),
-  new SlashCommandBuilder().setName("embed").setDescription("Send a gray embed.")
-    .addStringOption(o => o.setName("description").setDescription("Embed description.").setRequired(true))
-    .addStringOption(o => o.setName("title").setDescription("Embed title.").setRequired(false)),
-  new SlashCommandBuilder().setName("forwardall").setDescription("Forward all TXT files.")
-    .addChannelOption(o => o.setName("source").setDescription("Source channel.")
-      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true))
-    .addChannelOption(o => o.setName("destination").setDescription("Destination channel.")
-      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(true)),
-  new SlashCommandBuilder().setName("setchannel").setDescription("Set normal channel for .get/.find.")
+  new SlashCommandBuilder()
+    .setName("scanchannel")
+    .setDescription("Scan a text channel and index all .txt and .lua files into the library. (Owner/Access Role Only.)")
+    .addChannelOption(o => o
+      .setName("channel")
+      .setDescription("The channel to scan (use channel mention).")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(false))
+    .addStringOption(o => o
+      .setName("channel_id")
+      .setDescription("Or paste a raw channel ID to scan.")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("say")
+    .setDescription("Send a clean gray embed message with your text. (Owner/Access Role Only.)")
+    .addStringOption(o => o
+      .setName("text")
+      .setDescription("The main content / message to display in the embed.")
+      .setRequired(true))
+    .addStringOption(o => o
+      .setName("title")
+      .setDescription("Optional bold title at the top of the embed.")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("forwardall")
+    .setDescription("Forward all .txt and .lua files from source channel to destination. (Owner/Access Role Only.)")
+    .addChannelOption(o => o
+      .setName("source")
+      .setDescription("Channel to read files from.")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(true))
+    .addChannelOption(o => o
+      .setName("destination")
+      .setDescription("Channel to send the files to.")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("setchannel")
+    .setDescription("Set the allowed channel where regular users can use .get and .find. (Owner/Access Role Only.)")
 ].map(c => c.toJSON());
 // ============================================================
 // REGISTER COMMANDS
@@ -352,39 +411,58 @@ client.on("interactionCreate", async interaction => {
     }
     if (interaction.commandName === "setchannel") {
       config.allowedChannelId = interaction.channelId; saveConfig();
-      await interaction.editReply({ content: `✅ Channel set to <#${interaction.channelId}>` }); return;
+      await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Owner + Access Role can still use \`.get\` / \`.find\` everywhere.` }); return;
     }
-    if (interaction.commandName === "embed") {
-      const desc = interaction.options.getString("description");
+    // ✅ /say — always gray, no thumbnail, just text + optional title
+    if (interaction.commandName === "say") {
+      const text = interaction.options.getString("text");
       const title = interaction.options.getString("title");
-      const embed = new EmbedBuilder().setColor(0x808080).setDescription(desc)
-        .setFooter({ text: `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}` });
+      const embed = new EmbedBuilder()
+        .setColor(0x808080)
+        .setDescription(text)
+        .setFooter({
+          text: `Today at ${new Date().toLocaleTimeString("en-US", {
+            hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila"
+          })}`
+        });
       if (title) embed.setTitle(title);
       await interaction.deleteReply().catch(() => {});
       await interaction.channel.send({ embeds: [embed] }); return;
     }
+    // ✅ /scanchannel — accepts channel mention OR channel_id
     if (interaction.commandName === "scanchannel") {
-      const ch = interaction.options.getChannel("channel");
-      if (!ch?.isTextBased?.()) { await interaction.editReply({ content: "❌ Invalid channel." }); return; }
-      if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ Already scanning." }); return; }
-      await interaction.editReply({ content: `⚡ Scanning <#${ch.id}>...` });
+      let ch = interaction.options.getChannel("channel");
+      const chId = interaction.options.getString("channel_id");
+      if (!ch && chId) {
+        try {
+          ch = await client.channels.fetch(chId.trim());
+        } catch {
+          await interaction.editReply({ content: "❌ Invalid channel ID." }); return;
+        }
+      }
+      if (!ch) {
+        await interaction.editReply({ content: "❌ Provide a \`channel\` mention or \`channel_id\`." }); return;
+      }
+      if (!ch?.isTextBased?.()) { await interaction.editReply({ content: "❌ That's not a readable text channel." }); return; }
+      if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ That channel is already being scanned." }); return; }
+      await interaction.editReply({ content: `⚡ **Scan started** for <#${ch.id}>.\n\nOnly \`.txt\` and \`.lua\` files will be indexed. Running in background...` });
       scanChannel(ch).then(r => interaction.editReply({
-        content: `✅ Done!\n📂 <#${ch.id}>\n💬 Msgs: \`${r.messages}\`\n📄 New: \`${r.found}\`\n📚 Total: \`${r.total}\``
-      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ Fail: ${e.message.slice(0,1500)}` }).catch(() => {}));
+        content: `✅ **Scan complete!**\n\n📂 Channel: <#${ch.id}>\n💬 Messages scanned: \`${r.messages}\`\n📄 New .txt/.lua files: \`${r.found}\`\n📚 Total library: \`${r.total}\``
+      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
     if (interaction.commandName === "forwardall") {
       const src = interaction.options.getChannel("source");
       const dst = interaction.options.getChannel("destination");
-      await interaction.editReply({ content: `⚡ Forwarding...` });
+      await interaction.editReply({ content: `⚡ Forwarding all \`.txt\` and \`.lua\` files from <#${src.id}> → <#${dst.id}>...` });
       forwardTxt(src, dst).then(r => interaction.editReply({
-        content: `✅ Done!\n💬 Msgs: \`${r.messages}\`\n📄 Sent: \`${r.sent}\``
-      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ Fail: ${e.message.slice(0,1500)}` }).catch(() => {}));
+        content: `✅ **Forward complete!**\n\n📂 Source: <#${src.id}>\n📂 Destination: <#${dst.id}>\n💬 Messages read: \`${r.messages}\`\n📄 Files sent: \`${r.sent}\``
+      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Forward failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
   } catch (e) {
     console.error("❌ Interaction:", e);
-    const msg = { content: "❌ Error.", flags: MessageFlags.Ephemeral };
+    const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
     interaction.deferred || interaction.replied ? await interaction.editReply(msg).catch(() => {}) : await interaction.reply(msg).catch(() => {});
   }
 });
@@ -394,31 +472,36 @@ client.on("interactionCreate", async interaction => {
 client.on("messageCreate", async msg => {
   if (msg.author.bot || !msg.guild) return;
   const txt = (msg.content || "").trim();
-  // .get
+  // .get — ✅ ALWAYS fetches fresh URL
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const id = txt.split(/\s+/)[1];
     if (!isAllowed(msg.member) && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const file = getFile(id);
     if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
-    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: file.url, name: file.filename || "file" }] }).catch(async () => {
-      try {
-        const ch = await client.channels.fetch(file.channelId);
-        const orig = await ch.messages.fetch(file.messageId);
-        let fresh = orig.attachments.get(file.attachmentId);
-        if (!fresh) for (const s of orig.messageSnapshots?.values?.() || []) { fresh = s.attachments?.get(file.attachmentId); if (fresh) break; }
-        if (!fresh?.url) throw new Error("Unavailable.");
-        file.url = fresh.url; saveLibrary();
-        await replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: fresh.url, name: file.filename || "file" }] });
-      } catch { replyUser(msg, "❌ File unavailable.").catch(() => {}); }
-    });
+    const freshUrl = await getFreshUrl(file);
+    const useUrl = freshUrl || file.url;
+    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: useUrl, name: file.filename || "file" }] })
+      .catch(async () => {
+        if (!freshUrl) {
+          const retryUrl = await getFreshUrl(file);
+          if (retryUrl) {
+            await replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: retryUrl, name: file.filename || "file" }] })
+              .catch(() => replyUser(msg, "❌ File unavailable.").catch(() => {}));
+          } else {
+            replyUser(msg, "❌ File unavailable.").catch(() => {});
+          }
+        } else {
+          replyUser(msg, "❌ File unavailable.").catch(() => {});
+        }
+      });
     return;
   }
-  // .find
+  // .find — ✅ Empty query shows usage message
   if (/^\.find(?:\s|$)/i.test(txt)) {
     if (!isAllowed(msg.member) && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
     const query = txt.slice(5).trim();
-    if (!query) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
+    if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
     const results = findFiles(query);
     if (!results.length) { replyUser(msg, "❌ no matching name for that, dumbass.").catch(() => {}); return; }
     const perPage = 8;
@@ -446,9 +529,8 @@ app.get("/health", (req, res) => res.status(200).json({
   process: "online", discord: isReady ? "ready" : "offline", bot: client.user?.tag, guild: GUILD_ID, files: library.files.length
 }));
 app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
-
 // ============================================================
-// ✅ STRONG KEEP-ALIVE — PINGS EXTERNAL URL EVERY 3 MIN
+// KEEP-ALIVE
 // ============================================================
 const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
 if (keepAliveUrl) {
@@ -462,13 +544,11 @@ if (keepAliveUrl) {
     } catch(e) {}
   }, 3 * 60 * 1000);
 }
-
 // ============================================================
 // ERROR HANDLERS
 // ============================================================
 process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
 process.on("uncaughtException", e => console.error("❌ Exception:", e));
-
 // ============================================================
 // LOGIN
 // ============================================================
