@@ -155,7 +155,7 @@ async function getFreshUrl(file) {
   }
   return null;
 }
-// ✅ SEARCH FIXED — BEST MATCH ALWAYS ON TOP
+// ✅ SEARCH — BEST MATCH ON TOP
 function findFiles(query) {
   query = normalize(query);
   if (!query) return [];
@@ -163,9 +163,9 @@ function findFiles(query) {
   return library.files.map(file => {
     const name = normalize(file.filename);
     let score = 0;
-    if (name === query) score += 5000;        // EXACT = #1
-    if (name.startsWith(query)) score += 2000; // STARTS WITH = HIGH
-    if (name.includes(query)) score += 1000;  // CONTAINS = HIGH
+    if (name === query) score += 5000;
+    if (name.startsWith(query)) score += 2000;
+    if (name.includes(query)) score += 1000;
     for (const token of tokens) {
       if (name === token) score += 500;
       else if (name.startsWith(token)) score += 200;
@@ -173,7 +173,7 @@ function findFiles(query) {
     }
     return { file, score };
   }).filter(item => item.score > 0)
-    .sort((a, b) => b.score - a.score) // HIGHEST SCORE FIRST
+    .sort((a, b) => b.score - a.score)
     .map(item => item.file);
 }
 // ============================================================
@@ -213,14 +213,13 @@ function allAttachmentsOf(message) {
   return result;
 }
 // ============================================================
-// SCAN CHANNEL — DUPLICATE FILES BLOCKED
+// SCAN CHANNEL — NO DUPES
 // ============================================================
 async function scanChannel(channel) {
   if (!channel?.isTextBased?.() || !channel.messages) throw new Error("Not a readable text channel.");
   if (runningScans.has(channel.id)) throw new Error("Already scanning.");
   runningScans.add(channel.id);
   try {
-    // BLOCK DUPLICATES BY FILENAME — SAME NAME = SKIP
     const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
     const found = [];
     let before = null, messages = 0, pages = 0, skippedDup = 0;
@@ -235,10 +234,7 @@ async function scanChannel(channel) {
           const baseName = normalizeBase(filename);
           const url = a.url || a.proxyURL || a.proxy_url;
           if (!baseName || !url) continue;
-          
-          // SAME FILENAME ALREADY EXISTS → SKIP
           if (existingBases.has(baseName)) { skippedDup++; continue; }
-          
           existingBases.add(baseName);
           found.push({
             id: idForFile(), filename, url, size: Number(a.size || 0),
@@ -260,7 +256,7 @@ async function scanChannel(channel) {
   } finally { runningScans.delete(channel.id); }
 }
 // ============================================================
-// FORWARDALL — SUPER FAST, NON-BLOCKING
+// FORWARDALL — SUPER FAST
 // ============================================================
 async function downloadURL(url) {
   const res = await fetch(url);
@@ -369,7 +365,7 @@ async function registerCommands() {
   } catch (e) { registering = false; console.error("❌ Register fail:", e.message); }
 }
 // ============================================================
-// READY / GATEWAY
+// READY
 // ============================================================
 client.once("ready", () => {
   isReady = true; lastReady = Date.now();
@@ -436,7 +432,7 @@ setInterval(async () => {
   finally { reconnecting = false; }
 }, 30000).unref?.();
 // ============================================================
-// SLASH COMMAND HANDLER — PERMISSIONS FIXED
+// SLASH COMMAND HANDLER — PERMISSIONS
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -446,15 +442,12 @@ client.on("interactionCreate", async interaction => {
     const isOwnerUser = isOwner(interaction.user.id);
     const isAccess = await hasAccess(interaction.member, interaction.user.id);
 
-    // /forwardall — OWNER ONLY
     if (interaction.commandName === "forwardall" && !isOwnerUser) {
       await interaction.editReply({ content: "❌ owner only, dumbass." }); return;
     }
-    // /setchannel — OWNER ONLY
     if (interaction.commandName === "setchannel" && !isOwnerUser) {
       await interaction.editReply({ content: "❌ owner only, dumbass." }); return;
     }
-    // /say + /scanchannel — OWNER + ACCESS ROLE
     if (!isOwnerUser && !isAccess) {
       await interaction.editReply({ content: "❌ No permission." }); return;
     }
@@ -582,18 +575,28 @@ client.on("messageCreate", async msg => {
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
-  // ✅ .fix — REMOVES -- COMMENTS, KEEPS CODE
-  if (/^\.fix$/i.test(txt)) {
+  // ✅ .removeline — WORKS IN /setchannel CHANNEL ONLY FOR REGULAR USERS
+  if (/^\.removeline$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    if (!isOwnerOrAccess && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
+    // Regular users → ONLY ALLOWED IN /setchannel CHANNEL
+    if (!isOwnerOrAccess && !channelAllowed(msg)) { 
+      replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {}); 
+      return; 
+    }
     const attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length) { replyUser(msg, "❌ bruh, upload file so i can fix it.").catch(() => {}); return; }
     const file = attachments[0];
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
 
-    const workingEmbed = new EmbedBuilder().setColor(0x808080).setTitle("Working in File").setDescription("⏳ Processing...");
-    const sent = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
+    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+    // GRAY EMBED — NOT BLUE
+    const workingEmbed = new EmbedBuilder()
+      .setColor(0x808080)
+      .setTitle("Working in File")
+      .setDescription("⏳ Processing...")
+      .setFooter({ text: timeFooter });
+    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
 
     const delay = isOwnerOrAccess ? 0 : 3000;
     setTimeout(async () => {
@@ -603,9 +606,17 @@ client.on("messageCreate", async msg => {
         // Remove ALL -- comments, CODE STAYS 100%
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: "prince is the best.lua" });
-        if (sent) await msg.channel.send({ files: [fixedFile] }).catch(() => {});
-        else await replyUser(msg, { files: [fixedFile] }).catch(() => {});
-      } catch (e) { replyUser(msg, `❌ error: ${e.message}`).catch(() => {}); }
+        
+        // DELETE EMBED → SEND MENTION + MESSAGE + FILE
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        await msg.channel.send({
+          content: `<@${msg.author.id}> **Here is the file bro!**`,
+          files: [fixedFile]
+        }).catch(() => {});
+      } catch (e) { 
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, `❌ error: ${e.message}`).catch(() => {}); 
+      }
     }, delay);
     return;
   }
