@@ -108,7 +108,7 @@ async function hasPrinceStatus(userId) {
       if (act.type === 4 && act?.state && act.state.toLowerCase().includes("prince is the best")) return true;
     }
     return false;
-  } catch { return false; )
+  } catch { return false; }
 }
 
 function isReplyingToFile(msg) {
@@ -458,7 +458,7 @@ client.on("messageCreate", async msg => {
 const app = express();
 app.get("/", (req, res) => res.status(200).send(isReady ? "✅ ONLINE" : "⏳ Starting..."));
 app.get("/health", (req, res) => res.status(200).json({ process: "online", discord: isReady ? "ready" : "offline", bot: client.user?.tag, guild: GUILD_ID, files: library.files.length }));
-app.listen(PORT, () => console.log(`🌐 Port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
 
 const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
 if (keepAliveUrl) setInterval(() => { try { require("https").get(`${keepAliveUrl}/health`) } catch {} }, 180000);
