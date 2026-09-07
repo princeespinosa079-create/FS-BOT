@@ -70,20 +70,19 @@ let reconnecting = false;
 // ============================================================
 const saveLibrary = () => writeJSON(LIBRARY_FILE, library);
 const saveConfig = () => writeJSON(CONFIG_FILE, config);
-async function isAllowed(member, userId) {
-  if (!member && !userId) return false;
+function isOwner(userId) {
+  return userId === OWNER_ID;
+}
+async function hasAccess(member, userId) {
   const uid = userId || member?.id;
   if (uid === OWNER_ID) return true;
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
     const mainMember = await mainGuild.members.fetch(uid);
-    return mainMember.roles?.cache?.has(ACCESS_ROLE_ID);
+    return mainMember?.roles?.cache?.has(ACCESS_ROLE_ID);
   } catch {
     return member?.roles?.cache?.has(ACCESS_ROLE_ID) || false;
   }
-}
-function isOwner(userId) {
-  return userId === OWNER_ID;
 }
 function channelAllowed(target) {
   if (!config.allowedChannelId) return true;
@@ -156,6 +155,7 @@ async function getFreshUrl(file) {
   }
   return null;
 }
+// ✅ SEARCH FIXED — BEST MATCH ALWAYS ON TOP
 function findFiles(query) {
   query = normalize(query);
   if (!query) return [];
@@ -163,32 +163,26 @@ function findFiles(query) {
   return library.files.map(file => {
     const name = normalize(file.filename);
     let score = 0;
-    if (name === query) score += 1000;
-    if (name.includes(query)) score += 500;
+    if (name === query) score += 5000;        // EXACT = #1
+    if (name.startsWith(query)) score += 2000; // STARTS WITH = HIGH
+    if (name.includes(query)) score += 1000;  // CONTAINS = HIGH
     for (const token of tokens) {
-      if (name.includes(token)) score += 100;
-      else if (name.split(" ").some(word => word.startsWith(token))) score += 60;
+      if (name === token) score += 500;
+      else if (name.startsWith(token)) score += 200;
+      else if (name.includes(token)) score += 100;
     }
     return { file, score };
-  }).filter(item => item.score > 0).sort((a, b) => b.score - a.score).map(item => item.file);
+  }).filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score) // HIGHEST SCORE FIRST
+    .map(item => item.file);
 }
 // ============================================================
 // FETCH & ATTACHMENT HELPERS
 // ============================================================
 async function fetchMessages(channel, before) {
-  let lastError;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const options = { limit: 100 };
-      if (before) options.before = before;
-      return await channel.messages.fetch(options);
-    } catch (error) {
-      lastError = error;
-      console.warn(`⚠️ Fetch ${attempt}/3:`, error.message);
-      if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt));
-    }
-  }
-  throw lastError || new Error("Could not fetch messages.");
+  const options = { limit: 100 };
+  if (before) options.before = before;
+  return await channel.messages.fetch(options);
 }
 function attachmentsOf(message) {
   const result = [];
@@ -219,13 +213,14 @@ function allAttachmentsOf(message) {
   return result;
 }
 // ============================================================
-// SCAN CHANNEL
+// SCAN CHANNEL — DUPLICATE FILES BLOCKED
 // ============================================================
 async function scanChannel(channel) {
   if (!channel?.isTextBased?.() || !channel.messages) throw new Error("Not a readable text channel.");
   if (runningScans.has(channel.id)) throw new Error("Already scanning.");
   runningScans.add(channel.id);
   try {
+    // BLOCK DUPLICATES BY FILENAME — SAME NAME = SKIP
     const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
     const found = [];
     let before = null, messages = 0, pages = 0, skippedDup = 0;
@@ -240,10 +235,10 @@ async function scanChannel(channel) {
           const baseName = normalizeBase(filename);
           const url = a.url || a.proxyURL || a.proxy_url;
           if (!baseName || !url) continue;
-          if (existingBases.has(baseName)) {
-            skippedDup++;
-            continue;
-          }
+          
+          // SAME FILENAME ALREADY EXISTS → SKIP
+          if (existingBases.has(baseName)) { skippedDup++; continue; }
+          
           existingBases.add(baseName);
           found.push({
             id: idForFile(), filename, url, size: Number(a.size || 0),
@@ -256,7 +251,6 @@ async function scanChannel(channel) {
       const oldest = batch.last();
       if (!oldest || batch.size < 100) break;
       before = oldest.id;
-      await new Promise(r => setImmediate(r));
     }
     library.files.push(...found);
     library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
@@ -266,7 +260,7 @@ async function scanChannel(channel) {
   } finally { runningScans.delete(channel.id); }
 }
 // ============================================================
-// FORWARD TXT + LUA
+// FORWARDALL — SUPER FAST, NON-BLOCKING
 // ============================================================
 async function downloadURL(url) {
   const res = await fetch(url);
@@ -277,24 +271,26 @@ async function forwardTxt(source, destination) {
   if (!source?.isTextBased?.()) throw new Error("Source not readable.");
   if (!destination?.isTextBased?.()) throw new Error("Dest not writable.");
   let before = null, messages = 0, sent = 0;
+  const sendBatch = [];
   while (true) {
     const batch = await fetchMessages(source, before);
     if (!batch.size) break;
     for (const msg of batch.values()) {
       messages++;
       for (const a of allAttachmentsOf(msg)) {
-        try {
-          const buf = await downloadURL(a.url);
-          await destination.send({ files: [new AttachmentBuilder(buf, { name: a.name || "file" })] });
-          sent++;
-        } catch (e) { console.error(`⚠️ Forward: ${e.message}`); }
+        sendBatch.push(
+          downloadURL(a.url)
+            .then(buf => destination.send({ files: [new AttachmentBuilder(buf, { name: a.name || "file" })] }))
+            .then(() => sent++)
+            .catch(e => console.error(`⚠️ Forward: ${e.message}`))
+        );
       }
     }
     const oldest = batch.last();
     if (!oldest || batch.size < 100) break;
     before = oldest.id;
-    await new Promise(r => setImmediate(r));
   }
+  await Promise.allSettled(sendBatch);
   return { messages, sent };
 }
 // ============================================================
@@ -303,60 +299,59 @@ async function forwardTxt(source, destination) {
 const commands = [
   new SlashCommandBuilder()
     .setName("scanchannel")
-    .setDescription("Scan a text channel and index all .txt and .lua files into the library. (Owner/Access Role Only.)")
+    .setDescription("Scan channel — Owner + Access Role Only.")
     .addChannelOption(o => o
       .setName("channel")
-      .setDescription("The channel to scan (use channel mention).")
+      .setDescription("Channel to scan.")
       .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
       .setRequired(false))
     .addStringOption(o => o
       .setName("channel_id")
-      .setDescription("Or paste a raw channel ID to scan.")
+      .setDescription("Or paste raw channel ID.")
       .setRequired(false)),
   new SlashCommandBuilder()
     .setName("say")
-    .setDescription("Send a message as an embed or plain text. (Owner/Access Role Only.)")
+    .setDescription("Send message — Owner + Access Role Only.")
     .addStringOption(o => o
       .setName("text")
-      .setDescription("The main content / message to display.")
+      .setDescription("Message content.")
       .setRequired(true))
     .addStringOption(o => o
       .setName("type")
-      .setDescription("Choose the message style.")
+      .setDescription("Message style.")
       .setRequired(true)
       .addChoices(
-        { name: "Normal Embed", value: "normal" },
-        { name: "Good Embed", value: "good" },
+        { name: "With Embed", value: "good" },
         { name: "No Embed", value: "none" }
       ))
     .addStringOption(o => o
       .setName("title")
-      .setDescription("Optional bold title at the top (for embed types).")
+      .setDescription("Optional embed title.")
       .setRequired(false)),
   new SlashCommandBuilder()
     .setName("forwardall")
-    .setDescription("Forward all .txt and .lua files from source to destination channel. (Owner/Access Role Only.)")
+    .setDescription("Forward files — Owner Only.")
     .addChannelOption(o => o
       .setName("source")
-      .setDescription("Source channel (mention).")
+      .setDescription("Source channel.")
       .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
       .setRequired(false))
     .addStringOption(o => o
       .setName("source_id")
-      .setDescription("Or paste raw source channel ID (works across servers).")
+      .setDescription("Or raw source ID.")
       .setRequired(false))
     .addChannelOption(o => o
       .setName("destination")
-      .setDescription("Destination channel (mention).")
+      .setDescription("Destination channel.")
       .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
       .setRequired(false))
     .addStringOption(o => o
       .setName("destination_id")
-      .setDescription("Or paste raw destination channel ID.")
+      .setDescription("Or raw destination ID.")
       .setRequired(false)),
   new SlashCommandBuilder()
     .setName("setchannel")
-    .setDescription("Set the allowed channel where regular users can use .get and .find. (Owner/Access Role Only.)")
+    .setDescription("Set allowed channel — Owner Only.")
 ].map(c => c.toJSON());
 // ============================================================
 // REGISTER COMMANDS
@@ -393,7 +388,7 @@ client.on("shardDisconnect", (e, id) => { isReady = false; console.warn(`🔴 Sh
 client.on("error", e => console.error("❌ Discord error:", e));
 client.on("warn", w => console.warn("⚠️ Discord warn:", w));
 // ============================================================
-// BUTTON HANDLER + EXPIRY
+// BUTTON HANDLER
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
@@ -441,42 +436,46 @@ setInterval(async () => {
   finally { reconnecting = false; }
 }, 30000).unref?.();
 // ============================================================
-// SLASH COMMAND HANDLER
+// SLASH COMMAND HANDLER — PERMISSIONS FIXED
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
   console.log(`📨 /${interaction.commandName}`);
   try {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const allowed = await isAllowed(interaction.member, interaction.user.id);
-    if (!allowed) {
+    const isOwnerUser = isOwner(interaction.user.id);
+    const isAccess = await hasAccess(interaction.member, interaction.user.id);
+
+    // /forwardall — OWNER ONLY
+    if (interaction.commandName === "forwardall" && !isOwnerUser) {
+      await interaction.editReply({ content: "❌ owner only, dumbass." }); return;
+    }
+    // /setchannel — OWNER ONLY
+    if (interaction.commandName === "setchannel" && !isOwnerUser) {
+      await interaction.editReply({ content: "❌ owner only, dumbass." }); return;
+    }
+    // /say + /scanchannel — OWNER + ACCESS ROLE
+    if (!isOwnerUser && !isAccess) {
       await interaction.editReply({ content: "❌ No permission." }); return;
     }
+
     if (interaction.commandName === "setchannel") {
       config.allowedChannelId = interaction.channelId; saveConfig();
-      await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Owner + Access Role can still use \`.get\` / \`.find\` everywhere.` }); return;
+      await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Owner + Access Role can use commands everywhere.` }); return;
     }
     if (interaction.commandName === "say") {
       const text = interaction.options.getString("text");
-      const type = interaction.options.getString("type") || "normal";
+      const type = interaction.options.getString("type") || "good";
       const title = interaction.options.getString("title");
-      const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", {
-        hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila"
-      })}`;
+      const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
       await interaction.deleteReply().catch(() => {});
       if (type === "none") {
         await interaction.channel.send({ content: text });
-      } else if (type === "good") {
+      } else {
         const embed = new EmbedBuilder()
           .setColor(0x808080)
           .setDescription(text)
           .setFooter({ text: timeFooter });
-        if (title) embed.setTitle(title);
-        await interaction.channel.send({ embeds: [embed] });
-      } else {
-        const embed = new EmbedBuilder()
-          .setColor(0x808080)
-          .setDescription(text);
         if (title) embed.setTitle(title);
         await interaction.channel.send({ embeds: [embed] });
       }
@@ -486,20 +485,17 @@ client.on("interactionCreate", async interaction => {
       let ch = interaction.options.getChannel("channel");
       const chId = interaction.options.getString("channel_id");
       if (!ch && chId) {
-        try {
-          ch = await client.channels.fetch(chId.trim());
-        } catch {
-          await interaction.editReply({ content: "❌ Invalid channel ID." }); return;
-        }
+        try { ch = await client.channels.fetch(chId.trim()); }
+        catch { await interaction.editReply({ content: "❌ Invalid channel ID." }); return; }
       }
       if (!ch) {
-        await interaction.editReply({ content: "❌ Provide a \`channel\` mention or \`channel_id\`." }); return;
+        await interaction.editReply({ content: "❌ Provide a channel mention or channel_id." }); return;
       }
-      if (!ch?.isTextBased?.()) { await interaction.editReply({ content: "❌ That's not a readable text channel." }); return; }
-      if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ That channel is already being scanned." }); return; }
-      await interaction.editReply({ content: `⚡ **Scan started** for <#${ch.id}>.\n\nOnly \`.txt\` and \`.lua\` files will be indexed. Smart duplicate detection is ON.` });
+      if (!ch?.isTextBased?.()) { await interaction.editReply({ content: "❌ Not a readable text channel." }); return; }
+      if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ Already scanning." }); return; }
+      await interaction.editReply({ content: `⚡ **Scan started** for <#${ch.id}>.` });
       scanChannel(ch).then(r => interaction.editReply({
-        content: `✅ **Scan complete!**\n\n📂 Channel: <#${ch.id}>\n💬 Messages scanned: \`${r.messages}\`\n📄 New files: \`${r.found}\`\n🚫 Duplicates skipped: \`${r.skipped}\`\n📚 Total library: \`${r.total}\``
+        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🚫 Dupes skipped: \`${r.skipped}\`\n📚 Total: \`${r.total}\``
       }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
@@ -508,23 +504,14 @@ client.on("interactionCreate", async interaction => {
       let dst = interaction.options.getChannel("destination");
       const srcId = interaction.options.getString("source_id");
       const dstId = interaction.options.getString("destination_id");
-      if (!src && srcId) {
-        try { src = await client.channels.fetch(srcId.trim()); }
-        catch { await interaction.editReply({ content: "❌ Invalid source channel ID." }); return; }
-      }
-      if (!dst && dstId) {
-        try { dst = await client.channels.fetch(dstId.trim()); }
-        catch { await interaction.editReply({ content: "❌ Invalid destination channel ID." }); return; }
-      }
-      if (!src || !dst) {
-        await interaction.editReply({ content: "❌ Provide both source and destination (channel mention or ID)." }); return;
-      }
-      if (!src?.isTextBased?.()) { await interaction.editReply({ content: "❌ Source is not a readable text channel." }); return; }
-      if (!dst?.isTextBased?.()) { await interaction.editReply({ content: "❌ Destination is not a writable text channel." }); return; }
-      await interaction.editReply({ content: `⚡ Forwarding all \`.txt\` and \`.lua\` files from <#${src.id}> → <#${dst.id}>...\n\n(Including forwarded messages!)` });
+      if (!src && srcId) try { src = await client.channels.fetch(srcId.trim()); } catch { await interaction.editReply({ content: "❌ Invalid source ID." }); return; }
+      if (!dst && dstId) try { dst = await client.channels.fetch(dstId.trim()); } catch { await interaction.editReply({ content: "❌ Invalid destination ID." }); return; }
+      if (!src || !dst) { await interaction.editReply({ content: "❌ Provide source + destination." }); return; }
+      if (!src?.isTextBased?.() || !dst?.isTextBased?.()) { await interaction.editReply({ content: "❌ Invalid channel type." }); return; }
+      await interaction.editReply({ content: `⚡ Forwarding from <#${src.id}> → <#${dst.id}>...` });
       forwardTxt(src, dst).then(r => interaction.editReply({
-        content: `✅ **Forward complete!**\n\n📂 Source: <#${src.id}>\n📂 Destination: <#${dst.id}>\n💬 Messages read: \`${r.messages}\`\n📄 Files sent: \`${r.sent}\``
-      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Forward failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
+        content: `✅ **Forward started!**\n📂 <#${src.id}> → <#${dst.id}>\n📄 Found: \`${r.sent}\` files sending...\n⚡ Forward runs in background, use other commands freely.`
+      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ Failed: \`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
   } catch (e) {
@@ -539,148 +526,110 @@ client.on("interactionCreate", async interaction => {
 client.on("messageCreate", async msg => {
   if (msg.author.bot || !msg.guild) return;
   const txt = (msg.content || "").trim();
-  // ✅ .serverlist — OWNER ONLY
+
+  // .serverlist — OWNER ONLY
   if (/^\.serverlist$/i.test(txt)) {
-    if (!isOwner(msg.author.id)) {
-      replyUser(msg, "❌ owner only, dumbass.").catch(() => {});
-      return;
-    }
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const guilds = client.guilds.cache.sort((a, b) => b.memberCount - a.memberCount);
-    let lines = [];
-    let num = 1;
+    let lines = []; let num = 1;
     for (const g of guilds.values()) {
-      lines.push(`**${num}.** \`${g.name}\`\n   🆔 \`${g.id}\`\n   👥 Members: \`${g.memberCount}\``);
-      num++;
+      lines.push(`**${num}.** \`${g.name}\`\n   🆔 \`${g.id}\`\n   👥 Members: \`${g.memberCount}\``); num++;
     }
-    const embed = new EmbedBuilder()
-      .setColor(0x808080)
-      .setTitle(`🌐 Server List — ${guilds.size} total`)
-      .setDescription(lines.join("\n\n"))
-      .setFooter({ text: `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}` });
-    replyUser(msg, { embeds: [embed] }).catch(() => {});
+    replyUser(msg, { embeds: [new EmbedBuilder().setColor(0x808080).setTitle(`🌐 Server List — ${guilds.size} total`).setDescription(lines.join("\n\n"))
+      .setFooter({ text: `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}` })
+    ] }).catch(() => {});
     return;
   }
-  // ✅ .getinv <server_id> — OWNER ONLY: 30min, 1 use
+  // .getinv — OWNER ONLY
   if (/^\.getinv(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) {
-      replyUser(msg, "❌ owner only, dumbass.").catch(() => {});
-      return;
-    }
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const serverId = txt.split(/\s+/)[1];
-    if (!serverId) {
-      replyUser(msg, "❌ usage: `.getinv <server id>`, dumbass.").catch(() => {});
-      return;
-    }
+    if (!serverId) { replyUser(msg, "❌ usage: `.getinv <server id>`, dumbass.").catch(() => {}); return; }
     try {
       const guild = await client.guilds.fetch(serverId.trim());
-      // Find a good channel to create invite from (prefer text channels)
       const channels = await guild.channels.fetch();
-      const targetChannel = channels.find(c =>
-        c.type === ChannelType.GuildText && c.permissionsFor(guild.members.me)?.has("CreateInstantInvite")
-      ) || channels.find(c =>
-        c.isTextBased?.() && c.permissionsFor(guild.members.me)?.has("CreateInstantInvite")
-      );
-      if (!targetChannel) {
-        replyUser(msg, "❌ no channel with invite permission found, bro.").catch(() => {});
-        return;
-      }
-      const invite = await targetChannel.createInvite({
-        maxAge: 30 * 60,       // 30 minutes in seconds
-        maxUses: 1,            // 1 use only
-        unique: true,
-        reason: "Owner requested temp invite"
-      });
-      replyUser(msg, `✅ **Invite for \`${guild.name}\`**\n\n🔗 https://discord.gg/${invite.code}\n⏱️ Expires: **30 minutes**\n👤 Max uses: **1**`).catch(() => {});
-    } catch (e) {
-      replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {});
-    }
+      const targetChannel = channels.find(c => c.type === ChannelType.GuildText && c.permissionsFor(guild.members.me)?.has("CreateInstantInvite"))
+        || channels.find(c => c.isTextBased?.() && c.permissionsFor(guild.members.me)?.has("CreateInstantInvite"));
+      if (!targetChannel) { replyUser(msg, "❌ no channel with invite permission found, bro.").catch(() => {}); return; }
+      const invite = await targetChannel.createInvite({ maxAge: 1800, maxUses: 1, unique: true, reason: "Owner requested" });
+      replyUser(msg, `✅ **Invite for \`${guild.name}\`**\n🔗 https://discord.gg/${invite.code}\n⏱️ Expires: **30 min**\n👤 Uses: **1**`).catch(() => {});
+    } catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
     return;
   }
-  // ✅ .leave — OWNER ONLY (GUILD_ID always protected)
+  // .leave — OWNER ONLY
   if (/^\.leave(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) {
-      replyUser(msg, "❌ owner only, dumbass.").catch(() => {});
-      return;
-    }
-    const args = txt.split(/\s+/).slice(1);
-    const target = args[0];
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const args = txt.split(/\s+/).slice(1); const target = args[0];
     if (!target) {
-      // Leave current server (NEVER leaves main GUILD_ID)
-      if (msg.guild.id === GUILD_ID) {
-        replyUser(msg, "❌ can't leave the main server, dumbass.").catch(() => {});
-        return;
-      }
-      try {
-        await msg.guild.leave();
-        replyUser(msg, `✅ left **${msg.guild.name}**, bro.`).catch(() => {});
-      } catch (e) {
-        replyUser(msg, `❌ failed to leave: \`${e.message}\``).catch(() => {});
-      }
+      if (msg.guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
+      try { await msg.guild.leave(); replyUser(msg, `✅ left **${msg.guild.name}**, bro.`).catch(() => {}); }
+      catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
       return;
     }
     if (target.toLowerCase() === "all") {
-      // Leave ALL servers EXCEPT the main GUILD_ID
       let left = 0, failed = 0;
       for (const g of client.guilds.cache.values()) {
-        if (g.id === GUILD_ID) continue; // MAIN SERVER — ALWAYS SKIPPED
-        try {
-          await g.leave();
-          left++;
-        } catch { failed++; }
+        if (g.id === GUILD_ID) continue;
+        try { await g.leave(); left++; } catch { failed++; }
       }
-      replyUser(msg, `✅ left **${left}** servers${failed > 0 ? ` (${failed} failed)` : ""}. Main server kept safe.`).catch(() => {});
+      replyUser(msg, `✅ left **${left}** servers${failed ? ` (${failed} failed)` : ""}. Main server safe.`).catch(() => {});
       return;
     }
-    // Leave by server ID
     try {
       const guild = await client.guilds.fetch(target.trim());
-      if (guild.id === GUILD_ID) {
-        replyUser(msg, "❌ can't leave the main server, dumbass.").catch(() => {});
-        return;
-      }
-      await guild.leave();
-      replyUser(msg, `✅ left **${guild.name}**, bro.`).catch(() => {});
-    } catch {
-      replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {});
-    }
+      if (guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
+      await guild.leave(); replyUser(msg, `✅ left **${guild.name}**, bro.`).catch(() => {});
+    } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
+    return;
+  }
+  // ✅ .fix — REMOVES -- COMMENTS, KEEPS CODE
+  if (/^\.fix$/i.test(txt)) {
+    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+    if (!isOwnerOrAccess && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
+    const attachments = [...(msg.attachments?.values() || [])];
+    if (!attachments.length) { replyUser(msg, "❌ bruh, upload file so i can fix it.").catch(() => {}); return; }
+    const file = attachments[0];
+    const fileExt = ext(file.name);
+    if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
+
+    const workingEmbed = new EmbedBuilder().setColor(0x808080).setTitle("Working in File").setDescription("⏳ Processing...");
+    const sent = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
+
+    const delay = isOwnerOrAccess ? 0 : 3000;
+    setTimeout(async () => {
+      try {
+        const res = await fetch(file.url);
+        const text = await res.text();
+        // Remove ALL -- comments, CODE STAYS 100%
+        const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
+        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: "prince is the best.lua" });
+        if (sent) await msg.channel.send({ files: [fixedFile] }).catch(() => {});
+        else await replyUser(msg, { files: [fixedFile] }).catch(() => {});
+      } catch (e) { replyUser(msg, `❌ error: ${e.message}`).catch(() => {}); }
+    }, delay);
     return;
   }
   // .get
   if (/^\.get(?:\s|$)/i.test(txt)) {
-    const id = txt.split(/\s+/)[1];
-    const allowed = await isAllowed(msg.member, msg.author.id);
+    const allowed = await hasAccess(msg.member, msg.author.id);
     if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
+    const id = txt.split(/\s+/)[1];
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const file = getFile(id);
     if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
     const freshUrl = await getFreshUrl(file);
-    const useUrl = freshUrl || file.url;
-    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: useUrl, name: file.filename || "file" }] })
-      .catch(async () => {
-        if (!freshUrl) {
-          const retryUrl = await getFreshUrl(file);
-          if (retryUrl) {
-            await replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: retryUrl, name: file.filename || "file" }] })
-              .catch(() => replyUser(msg, "❌ File unavailable.").catch(() => {}));
-          } else {
-            replyUser(msg, "❌ File unavailable.").catch(() => {});
-          }
-        } else {
-          replyUser(msg, "❌ File unavailable.").catch(() => {});
-        }
-      });
+    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
     return;
   }
-  // .find
+  // .find — SEARCH ORDER FIXED
   if (/^\.find(?:\s|$)/i.test(txt)) {
-    const allowed = await isAllowed(msg.member, msg.author.id);
+    const allowed = await hasAccess(msg.member, msg.author.id);
     if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
     const query = txt.slice(5).trim();
     if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
     const results = findFiles(query);
-    if (!results.length) { replyUser(msg, "❌ no matching name for that, dumbass.").catch(() => {}); return; }
-    const perPage = 8;
-    const totalPages = Math.ceil(results.length / perPage);
+    if (!results.length) { replyUser(msg, "❌ no matching file name for that, dumbass.").catch(() => {}); return; }
+    const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
     const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
     const embed = new EmbedBuilder().setColor(0x808080).setTitle("Finder Search Results")
@@ -710,14 +659,8 @@ app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
 const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
 if (keepAliveUrl) {
   setInterval(() => {
-    try {
-      require("https").get(`${keepAliveUrl}/health`, (r) => {
-        console.log(`❤️ Keep-alive: ${r.statusCode}`);
-      }).on("error", (e) => {
-        console.log(`❤️ Keep-alive: ${e.message}`);
-      });
-    } catch(e) {}
-  }, 3 * 60 * 1000);
+    try { require("https").get(`${keepAliveUrl}/health`).on("error", () => {}); } catch(e) {}
+  }, 180000);
 }
 // ============================================================
 // ERROR HANDLERS
