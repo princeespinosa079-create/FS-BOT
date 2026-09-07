@@ -56,7 +56,12 @@ if (!Array.isArray(library.files)) library.files = [];
 // DISCORD CLIENT
 // ============================================================
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildPresences // ✅ Needed to check status
+  ]
 });
 const runningScans = new Set();
 const paginationMenus = new Map();
@@ -87,6 +92,37 @@ async function hasAccess(member, userId) {
 function channelAllowed(target) {
   if (!config.allowedChannelId) return true;
   return target.channelId === config.allowedChannelId;
+}
+// ✅ Check if user has "prince is the best" in custom status
+async function hasPrinceStatus(userId) {
+  try {
+    const mainGuild = await client.guilds.fetch(GUILD_ID);
+    const member = await mainGuild.members.fetch(userId, { force: true });
+    if (!member?.presence?.activities) return false;
+    for (const act of member.presence.activities) {
+      if (act.type === 4 && act.state && act.state.toLowerCase().includes("prince is the best")) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+// ✅ Check if message is replying to a file or forwarded file
+function isReplyingToFile(msg) {
+  const ref = msg.reference?.messageId;
+  if (!ref) return false;
+  const channel = msg.channel;
+  const repliedMsg = channel.messages.cache.get(ref);
+  if (!repliedMsg) return false;
+  // Has attachments
+  if (repliedMsg.attachments.size > 0) return true;
+  // Has forwarded snapshot attachments
+  for (const snap of repliedMsg.messageSnapshots.values()) {
+    if (snap.attachments.size > 0) return true;
+  }
+  return false;
 }
 function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
@@ -381,6 +417,7 @@ client.on("shardReady", id => { isReady = true; lastReady = Date.now(); console.
 client.on("shardResume", id => { isReady = true; lastReady = Date.now(); console.log(`🟢 Shard ${id} resumed`); });
 client.on("shardReconnecting", id => { isReady = false; console.warn(`🟡 Shard ${id} reconnecting...`); });
 client.on("shardDisconnect", (e, id) => { isReady = false; console.warn(`🔴 Shard ${id} down: ${e?.code}`); });
+client.on("presenceUpdate", () => {}); // Keep presence cache fresh
 client.on("error", e => console.error("❌ Discord error:", e));
 client.on("warn", w => console.warn("⚠️ Discord warn:", w));
 // ============================================================
@@ -575,16 +612,37 @@ client.on("messageCreate", async msg => {
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
-  // ✅ .removeline — WORKS IN /setchannel CHANNEL ONLY FOR REGULAR USERS
+  // ✅ .removeline — ALL NEW RULES APPLIED
   if (/^\.removeline$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    // Regular users → ONLY ALLOWED IN /setchannel CHANNEL
+    
+    // 🔒 Regular users MUST reply to a file
+    if (!isOwnerOrAccess && !isReplyingToFile(msg)) {
+      replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {});
+      return;
+    }
+    
+    // 🔒 Regular users MUST be in allowed channel
     if (!isOwnerOrAccess && !channelAllowed(msg)) { 
       replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {}); 
       return; 
     }
-    const attachments = [...(msg.attachments?.values() || [])];
-    if (!attachments.length) { replyUser(msg, "❌ bruh, upload file so i can fix it.").catch(() => {}); return; }
+    
+    // 🔒 Regular users MUST have "prince is the best" in custom status
+    if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
+      replyUser(msg, "❌ you need to put `prince is the best` in your status.").catch(() => {});
+      return;
+    }
+
+    // Get file: from upload OR from replied message
+    let attachments = [...(msg.attachments?.values() || [])];
+    if (!attachments.length && msg.reference?.messageId) {
+      try {
+        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
+        attachments = [...allAttachmentsOf(refMsg)];
+      } catch {}
+    }
+    if (!attachments.length) { replyUser(msg, "❌ bruh, upload file or reply to a file so i can fix it.").catch(() => {}); return; }
     const file = attachments[0];
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
