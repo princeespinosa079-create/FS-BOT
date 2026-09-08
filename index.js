@@ -257,8 +257,9 @@ async function scanChannel(channel) {
   runningScans.add(channel.id);
   try {
     const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
+    const existingSizes = new Set(library.files.map(f => Number(f.size || 0)));
     const found = [];
-    let before = null, messages = 0, pages = 0, skippedDup = 0;
+    let before = null, messages = 0, pages = 0, skippedDup = 0, replacedDup = 0;
     while (true) {
       const batch = await fetchMessages(channel, before);
       pages++; if (!batch.size) break;
@@ -268,12 +269,41 @@ async function scanChannel(channel) {
           const a = item.attachment;
           const filename = a.name || "unknown_file";
           const baseName = normalizeBase(filename);
+          const fileSize = Number(a.size || 0);
           const url = a.url || a.proxyURL || a.proxy_url;
           if (!baseName || !url) continue;
-          if (existingBases.has(baseName)) { skippedDup++; continue; }
+          // Check duplicate: same base name OR same size
+          const isDupName = existingBases.has(baseName);
+          const isDupSize = fileSize > 0 && existingSizes.has(fileSize);
+          if (isDupName || isDupSize) {
+            // Delete old matching files from library
+            const beforeCount = library.files.length;
+            library.files = library.files.filter(f => {
+              const fBase = normalizeBase(f.filename);
+              const fSize = Number(f.size || 0);
+              if (isDupName && fBase === baseName) return false;
+              if (isDupSize && fSize === fileSize) return false;
+              return true;
+            });
+            const removed = beforeCount - library.files.length;
+            if (removed > 0) replacedDup += removed;
+            // Rebuild sets after removal
+            existingBases.clear(); existingSizes.clear();
+            for (const lf of library.files) {
+              existingBases.add(normalizeBase(lf.filename));
+              existingSizes.add(Number(lf.size || 0));
+            }
+            // Also remove from found batch if already added there
+            for (let i = found.length - 1; i >= 0; i--) {
+              const ff = found[i];
+              if (isDupName && normalizeBase(ff.filename) === baseName) { found.splice(i, 1); continue; }
+              if (isDupSize && Number(ff.size || 0) === fileSize) { found.splice(i, 1); continue; }
+            }
+          }
           existingBases.add(baseName);
+          existingSizes.add(fileSize);
           found.push({
-            id: idForFile(), filename, url, size: Number(a.size || 0),
+            id: idForFile(), filename, url, size: fileSize,
             contentType: a.contentType || null, channelId: msg.channelId,
             messageId: msg.id, attachmentId: String(a.id), forwarded: item.forwarded,
             createdTimestamp: msg.createdTimestamp || Date.now(), scannedAt: Date.now()
@@ -287,8 +317,8 @@ async function scanChannel(channel) {
     library.files.push(...found);
     library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
     saveLibrary();
-    console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | ${skippedDup} dup skipped | ${pages} pages`);
-    return { messages, found: found.length, skipped: skippedDup, total: library.files.length };
+    console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | ${replacedDup} replaced | ${skippedDup} skipped | ${pages} pages`);
+    return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: library.files.length };
   } finally { runningScans.delete(channel.id); }
 }
 // ============================================================
@@ -525,7 +555,7 @@ client.on("interactionCreate", async interaction => {
       if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ Already scanning." }); return; }
       await interaction.editReply({ content: `⚡ **Scan started** for <#${ch.id}>.` });
       scanChannel(ch).then(r => interaction.editReply({
-        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🚫 Dupes skipped: \`${r.skipped}\`\n📚 Total: \`${r.total}\``
+        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📚 Total: \`${r.total}\``
       }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
@@ -612,8 +642,8 @@ client.on("messageCreate", async msg => {
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
-  // ✅ .removeline / .rl — ALL NEW RULES APPLIED
-  if (/^\.(?:removeline|rl)$/i.test(txt)) {
+  // ✅ .rename / .rn — REMOVE COMMENTS + AUTO-RENAME FROM TitleMain.Text
+  if (/^\.(?:rename|rn)$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     
     // 🔒 Regular users MUST reply to a file
@@ -663,7 +693,16 @@ client.on("messageCreate", async msg => {
         const text = await res.text();
         // Remove ALL -- comments, CODE STAYS 100%
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
-        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: "prince is the best.lua" });
+        // Auto-extract name from: TitleMain.Text = "something"
+        let outputName = "prince is the best.lua";
+        const nameMatch = cleaned.match(/TitleMain\.Text\s*=\s*"([^"]+)"/);
+        if (nameMatch && nameMatch[1] && nameMatch[1].trim()) {
+          const extracted = nameMatch[1].trim();
+          // Sanitize: remove invalid filename chars
+          const safeName = extracted.replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim();
+          if (safeName) outputName = safeName.endsWith(".lua") ? safeName : `${safeName}.lua`;
+        }
+        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
         
         // DELETE EMBED → SEND MENTION + MESSAGE + FILE
         if (sentMsg) await sentMsg.delete().catch(() => {});
