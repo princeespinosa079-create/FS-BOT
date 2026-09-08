@@ -103,7 +103,6 @@ function channelAllowed(target) {
   if (!config.allowedChannelId) return true;
   return target.channelId === config.allowedChannelId;
 }
-// ✅ UPDATED STATUS CHECK: .gg/TBBAUZu8cW
 async function hasPrinceStatus(userId) {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
@@ -732,7 +731,7 @@ client.on("messageCreate", async msg => {
 
         // ✅ ALL PATTERNS including MainGui
         let extractedName = null;
-        // Pattern 1: MainGui.Text = "..."  ✅ NEW
+        // Pattern 1: MainGui.Text = "..."
         let m = cleaned.match(/MainGui\.Text\s*=\s*["']([^"']+)["']/i);
         if (m) extractedName = m[1].trim();
         // Pattern 2: ANYTHING.Title.Text = "..."
@@ -888,9 +887,4 @@ client.on("messageCreate", async msg => {
     ) : null;
     const replyPayload = { embeds: [embed], components: row ? [row] : [] };
     const sentMsg = await replyUser(msg, replyPayload).catch(() => {});
-    if (sentMsg && totalPages > 1) {
-      paginationMenus.set(msg.author.id, {
-        messageId: sentMsg.id,
-        authorId: msg.author.id,
-        results,
-        page: 
+    if (sentMsg && totalPages > 1)
