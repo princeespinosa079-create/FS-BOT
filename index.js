@@ -176,17 +176,6 @@ function findFiles(query) {
     .sort((a, b) => b.score - a.score)
     .map(item => item.file);
 }
-function isReplyingToFile(msg) {
-  const ref = msg.reference?.messageId;
-  if (!ref) return false;
-  const repliedMsg = msg.channel.messages.cache.get(ref);
-  if (!repliedMsg) return false;
-  if (repliedMsg.attachments.size > 0) return true;
-  for (const snap of repliedMsg.messageSnapshots?.values?.() || []) {
-    if (snap.attachments.size > 0) return true;
-  }
-  return false;
-}
 function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
   body.allowedMentions = { ...(body.allowedMentions||{}), repliedUser: true };
@@ -200,6 +189,17 @@ function allAttachmentsOf(message) {
     for (const a of s.attachments?.values?.() || [])
       if (isAllowedFileType(a.name, a.contentType)) result.push(a);
   return result;
+}
+function isReplyingToFile(msg) {
+  const ref = msg.reference?.messageId;
+  if (!ref) return false;
+  const repliedMsg = msg.channel.messages.cache.get(ref);
+  if (!repliedMsg) return false;
+  if (repliedMsg.attachments.size > 0) return true;
+  for (const snap of repliedMsg.messageSnapshots?.values?.() || []) {
+    if (snap.attachments.size > 0) return true;
+  }
+  return false;
 }
 
 // ============================================================
@@ -225,7 +225,7 @@ const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false, lastReady = Date.now(), registering = false, reconnecting = false;
 
 // ============================================================
-// SCAN & FORWARD HELPERS
+// SCAN & FORWARD HELPERS — ✅ SYNTAX FIXED HERE
 // ============================================================
 async function fetchMessages(channel, before) {
   const options = { limit: 100 }; if(before) options.before = before;
@@ -252,7 +252,7 @@ async function scanChannel(channel) {
     let before = null, messages = 0, pages = 0, replacedDup = 0;
     while (true) {
       const batch = await fetchMessages(channel, before);
-      pages++; if (!batch.size) break;
+      pages++;if (!batch.size) break;
       for (const msg of batch.values()) { messages++;
         for (const item of attachmentsOf(msg)) {
           const a = item.attachment;
@@ -265,8 +265,11 @@ async function scanChannel(channel) {
           const isDupSize = fileSize > 0 && existingSizes.has(fileSize);
           if (isDupBase || isDupFull || isDupSize) {
             const beforeCount = library.files.length;
+            // ✅ SYNTAX ERROR FIXED — removed extra )
             library.files = library.files.filter(f => {
-              const fBase = normalizeBase(f.filename), fFull = normalize(f.filename), fSize = Number(f.size || 0));
+              const fBase = normalizeBase(f.filename);
+              const fFull = normalize(f.filename);
+              const fSize = Number(f.size || 0);
               if (isDupBase && fBase === baseName) return false;
               if (isDupFull && fFull === fullName) return false;
               if (isDupSize && fSize === fileSize) return false;
@@ -309,7 +312,7 @@ async function forwardTxt(source, destination) {
   while (true) {
     const batch = await fetchMessages(source, before); if (!batch.size) break;
     for (const msg of batch.values()) {
-      for (const a of allAttachmentsOf(msg))) {
+      for (const a of allAttachmentsOf(msg)) {
         sendBatch.push(downloadURL(a.url).then(buf =>
           destination.send({ files: [new AttachmentBuilder(buf, { name: a.name || "file" })] })
         ).then(() => sent++).catch(e => console.error(`⚠️ Forward: ${e.message}`)));
@@ -323,7 +326,7 @@ async function forwardTxt(source, destination) {
 }
 
 // ============================================================
-// ✅ ALL SLASH COMMANDS — NOTHING MISSING
+// ALL SLASH COMMANDS
 // ============================================================
 const commands = [
   new SlashCommandBuilder()
@@ -396,7 +399,6 @@ client.on("warn", w => console.warn("⚠️ Discord warn:", w));
 // BUTTON HANDLER — PAGINATION + WEBHOOK
 // ============================================================
 client.on("interactionCreate", async interaction => {
-  // Pagination buttons
   if (interaction.isButton() && ["prev_page", "next_page"].includes(interaction.customId)) {
     const uid = interaction.user.id;
     if (!paginationMenus.has(uid))
@@ -426,7 +428,6 @@ client.on("interactionCreate", async interaction => {
     paginationMenus.set(uid, menu); return;
   }
 
-  // Webhook: Open Modal
   if (interaction.isButton() && interaction.customId === "open_spam_modal") {
     const modal = new ModalBuilder().setCustomId("spam_modal").setTitle("Webhook Spam");
     modal.addComponents(
@@ -437,7 +438,6 @@ client.on("interactionCreate", async interaction => {
     await interaction.showModal(modal); return;
   }
 
-  // Webhook: Stop Button
   if (interaction.isButton() && interaction.customId.startsWith("stop_spam:")) {
     const webhookUrl = interaction.customId.slice(10);
     const spam = activeSpam.get(webhookUrl);
@@ -454,7 +454,6 @@ client.on("interactionCreate", async interaction => {
     await interaction.followUp({ content: "🛑 Stopped! Webhook deleted.", flags: MessageFlags.Ephemeral }); return;
   }
 
-  // Webhook: Modal Submit
   if (interaction.isModalSubmit() && interaction.customId === "spam_modal") {
     const webhookUrl = interaction.fields.getTextInputValue("webhook_url");
     const message = interaction.fields.getTextInputValue("message_content");
@@ -500,7 +499,6 @@ client.on("interactionCreate", async interaction => {
     })(); return;
   }
 
-  // Slash Commands Handler
   if (interaction.isChatInputCommand()) {
     const { commandName, user } = interaction;
 
@@ -581,13 +579,12 @@ client.on("interactionCreate", async interaction => {
 }).catch(e => console.error("❌ Interaction:", e));
 
 // ============================================================
-// PREFIX COMMANDS — ALL ORIGINAL + FIXED CHECKS
+// PREFIX COMMANDS
 // ============================================================
 client.on("messageCreate", async msg => {
   if (msg.author.bot || !msg.guild) return;
   const txt = (msg.content || "").trim();
 
-  // .serverlist — OWNER ONLY
   if (/^\.serverlist$/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const guilds = client.guilds.cache.sort((a, b) => b.memberCount - a.memberCount);
@@ -600,7 +597,6 @@ client.on("messageCreate", async msg => {
     return;
   }
 
-  // .getinv — OWNER ONLY
   if (/^\.getinv(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const serverId = txt.split(/\s+/)[1];
@@ -617,7 +613,6 @@ client.on("messageCreate", async msg => {
     return;
   }
 
-  // .leave — OWNER ONLY
   if (/^\.leave(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1); const target = args[0];
@@ -644,7 +639,6 @@ client.on("messageCreate", async msg => {
     return;
   }
 
-  // .scan — PREFIX SHORTCUT
   if (/^\.scan(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     if (!isOwnerOrAccess) { replyUser(msg, "❌ owner + access role only, dumbass.").catch(() => {}); return; }
@@ -670,11 +664,8 @@ client.on("messageCreate", async msg => {
     return;
   }
 
-  // ✅ .rn / .rename — RANDOM NAME + CHANNEL + STATUS CHECK
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-
-    // ⏱️ Cooldown for regulars
     if (!isOwnerOrAccess) {
       const now = Date.now();
       if (rnCooldown.has(msg.author.id)) {
@@ -683,15 +674,11 @@ client.on("messageCreate", async msg => {
       }
       rnCooldown.set(msg.author.id, now);
     }
-
-    // 🔒 Regular user checks
     if (!isOwnerOrAccess) {
       if (!isReplyingToFile(msg)) return replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {});
       if (!channelAllowed(msg)) return replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {});
       if (!await hasPrinceStatus(msg.author.id)) return replyUser(msg, "❌ put `.gg/TBBAUZu8cw` in your status first bro.").catch(() => {});
     }
-
-    // Get file
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try { const refMsg = await msg.channel.messages.fetch(msg.reference.messageId); attachments = [...allAttachmentsOf(refMsg)]; } catch {}
@@ -700,14 +687,11 @@ client.on("messageCreate", async msg => {
     const file = attachments[0];
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") return replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {});
-
-    // ✅ ALWAYS 20 RANDOM LETTERS + .lua
     const outputName = randomLuaName();
     const timeFooter = `Today at ${getPHTime()}`;
     const workingEmbed = new EmbedBuilder().setColor(0x808080).setTitle("Working in File").setDescription("⏳ Processing...").setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
     const delay = isOwnerOrAccess ? 0 : 3000;
-
     setTimeout(async () => {
       try {
         const res = await fetch(file.url);
@@ -715,10 +699,7 @@ client.on("messageCreate", async msg => {
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Here is the file bro!**`,
-          files: [fixedFile]
-        }).catch(() => {});
+        await msg.channel.send({ content: `<@${msg.author.id}> **Here is the file bro!**`, files: [fixedFile] }).catch(() => {});
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
@@ -727,7 +708,6 @@ client.on("messageCreate", async msg => {
     return;
   }
 
-  // ✅ .get — CHANNEL CHECK FOR REGULARS
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const allowed = await hasAccess(msg.member, msg.author.id);
     if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
@@ -740,7 +720,6 @@ client.on("messageCreate", async msg => {
     return;
   }
 
-  // ✅ .find — CHANNEL CHECK FOR REGULARS
   if (/^\.find(?:\s|$)/i.test(txt)) {
     const allowed = await hasAccess(msg.member, msg.author.id);
     if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
