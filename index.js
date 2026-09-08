@@ -98,7 +98,6 @@ function channelAllowed(target) {
   if (!config.allowedChannelId) return true;
   return target.channelId === config.allowedChannelId;
 }
-// ✅ UPDATED STATUS CHECK: .gg/TBBAUZu8cW
 async function hasPrinceStatus(userId) {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
@@ -193,7 +192,6 @@ async function getFreshUrl(file) {
   }
   return null;
 }
-// ✅ FIXED findFiles — NO DUPLICATES
 function findFiles(query) {
   query = normalize(query);
   if (!query) return [];
@@ -221,9 +219,6 @@ function findFiles(query) {
     })
     .map(item => item.file);
 }
-// ============================================================
-// FETCH & ATTACHMENT HELPERS
-// ============================================================
 async function fetchMessages(channel, before) {
   const options = { limit: 100 };
   if (before) options.before = before;
@@ -257,9 +252,6 @@ function allAttachmentsOf(message) {
   }
   return result;
 }
-// ============================================================
-// SCAN CHANNEL — NO DUPES
-// ============================================================
 async function scanChannel(channel) {
   if (!channel?.isTextBased?.() || !channel.messages) throw new Error("Not a readable text channel.");
   if (runningScans.has(channel.id)) throw new Error("Already scanning.");
@@ -334,9 +326,6 @@ async function scanChannel(channel) {
     return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: library.files.length };
   } finally { runningScans.delete(channel.id); }
 }
-// ============================================================
-// FORWARDALL — SUPER FAST
-// ============================================================
 async function downloadURL(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -428,9 +417,6 @@ const commands = [
     .setName("setchannel")
     .setDescription("Set allowed channel — Owner Only.")
 ].map(c => c.toJSON());
-// ============================================================
-// REGISTER COMMANDS
-// ============================================================
 async function registerCommands() {
   if (registering) return;
   registering = true;
@@ -512,7 +498,7 @@ setInterval(async () => {
   finally { reconnecting = false; }
 }, 30000).unref?.();
 // ============================================================
-// SLASH COMMAND HANDLER — PERMISSIONS
+// SLASH COMMAND HANDLER
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -597,7 +583,6 @@ client.on("interactionCreate", async interaction => {
 client.on("messageCreate", async msg => {
   if (msg.author.bot || !msg.guild) return;
   const txt = (msg.content || "").trim();
-  // .serverlist — OWNER ONLY
   if (/^\.serverlist$/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const guilds = client.guilds.cache.sort((a, b) => b.memberCount - a.memberCount);
@@ -610,7 +595,6 @@ client.on("messageCreate", async msg => {
     ] }).catch(() => {});
     return;
   }
-  // .getinv — OWNER ONLY
   if (/^\.getinv(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const serverId = txt.split(/\s+/)[1];
@@ -626,7 +610,6 @@ client.on("messageCreate", async msg => {
     } catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
     return;
   }
-  // .leave — OWNER ONLY
   if (/^\.leave(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1); const target = args[0];
@@ -652,7 +635,6 @@ client.on("messageCreate", async msg => {
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
-  // .scan — PREFIX SHORTCUT FOR /scanchannel
   if (/^\.scan(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     if (!isOwnerOrAccess) { replyUser(msg, "❌ owner + access role only, dumbass.").catch(() => {}); return; }
@@ -665,9 +647,7 @@ client.on("messageCreate", async msg => {
     if (!ch && args[0]) {
       try { ch = await client.channels.fetch(args[0].trim()); } catch {}
     }
-    if (!ch && !args[0]) {
-      ch = msg.channel;
-    }
+    if (!ch && !args[0]) { ch = msg.channel; }
     if (!ch) { replyUser(msg, "❌ provide a channel: `.scan #channel` or `.scan channel_id`, dumbass.").catch(() => {}); return; }
     if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
     if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning that channel, bro.").catch(() => {}); return; }
@@ -686,7 +666,6 @@ client.on("messageCreate", async msg => {
   // ✅ .rename / .rn — FINAL VERSION
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    // ⏱️ 10s COOLDOWN for regular users only
     if (!isOwnerOrAccess) {
       const now = Date.now();
       if (rnCooldown.has(msg.author.id)) {
@@ -698,22 +677,18 @@ client.on("messageCreate", async msg => {
       }
       rnCooldown.set(msg.author.id, now);
     }
-    // 🔒 Regular users MUST reply to a file
     if (!isOwnerOrAccess && !isReplyingToFile(msg)) {
       replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {});
       return;
     }
-    // 🔒 Regular users MUST be in allowed channel
     if (!isOwnerOrAccess && !channelAllowed(msg)) {
       replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {});
       return;
     }
-    // 🔒 STATUS CHECK for regular users
     if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
       replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your status first bro.").catch(() => {});
       return;
     }
-    // Get file: from upload OR replied message
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -726,7 +701,6 @@ client.on("messageCreate", async msg => {
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
     
-    // ✅ INSTANT RESPONSE — Show working embed immediately
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
     const workingEmbed = new EmbedBuilder()
       .setColor(0x808080)
@@ -735,17 +709,14 @@ client.on("messageCreate", async msg => {
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
     
-    // ✅ DELAY: Regular users = 10s | Owner/Access = INSTANT
     const delay = isOwnerOrAccess ? 0 : 10000;
 
     setTimeout(async () => {
       try {
         const res = await fetch(file.url);
         const text = await res.text();
-        // Remove ALL -- comments
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
         
-        // ✅ ALWAYS 20 RANDOM LOWERCASE LETTERS + .lua
         const randChars = "abcdefghijklmnopqrstuvwxyz";
         let outputName = "";
         for (let i = 0; i < 20; i++) {
@@ -753,13 +724,12 @@ client.on("messageCreate", async msg => {
         }
         outputName += ".lua";
 
-        // ✅ Preview: first 30 lines + "... 200 more!" if longer
+        // ✅ Preview: ONLY FIRST 5 lines + "..."
         const allLines = cleaned.split("\n");
-        const previewLines = allLines.slice(0, 30);
+        const previewLines = allLines.slice(0, 5);
         let previewText = previewLines.join("\n");
-        if (allLines.length > 30) previewText += "\n\n... 200 more!";
+        if (allLines.length > 5) previewText += "\n...";
 
-        // ✅ New Embed: Rename File
         const resultEmbed = new EmbedBuilder()
           .setColor(0x808080)
           .setTitle("Rename File")
@@ -769,11 +739,11 @@ client.on("messageCreate", async msg => {
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         
-        // ✅ Send embed FIRST, THEN file
-        await msg.channel.send({ embeds: [resultEmbed] }).catch(() => {});
+        // ✅ ALL IN ONE: mention + file + embed
         await msg.channel.send({
           content: `<@${msg.author.id}> **Here is the file bro!**`,
-          files: [fixedFile]
+          files: [fixedFile],
+          embeds: [resultEmbed]
         }).catch(() => {});
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
@@ -782,7 +752,6 @@ client.on("messageCreate", async msg => {
     }, delay);
     return;
   }
-  // ✅ .get — INSTANT RESPONSE
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const allowed = await hasAccess(msg.member, msg.author.id);
     if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
@@ -794,7 +763,6 @@ client.on("messageCreate", async msg => {
     replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
     return;
   }
-  // ✅ .find — INSTANT RESPONSE + NO DUPLICATES
   if (/^\.find(?:\s|$)/i.test(txt)) {
     const allowed = await hasAccess(msg.member, msg.author.id);
     if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
@@ -826,22 +794,13 @@ app.get("/health", (req, res) => res.status(200).json({
   process: "online", discord: isReady ? "ready" : "offline", bot: client.user?.tag, guild: GUILD_ID, files: library.files.length
 }));
 app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
-// ============================================================
-// KEEP-ALIVE
-// ============================================================
 const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
 if (keepAliveUrl) {
   setInterval(() => {
     try { require("https").get(`${keepAliveUrl}/health`).on("error", () => {}); } catch(e) {}
   }, 180000);
 }
-// ============================================================
-// ERROR HANDLERS
-// ============================================================
 process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
 process.on("uncaughtException", e => console.error("❌ Exception:", e));
-// ============================================================
-// LOGIN
-// ============================================================
 console.log("🔑 Connecting...");
 client.login(TOKEN).catch(e => { console.error("❌ Login fail:", e); process.exit(1); });
