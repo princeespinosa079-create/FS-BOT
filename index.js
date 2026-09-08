@@ -193,10 +193,12 @@ async function getFreshUrl(file) {
   }
   return null;
 }
+// ✅ FIXED findFiles — NO DUPLICATES
 function findFiles(query) {
   query = normalize(query);
   if (!query) return [];
   const tokens = query.split(" ").filter(Boolean);
+  const seenNames = new Set();
   return library.files.map(file => {
     const name = normalize(file.filename);
     let score = 0;
@@ -211,6 +213,12 @@ function findFiles(query) {
     return { file, score };
   }).filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score)
+    .filter(item => {
+      const normName = normalize(item.file.filename);
+      if (seenNames.has(normName)) return false;
+      seenNames.add(normName);
+      return true;
+    })
     .map(item => item.file);
 }
 // ============================================================
@@ -512,14 +520,14 @@ client.on("interactionCreate", async interaction => {
   try {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const isOwnerUser = isOwner(interaction.user.id);
-    const isAccess = await hasAccess(interaction.member, interaction.user.id);
+    const isAccessUser = await hasAccess(interaction.member, interaction.user.id);
     if (interaction.commandName === "forwardall" && !isOwnerUser) {
       await interaction.editReply({ content: "❌ owner only, dumbass." }); return;
     }
     if (interaction.commandName === "setchannel" && !isOwnerUser) {
       await interaction.editReply({ content: "❌ owner only, dumbass." }); return;
     }
-    if (!isOwnerUser && !isAccess) {
+    if (!isOwnerUser && !isAccessUser) {
       await interaction.editReply({ content: "❌ No permission." }); return;
     }
     if (interaction.commandName === "setchannel") {
@@ -675,7 +683,7 @@ client.on("messageCreate", async msg => {
     });
     return;
   }
-  // ✅ .rename / .rn — MODIFIED: 20 random letters name + 10s delay
+  // ✅ .rename / .rn — FINAL VERSION
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     // ⏱️ 10s COOLDOWN for regular users only
@@ -700,12 +708,12 @@ client.on("messageCreate", async msg => {
       replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {});
       return;
     }
-    // 🔒 UPDATED STATUS CHECK: .gg/TBBAUZu8cW
+    // 🔒 STATUS CHECK for regular users
     if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
       replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your status first bro.").catch(() => {});
       return;
     }
-    // Get file: from upload OR from replied message
+    // Get file: from upload OR replied message
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -717,15 +725,19 @@ client.on("messageCreate", async msg => {
     const file = attachments[0];
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
+    
+    // ✅ INSTANT RESPONSE — Show working embed immediately
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
     const workingEmbed = new EmbedBuilder()
       .setColor(0x808080)
-      .setTitle("Working in File")
-      .setDescription("⏳ Processing... please wait 10s")
+      .setTitle("Renaming your File")
+      .setDescription("⏳ Processing...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
     
-    // ✅ 10 SECOND DELAY BEFORE SENDING FILE
+    // ✅ DELAY: Regular users = 10s | Owner/Access = INSTANT
+    const delay = isOwnerOrAccess ? 0 : 10000;
+
     setTimeout(async () => {
       try {
         const res = await fetch(file.url);
@@ -741,8 +753,24 @@ client.on("messageCreate", async msg => {
         }
         outputName += ".lua";
 
+        // ✅ Preview: first 30 lines + "... 200 more!" if longer
+        const allLines = cleaned.split("\n");
+        const previewLines = allLines.slice(0, 30);
+        let previewText = previewLines.join("\n");
+        if (allLines.length > 30) previewText += "\n\n... 200 more!";
+
+        // ✅ New Embed: Rename File
+        const resultEmbed = new EmbedBuilder()
+          .setColor(0x808080)
+          .setTitle("Rename File")
+          .setDescription(`\`\`\`lua\n${previewText}\n\`\`\``)
+          .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
+
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
+        
+        // ✅ Send embed FIRST, THEN file
+        await msg.channel.send({ embeds: [resultEmbed] }).catch(() => {});
         await msg.channel.send({
           content: `<@${msg.author.id}> **Here is the file bro!**`,
           files: [fixedFile]
@@ -751,10 +779,10 @@ client.on("messageCreate", async msg => {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
       }
-    }, 10000);
+    }, delay);
     return;
   }
-  // .get
+  // ✅ .get — INSTANT RESPONSE
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const allowed = await hasAccess(msg.member, msg.author.id);
     if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
@@ -766,7 +794,7 @@ client.on("messageCreate", async msg => {
     replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
     return;
   }
-  // .find — SEARCH ORDER FIXED
+  // ✅ .find — INSTANT RESPONSE + NO DUPLICATES
   if (/^\.find(?:\s|$)/i.test(txt)) {
     const allowed = await hasAccess(msg.member, msg.author.id);
     if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
