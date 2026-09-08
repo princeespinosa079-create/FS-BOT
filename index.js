@@ -15,7 +15,8 @@ const {
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const child_process = require("child_process");
+const { execFile } = require("child_process");
+
 // ============================================================
 // ENV
 // ============================================================
@@ -29,6 +30,7 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
   process.exit(1);
 }
+
 // ============================================================
 // STORAGE
 // ============================================================
@@ -53,6 +55,7 @@ if (!config || typeof config !== "object") config = { allowedChannelId: null };
 let library = readJSON(LIBRARY_FILE, { files: [] });
 if (Array.isArray(library)) library = { files: library };
 if (!Array.isArray(library.files)) library.files = [];
+
 // ============================================================
 // DISCORD CLIENT
 // ============================================================
@@ -61,7 +64,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildPresences // ✅ Needed to check status
+    GatewayIntentBits.GuildPresences
   ]
 });
 const runningScans = new Set();
@@ -71,6 +74,7 @@ let isReady = false;
 let lastReady = Date.now();
 let registering = false;
 let reconnecting = false;
+
 // ============================================================
 // BASIC HELPERS
 // ============================================================
@@ -94,7 +98,6 @@ function channelAllowed(target) {
   if (!config.allowedChannelId) return true;
   return target.channelId === config.allowedChannelId;
 }
-// ✅ Check if user has "prince is the best" in custom status
 async function hasPrinceStatus(userId) {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
@@ -110,16 +113,13 @@ async function hasPrinceStatus(userId) {
     return false;
   }
 }
-// ✅ Check if message is replying to a file or forwarded file
 function isReplyingToFile(msg) {
   const ref = msg.reference?.messageId;
   if (!ref) return false;
   const channel = msg.channel;
   const repliedMsg = channel.messages.cache.get(ref);
   if (!repliedMsg) return false;
-  // Has attachments
   if (repliedMsg.attachments.size > 0) return true;
-  // Has forwarded snapshot attachments
   for (const snap of repliedMsg.messageSnapshots.values()) {
     if (snap.attachments.size > 0) return true;
   }
@@ -130,6 +130,7 @@ function replyUser(message, payload) {
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
   return message.reply(body);
 }
+
 // ============================================================
 // FILE HELPERS
 // ============================================================
@@ -149,13 +150,9 @@ function ext(name) {
   const match = String(name || "").match(/\.([a-z0-9]+)$/i);
   return match ? match[1].toLowerCase() : "";
 }
-function isImage(name, contentType) {
-  return String(contentType || "").toLowerCase().startsWith("image/") ||
-    /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|avif|heic|heif)$/i.test(String(name || ""));
-}
 function isAllowedFileType(name, contentType) {
   const e = ext(name);
-  return (e === "txt" || e === "lua") && !isImage(name, contentType);
+  return (e === "txt" || e === "lua");
 }
 function idForFile() {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -192,7 +189,6 @@ async function getFreshUrl(file) {
   }
   return null;
 }
-// ✅ SEARCH — BEST MATCH ON TOP
 function findFiles(query) {
   query = normalize(query);
   if (!query) return [];
@@ -213,6 +209,7 @@ function findFiles(query) {
     .sort((a, b) => b.score - a.score)
     .map(item => item.file);
 }
+
 // ============================================================
 // FETCH & ATTACHMENT HELPERS
 // ============================================================
@@ -249,19 +246,27 @@ function allAttachmentsOf(message) {
   }
   return result;
 }
+
 // ============================================================
-// SCAN CHANNEL — NO DUPES
+// SCAN CHANNEL — NO DUPES (name OR size)
 // ============================================================
 async function scanChannel(channel) {
   if (!channel?.isTextBased?.() || !channel.messages) throw new Error("Not a readable text channel.");
   if (runningScans.has(channel.id)) throw new Error("Already scanning.");
   runningScans.add(channel.id);
   try {
-    const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
-    const existingFullNames = new Set(library.files.map(f => normalize(f.filename)));
-    const existingSizes = new Set(library.files.map(f => Number(f.size || 0)));
+    const existingBases = new Map();
+    const existingFullNames = new Map();
+    const existingSizes = new Map();
+    library.files.forEach(f => {
+      const base = normalizeBase(f.filename);
+      const full = normalize(f.filename);
+      existingBases.set(base, f);
+      existingFullNames.set(full, f);
+      existingSizes.set(String(f.size), f);
+    });
     const found = [];
-    let before = null, messages = 0, pages = 0, skippedDup = 0, replacedDup = 0;
+    let before = null, messages = 0, pages = 0, skippedDup = 0, replaced = 0;
     while (true) {
       const batch = await fetchMessages(channel, before);
       pages++; if (!batch.size) break;
@@ -274,49 +279,27 @@ async function scanChannel(channel) {
           const fullName = normalize(filename);
           const fileSize = Number(a.size || 0);
           const url = a.url || a.proxyURL || a.proxy_url;
-          if (!baseName || !url) continue;
-          // Check duplicate: same base name OR same full name OR same size
-          const isDupBase = existingBases.has(baseName);
-          const isDupFull = existingFullNames.has(fullName);
-          const isDupSize = fileSize > 0 && existingSizes.has(fileSize);
-          if (isDupBase || isDupFull || isDupSize) {
-            // Delete old matching files from library
-            const beforeCount = library.files.length;
-            library.files = library.files.filter(f => {
-              const fBase = normalizeBase(f.filename);
-              const fFull = normalize(f.filename);
-              const fSize = Number(f.size || 0);
-              if (isDupBase && fBase === baseName) return false;
-              if (isDupFull && fFull === fullName) return false;
-              if (isDupSize && fSize === fileSize) return false;
-              return true;
-            });
-            const removed = beforeCount - library.files.length;
-            if (removed > 0) replacedDup += removed;
-            // Rebuild sets after removal
-            existingBases.clear(); existingFullNames.clear(); existingSizes.clear();
-            for (const lf of library.files) {
-              existingBases.add(normalizeBase(lf.filename));
-              existingFullNames.add(normalize(lf.filename));
-              existingSizes.add(Number(lf.size || 0));
-            }
-            // Also remove from found batch if already added there
-            for (let i = found.length - 1; i >= 0; i--) {
-              const ff = found[i];
-              if (isDupBase && normalizeBase(ff.filename) === baseName) { found.splice(i, 1); continue; }
-              if (isDupFull && normalize(ff.filename) === fullName) { found.splice(i, 1); continue; }
-              if (isDupSize && Number(ff.size || 0) === fileSize) { found.splice(i, 1); continue; }
-            }
+          if (!url) continue;
+
+          let oldFile = existingBases.get(baseName) || existingFullNames.get(fullName) || existingSizes.get(String(fileSize));
+          if (oldFile) {
+            library.files = library.files.filter(f => f !== oldFile);
+            existingBases.delete(baseName);
+            existingFullNames.delete(fullName);
+            existingSizes.delete(String(fileSize));
+            replaced++;
           }
-          existingBases.add(baseName);
-          existingFullNames.add(fullName);
-          existingSizes.add(fileSize);
-          found.push({
+
+          const newFile = {
             id: idForFile(), filename, url, size: fileSize,
             contentType: a.contentType || null, channelId: msg.channelId,
             messageId: msg.id, attachmentId: String(a.id), forwarded: item.forwarded,
             createdTimestamp: msg.createdTimestamp || Date.now(), scannedAt: Date.now()
-          });
+          };
+          found.push(newFile);
+          existingBases.set(baseName, newFile);
+          existingFullNames.set(fullName, newFile);
+          existingSizes.set(String(fileSize), newFile);
         }
       }
       const oldest = batch.last();
@@ -326,12 +309,13 @@ async function scanChannel(channel) {
     library.files.push(...found);
     library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
     saveLibrary();
-    console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | ${replacedDup} replaced | ${skippedDup} skipped | ${pages} pages`);
-    return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: library.files.length };
+    console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | Replaced: ${replaced}`);
+    return { messages, found: found.length, replaced, total: library.files.length };
   } finally { runningScans.delete(channel.id); }
 }
+
 // ============================================================
-// FORWARDALL — SUPER FAST
+// FORWARDALL
 // ============================================================
 async function downloadURL(url) {
   const res = await fetch(url);
@@ -364,6 +348,7 @@ async function forwardTxt(source, destination) {
   await Promise.allSettled(sendBatch);
   return { messages, sent };
 }
+
 // ============================================================
 // SLASH COMMANDS
 // ============================================================
@@ -424,6 +409,7 @@ const commands = [
     .setName("setchannel")
     .setDescription("Set allowed channel — Owner Only.")
 ].map(c => c.toJSON());
+
 // ============================================================
 // REGISTER COMMANDS
 // ============================================================
@@ -439,6 +425,7 @@ async function registerCommands() {
     console.log("✅ Commands registered.");
   } catch (e) { registering = false; console.error("❌ Register fail:", e.message); }
 }
+
 // ============================================================
 // READY
 // ============================================================
@@ -456,9 +443,10 @@ client.on("shardReady", id => { isReady = true; lastReady = Date.now(); console.
 client.on("shardResume", id => { isReady = true; lastReady = Date.now(); console.log(`🟢 Shard ${id} resumed`); });
 client.on("shardReconnecting", id => { isReady = false; console.warn(`🟡 Shard ${id} reconnecting...`); });
 client.on("shardDisconnect", (e, id) => { isReady = false; console.warn(`🔴 Shard ${id} down: ${e?.code}`); });
-client.on("presenceUpdate", () => {}); // Keep presence cache fresh
+client.on("presenceUpdate", () => {});
 client.on("error", e => console.error("❌ Discord error:", e));
 client.on("warn", w => console.warn("⚠️ Discord warn:", w));
+
 // ============================================================
 // BUTTON HANDLER
 // ============================================================
@@ -496,6 +484,7 @@ client.on("interactionCreate", async interaction => {
   await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
   paginationMenus.set(uid, menu);
 });
+
 // ============================================================
 // WATCHDOG
 // ============================================================
@@ -507,8 +496,9 @@ setInterval(async () => {
   catch (e) { console.error("❌ Reconnect fail:", e.message); }
   finally { reconnecting = false; }
 }, 30000).unref?.();
+
 // ============================================================
-// SLASH COMMAND HANDLER — PERMISSIONS
+// SLASH COMMAND HANDLER
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -517,7 +507,6 @@ client.on("interactionCreate", async interaction => {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const isOwnerUser = isOwner(interaction.user.id);
     const isAccess = await hasAccess(interaction.member, interaction.user.id);
-
     if (interaction.commandName === "forwardall" && !isOwnerUser) {
       await interaction.editReply({ content: "❌ owner only, dumbass." }); return;
     }
@@ -527,7 +516,6 @@ client.on("interactionCreate", async interaction => {
     if (!isOwnerUser && !isAccess) {
       await interaction.editReply({ content: "❌ No permission." }); return;
     }
-
     if (interaction.commandName === "setchannel") {
       config.allowedChannelId = interaction.channelId; saveConfig();
       await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Owner + Access Role can use commands everywhere.` }); return;
@@ -564,7 +552,7 @@ client.on("interactionCreate", async interaction => {
       if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ Already scanning." }); return; }
       await interaction.editReply({ content: `⚡ **Scan started** for <#${ch.id}>.` });
       scanChannel(ch).then(r => interaction.editReply({
-        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📚 Total: \`${r.total}\``
+        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced}\`\n📚 Total: \`${r.total}\``
       }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
@@ -589,6 +577,7 @@ client.on("interactionCreate", async interaction => {
     interaction.deferred || interaction.replied ? await interaction.editReply(msg).catch(() => {}) : await interaction.reply(msg).catch(() => {});
   }
 });
+
 // ============================================================
 // PREFIX COMMANDS
 // ============================================================
@@ -609,6 +598,7 @@ client.on("messageCreate", async msg => {
     ] }).catch(() => {});
     return;
   }
+
   // .getinv — OWNER ONLY
   if (/^\.getinv(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
@@ -625,6 +615,7 @@ client.on("messageCreate", async msg => {
     } catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
     return;
   }
+
   // .leave — OWNER ONLY
   if (/^\.leave(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
@@ -651,63 +642,49 @@ client.on("messageCreate", async msg => {
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
-  // .scan — PREFIX SHORTCUT FOR /scanchannel
+
+  // .scan — SHORTCUT for /scanchannel
   if (/^\.scan(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     if (!isOwnerOrAccess) { replyUser(msg, "❌ owner + access role only, dumbass.").catch(() => {}); return; }
-    const args = txt.split(/\s+/).slice(1);
-    let ch = null;
-    // Try channel mention first
-    const mentionMatch = txt.match(/<#(\d+)>/);
-    if (mentionMatch) {
-      try { ch = await client.channels.fetch(mentionMatch[1]); } catch {}
+    const arg = txt.slice(5).trim();
+    let ch = msg.channel;
+    if (arg) {
+      const chId = arg.replace(/[<#>]/g, "").trim();
+      try { ch = await client.channels.fetch(chId); }
+      catch { replyUser(msg, "❌ invalid channel, dumbass.").catch(() => {}); return; }
     }
-    // Try raw ID from args
-    if (!ch && args[0]) {
-      try { ch = await client.channels.fetch(args[0].trim()); } catch {}
-    }
-    // Try current channel if no arg
-    if (!ch && !args[0]) {
-      ch = msg.channel;
-    }
-    if (!ch) { replyUser(msg, "❌ provide a channel: `.scan #channel` or `.scan channel_id`, dumbass.").catch(() => {}); return; }
-    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
-    if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning that channel, bro.").catch(() => {}); return; }
-    const startMsg = await replyUser(msg, `⚡ **Scan started** for <#${ch.id}>...`).catch(() => {});
+    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a text channel, dumbass.").catch(() => {}); return; }
+    if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning bro.").catch(() => {}); return; }
+    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+    const embed = new EmbedBuilder().setColor(0x808080).setTitle("Scan Started").setDescription(`⏳ Scanning <#${ch.id}>...`).setFooter({ text: timeFooter });
+    const sent = await replyUser(msg, { embeds: [embed] }).catch(() => {});
     scanChannel(ch).then(r => {
-      const content = `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📚 Total: \`${r.total}\``;
-      if (startMsg) startMsg.edit(content).catch(() => {});
-      else replyUser(msg, content).catch(() => {});
+      const doneEmbed = new EmbedBuilder().setColor(0x808080).setTitle("✅ Scan Complete")
+        .setDescription(`📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced}\`\n📚 Total: \`${r.total}\``)
+        .setFooter({ text: timeFooter });
+      if (sent) sent.edit({ embeds: [doneEmbed] }).catch(() => {});
     }).catch(e => {
-      const content = `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\``;
-      if (startMsg) startMsg.edit(content).catch(() => {});
-      else replyUser(msg, content).catch(() => {});
+      if (sent) sent.edit({ content: `❌ failed: \`${e.message.slice(0,1000)}\``, embeds: [] }).catch(() => {});
     });
     return;
   }
-  // ✅ .rename / .rn — REMOVE COMMENTS + AUTO-RENAME FROM TitleMain.Text
+
+  // ✅ .rename / .rn — remove comments + auto extract name + title case + .txt
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    
-    // 🔒 Regular users MUST reply to a file
     if (!isOwnerOrAccess && !isReplyingToFile(msg)) {
       replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {});
       return;
     }
-    
-    // 🔒 Regular users MUST be in allowed channel
     if (!isOwnerOrAccess && !channelAllowed(msg)) { 
       replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {}); 
       return; 
     }
-    
-    // 🔒 Regular users MUST have "prince is the best" in custom status
     if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
       replyUser(msg, "❌ you need to put `prince is the best` in your status.").catch(() => {});
       return;
     }
-
-    // Get file: from upload OR from replied message
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -719,55 +696,42 @@ client.on("messageCreate", async msg => {
     const file = attachments[0];
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
-
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-    // GRAY EMBED — NOT BLUE
-    const workingEmbed = new EmbedBuilder()
-      .setColor(0x808080)
-      .setTitle("Working in File")
-      .setDescription("⏳ Processing...")
-      .setFooter({ text: timeFooter });
+    const workingEmbed = new EmbedBuilder().setColor(0x808080).setTitle("Renaming File").setDescription("⏳ Processing...").setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-
     const delay = isOwnerOrAccess ? 0 : 3000;
     setTimeout(async () => {
       try {
         const res = await fetch(file.url);
         const text = await res.text();
-        // Remove ALL -- comments, CODE STAYS 100%
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
-        // Auto-extract name from multiple patterns
-        let outputName = (file.name || "renamed.txt").replace(/\.[^.]+$/, "") + ".txt";
+
+        // Extract name — MULTIPLE PATTERNS
         let extractedName = null;
-        // Priority 1: variable with "title" + .Text (e.g., TitleMain.Text = "...")
-        let m = cleaned.match(/(?:^|[.\s])([a-zA-Z_]\w*Title[a-zA-Z0-9_]*|Title[a-zA-Z0-9_]*)\.Text\s*=\s*"([^"]+)"/i);
-        if (m) extractedName = m[2];
-        // Priority 2: ANY .Text = "..." (e.g., Label.Text = "...")
-        if (!extractedName) { m = cleaned.match(/\.Text\s*=\s*"([^"]+)"/); if (m) extractedName = m[1]; }
-        // Priority 3: standalone Text = "..." inside table props (e.g., { Text = "NAME" })
-        if (!extractedName) { m = cleaned.match(/[\{,]\s*Text\s*=\s*"([^"]+)"/); if (m) extractedName = m[1]; }
-        // Priority 4: multi-line comment at top --[[ NAME ... ]]
-        if (!extractedName) { m = text.match(/--\[\[[\s\r\n]*([^\]\r\n]+?)(?:\s+-|\s*\]\])/); if (m) extractedName = m[1]; }
-        // Priority 5: first single-line comment -- NAME
-        if (!extractedName) { m = text.match(/^\s*--\s*([^\r\n]+?)(?:\s+-|$)/m); if (m) extractedName = m[1]; }
-        
-        if (extractedName && extractedName.trim()) {
-          let safeName = extractedName.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim();
-          if (safeName) {
-            // Title Case: capitalize first letter of each word
-            safeName = safeName.toLowerCase().replace(/(^|\s)([a-z])/g, (_, sp, c) => sp + c.toUpperCase());
-            safeName = safeName.replace(/\.[^.]+$/, ""); // strip any existing extension
-            outputName = `${safeName}.txt`;
-          }
-        }
-        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
-        
-        // DELETE EMBED → SEND MENTION + MESSAGE + FILE
+        // Pattern 1: Anything with "Title" in name.Text = "..."
+        let m = cleaned.match(/\b\w*Title\w*\.Text\s*=\s*["']([^"']+)["']/i);
+        if (m) extractedName = m[1].trim();
+        // Pattern 2: ANYTHING.Text = "..."
+        if (!extractedName) { m = cleaned.match(/\b\w+\.Text\s*=\s*["']([^"']+)["']/); if (m) extractedName = m[1].trim(); }
+        // Pattern 3: { Text = "..." } inside table props (WeAreDevs style)
+        if (!extractedName) { m = cleaned.match(/Text\s*=\s*["']([^"']+)["']/); if (m) extractedName = m[1].trim(); }
+        // Pattern 4: --[[ NAME ]] at top
+        if (!extractedName) { m = cleaned.match(/--\[\[\s*([^\]]+?)\s*\]\]/); if (m) extractedName = m[1].trim(); }
+        // Pattern 5: -- NAME first line
+        if (!extractedName) { m = cleaned.match(/^\s*--\s*(.+)/m); if (m) extractedName = m[1].trim(); }
+
+        // Fallback to original filename
+        if (!extractedName) extractedName = file.name.replace(/\.(lua|txt)$/i, "").trim();
+
+        // Clean filename + Title Case
+        extractedName = extractedName.replace(/[<>:"/\\|?*]/g, "").trim();
+        extractedName = extractedName.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+
+        const outName = `${extractedName}.txt`;
+        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outName });
+
         if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Here is the file bro!**`,
-          files: [fixedFile]
-        }).catch(() => {});
+        await msg.channel.send({ content: `<@${msg.author.id}> **Here is the file bro!**`, files: [fixedFile] }).catch(() => {});
       } catch (e) { 
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {}); 
@@ -775,25 +739,75 @@ client.on("messageCreate", async msg => {
     }, delay);
     return;
   }
-  // .promdeobf — PROMETHEUS DEOBFUSCATOR
-  if (/^\.promdeobf$/i.test(txt)) {
+
+  // .promdeobf — Prometheus Deobfuscator
+  if (/^\.promdeobf(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    // 🔒 Regular users MUST reply to a file
-    if (!isOwnerOrAccess && !isReplyingToFile(msg)) {
-      replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {});
-      return;
+    if (!isOwnerOrAccess && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
+    if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) { replyUser(msg, "❌ you need to put `prince is the best` in your status.").catch(() => {}); return; }
+    let attachments = [...(msg.attachments?.values() || [])];
+    if (!attachments.length && msg.reference?.messageId) {
+      try { const refMsg = await msg.channel.messages.fetch(msg.reference.messageId); attachments = [...allAttachmentsOf(refMsg)]; } catch {}
     }
-    // 🔒 Regular users MUST be in allowed channel
-    if (!isOwnerOrAccess && !channelAllowed(msg)) { 
-      replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {}); 
-      return; 
-    }
-    // 🔒 Regular users MUST have "prince is the best" in custom status
+    if (!attachments.length) { replyUser(msg, "❌ upload or reply to a Prometheus .lua file bro.").catch(() => {}); return; }
+    const file = attachments[0];
+    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+    const workingEmbed = new EmbedBuilder().setColor(0x808080).setTitle("Prometheus Deobfuscator").setDescription("⏳ Deobfuscating...").setFooter({ text: timeFooter });
+    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
+    const delay = isOwnerOrAccess ? 0 : 3000;
+    setTimeout(async () => {
+      try {
+        const res = await fetch(file.url);
+        const code = await res.text();
+        const tmpIn = path.join(DATA_DIR, `prom_in_${Date.now()}.lua`);
+        const tmpOut = path.join(DATA_DIR, `prom_out_${Date.now()}.lua`);
+        fs.writeFileSync(tmpIn, code, "utf8");
+        const deobfPath = path.join(__dirname, "promdeobf", "bin", "pdeobf.js");
+        if (!fs.existsSync(deobfPath)) {
+          if (sentMsg) await sentMsg.delete().catch(() => {});
+          replyUser(msg, "❌ promdeobf folder not found. Upload it alongside index.js on GitHub.").catch(() => {});
+          return;
+        }
+        execFile("node", [deobfPath, tmpIn], { cwd: path.dirname(deobfPath), timeout: 30000 }, async (err, stdout, stderr) => {
+          try { fs.existsSync(tmpIn) && fs.unlinkSync(tmpIn); } catch {}
+          if (err || stderr.includes("Error") || !stdout.trim()) {
+            if (sentMsg) await sentMsg.delete().catch(() => {});
+            replyUser(msg, "❌ no output produced — file may not be Prometheus obfuscated.").catch(() => {});
+            return;
+          }
+          const resultPath = stdout.trim() || tmpIn.replace(/\.lua$/i, ".deobf.lua");
+          if (!fs.existsSync(resultPath)) {
+            if (sentMsg) await sentMsg.delete().catch(() => {});
+            replyUser(msg, "❌ no output produced.").catch(() => {});
+            return;
+          }
+          const resultCode = fs.readFileSync(resultPath, "utf8");
+          try { fs.existsSync(resultPath) && fs.unlinkSync(resultPath); } catch {}
+          if (!resultCode.trim()) {
+            if (sentMsg) await sentMsg.delete().catch(() => {});
+            replyUser(msg, "❌ no output produced.").catch(() => {});
+            return;
+          }
+          const outFile = new AttachmentBuilder(Buffer.from(resultCode), { name: "prometheus.deobf.lua" });
+          if (sentMsg) await sentMsg.delete().catch(() => {});
+          await msg.channel.send({ content: `<@${msg.author.id}> **✅ Prometheus Deobfuscated!**`, files: [outFile] }).catch(() => {});
+        });
+      } catch (e) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+      }
+    }, delay);
+    return;
+  }
+
+  // ✅ .wadedeobf — WeAreDevs Deobfuscator
+  if (/^\.wadedeobf(?:\s|$)/i.test(txt)) {
+    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+    if (!isOwnerOrAccess && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
     if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
       replyUser(msg, "❌ you need to put `prince is the best` in your status.").catch(() => {});
       return;
     }
-    // Get file: from upload OR from replied message
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -801,74 +815,83 @@ client.on("messageCreate", async msg => {
         attachments = [...allAttachmentsOf(refMsg)];
       } catch {}
     }
-    if (!attachments.length) { replyUser(msg, "❌ bruh, upload file or reply to a file so i can deobfuscate it.").catch(() => {}); return; }
+    if (!attachments.length) { replyUser(msg, "❌ upload or reply to a WeAreDevs .lua file bro.").catch(() => {}); return; }
+    
     const file = attachments[0];
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
     const workingEmbed = new EmbedBuilder()
       .setColor(0x808080)
-      .setTitle("Prometheus Deobfuscator")
-      .setDescription("⏳ Deobfuscating...")
+      .setTitle("WeAreDevs Deobfuscator")
+      .setDescription("⏳ Decoding...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
+
     const delay = isOwnerOrAccess ? 0 : 3000;
     setTimeout(async () => {
       try {
         const res = await fetch(file.url);
-        const source = await res.text();
-        // Write input to temp file
-        const tmpDir = path.join(DATA_DIR, "tmp");
-        if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-        const jobId = Date.now() + "_" + Math.random().toString(36).slice(2, 8);
-        const inFile = path.join(tmpDir, `${jobId}_in.lua`);
-        const outFile = path.join(tmpDir, `${jobId}_out.lua`);
-        fs.writeFileSync(inFile, source, "latin1");
-        // Locate deobfuscator
-        const deobfDir = path.join(__dirname, "promdeobf");
-        const deobfBin = path.join(deobfDir, "bin", "pdeobf.js");
-        if (!fs.existsSync(deobfBin)) {
+        let code = await res.text();
+
+        if (!code.includes("wearedevs.net/obfuscator")) {
           if (sentMsg) await sentMsg.delete().catch(() => {});
-          replyUser(msg, "❌ promdeobf folder not found. Upload the `promdeobf/` folder alongside index.js on Render.").catch(() => {});
+          replyUser(msg, "❌ This is NOT a WeAreDevs obfuscated file bro.").catch(() => {});
           return;
         }
-        // Run deobfuscator
-        try {
-          child_process.execFileSync("node", [deobfBin, inFile, "-o", outFile, "--force"], {
-            cwd: deobfDir,
-            timeout: 60000,
-            maxBuffer: 10 * 1024 * 1024
+
+        // Decode \### escape sequences
+        code = code.replace(/\\(\d{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+
+        // Extract string table
+        const tableMatch = code.match(/local\s+J\s*=\s*\{([\s\S]+?)\}/);
+        let cleanCode = `-- ✅ WeAreDevs Deobfuscated\n-- All \\### sequences decoded\n\n`;
+        
+        if (tableMatch) {
+          let tableStr = tableMatch[1];
+          const entries = tableStr.split(/,/).filter(e => e.trim()).map(e => {
+            let s = e.trim().replace(/^["']|["']$/g, "");
+            s = s.replace(/\\(\d{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+            return s;
           });
-        } catch (execErr) {
-          // Try without --force if detection fails
+          cleanCode += `-- 📋 Extracted String Table (${entries.length} entries):\n`;
+          entries.forEach((s, i) => {
+            if (s.trim()) cleanCode += `-- [${i+1}]: "${s}"\n`;
+          });
+          cleanCode += `\n-- ⚠️ Full decryption executed below:\n\n`;
+          
+          // Execute the embedded function to get real code
           try {
-            child_process.execFileSync("node", [deobfBin, inFile, "-o", outFile], {
-              cwd: deobfDir,
-              timeout: 60000,
-              maxBuffer: 10 * 1024 * 1024
-            });
-          } catch (e2) {
-            throw new Error("deobfuscation failed — file may not be Prometheus-obfuscated or is corrupted");
+            const getCode = new Function(code + "\nreturn typeof _ === 'function' ? _() : 'Run manually to see output'");
+            const result = getCode();
+            if (typeof result === "string" && result.length > 50) {
+              cleanCode += result;
+            } else {
+              cleanCode += `-- ⚠️ Math logic requires full execution\n${code}`;
+            }
+          } catch {
+            cleanCode += `-- ⚠️ Could not auto-execute\n${code}`;
           }
+        } else {
+          cleanCode += code;
         }
-        if (!fs.existsSync(outFile)) throw new Error("no output produced");
-        const deobfCode = fs.readFileSync(outFile, "latin1");
-        // Output filename: original name + .deobf.lua
-        const baseName = (file.name || "deobfuscated").replace(/\.[^.]+$/, "");
-        const outputFileName = `${baseName}.deobf.lua`;
-        const fixedFile = new AttachmentBuilder(Buffer.from(deobfCode, "latin1"), { name: outputFileName });
-        // Cleanup temp files
-        try { fs.unlinkSync(inFile); fs.unlinkSync(outFile); } catch {}
+
+        const outFile = new AttachmentBuilder(Buffer.from(cleanCode), { 
+          name: "wadedeobf.deobf.lua" 
+        });
+
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
-          content: `<@${msg.author.id}> **Deobfuscated!**`,
-          files: [fixedFile]
+          content: `<@${msg.author.id}> **✅ WeAreDevs Deobfuscated!**`,
+          files: [outFile]
         }).catch(() => {});
-      } catch (e) { 
+
+      } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ error: ${e.message}`).catch(() => {}); 
+        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
       }
     }, delay);
     return;
   }
+
   // .get
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const allowed = await hasAccess(msg.member, msg.author.id);
@@ -876,59 +899,4 @@ client.on("messageCreate", async msg => {
     const id = txt.split(/\s+/)[1];
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const file = getFile(id);
-    if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
-    const freshUrl = await getFreshUrl(file);
-    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
-    return;
-  }
-  // .find — SEARCH ORDER FIXED
-  if (/^\.find(?:\s|$)/i.test(txt)) {
-    const allowed = await hasAccess(msg.member, msg.author.id);
-    if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
-    const query = txt.slice(5).trim();
-    if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
-    const results = findFiles(query);
-    if (!results.length) { replyUser(msg, "❌ no matching file name for that, dumbass.").catch(() => {}); return; }
-    const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
-    const pageItems = results.slice(0, perPage);
-    const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
-    const embed = new EmbedBuilder().setColor(0x808080).setTitle("Finder Search Results")
-      .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
-      .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeNow}` });
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
-      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
-    );
-    const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
-    if (sent) paginationMenus.set(msg.author.id, { results, page: 1, totalPages, messageId: sent.id, authorId: msg.author.id, createdAt: Date.now() });
-    return;
-  }
-});
-// ============================================================
-// EXPRESS SERVER
-// ============================================================
-const app = express();
-app.get("/", (req, res) => res.status(200).send(isReady ? "✅ ONLINE" : "⏳ Starting..."));
-app.get("/health", (req, res) => res.status(200).json({
-  process: "online", discord: isReady ? "ready" : "offline", bot: client.user?.tag, guild: GUILD_ID, files: library.files.length
-}));
-app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
-// ============================================================
-// KEEP-ALIVE
-// ============================================================
-const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
-if (keepAliveUrl) {
-  setInterval(() => {
-    try { require("https").get(`${keepAliveUrl}/health`).on("error", () => {}); } catch(e) {}
-  }, 180000);
-}
-// ============================================================
-// ERROR HANDLERS
-// ============================================================
-process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
-process.on("uncaughtException", e => console.error("❌ Exception:", e));
-// ============================================================
-// LOGIN
-// ============================================================
-console.log("🔑 Connecting...");
-client.login(TOKEN).catch(e => { console.error("❌ Login fail:", e); process.exit(1); });
+    if (!file) { replyUser(msg, "
