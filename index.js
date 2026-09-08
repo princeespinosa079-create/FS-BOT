@@ -760,14 +760,13 @@ client.on("messageCreate", async msg => {
         const res = await fetch(file.url);
         const code = await res.text();
         const tmpIn = path.join(DATA_DIR, `prom_in_${Date.now()}.lua`);
-        const tmpOut = path.join(DATA_DIR, `prom_out_${Date.now()}.lua`);
-        fs.writeFileSync(tmpIn, code, "utf8");
         const deobfPath = path.join(__dirname, "promdeobf", "bin", "pdeobf.js");
         if (!fs.existsSync(deobfPath)) {
           if (sentMsg) await sentMsg.delete().catch(() => {});
           replyUser(msg, "❌ promdeobf folder not found. Upload it alongside index.js on GitHub.").catch(() => {});
           return;
         }
+        fs.writeFileSync(tmpIn, code, "utf8");
         execFile("node", [deobfPath, tmpIn], { cwd: path.dirname(deobfPath), timeout: 30000 }, async (err, stdout, stderr) => {
           try { fs.existsSync(tmpIn) && fs.unlinkSync(tmpIn); } catch {}
           if (err || stderr.includes("Error") || !stdout.trim()) {
@@ -858,7 +857,6 @@ client.on("messageCreate", async msg => {
           });
           cleanCode += `\n-- ⚠️ Full decryption executed below:\n\n`;
           
-          // Execute the embedded function to get real code
           try {
             const getCode = new Function(code + "\nreturn typeof _ === 'function' ? _() : 'Run manually to see output'");
             const result = getCode();
@@ -899,3 +897,4 @@ client.on("messageCreate", async msg => {
     const id = txt.split(/\s+/)[1];
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const file = getFile(id);
+    if (!file) { replyUser(msg, "❌
