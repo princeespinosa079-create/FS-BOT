@@ -24,7 +24,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const OWNER_ID = "1302080645987569694";
-const ACCESS_ROLE_ID = "1539883004950876160";
+const ACCESS_ROLE_ID = "1539883004950876";
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
@@ -266,7 +266,7 @@ async function scanChannel(channel) {
       existingSizes.set(String(f.size), f);
     });
     const found = [];
-    let before = null, messages = 0, pages = 0, skippedDup = 0, replaced = 0;
+    let before = null, messages = 0, pages = 0, replaced = 0;
     while (true) {
       const batch = await fetchMessages(channel, before);
       pages++; if (!batch.size) break;
@@ -899,4 +899,3 @@ client.on("messageCreate", async msg => {
     const id = txt.split(/\s+/)[1];
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const file = getFile(id);
-    if (!file) { replyUser(msg, "
