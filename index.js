@@ -15,7 +15,6 @@ const {
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const { execFile } = require("child_process");
 
 // ============================================================
 // ENV
@@ -24,7 +23,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const OWNER_ID = "1302080645987569694";
-const ACCESS_ROLE_ID = "1539883004950876";
+const ACCESS_ROLE_ID = "1539883004950876160";
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
@@ -55,6 +54,12 @@ if (!config || typeof config !== "object") config = { allowedChannelId: null };
 let library = readJSON(LIBRARY_FILE, { files: [] });
 if (Array.isArray(library)) library = { files: library };
 if (!Array.isArray(library.files)) library.files = [];
+
+// ============================================================
+// COOLDOWN TRACKER
+// ============================================================
+const renameCooldowns = new Map();
+const RENAME_COOLDOWN_SEC = 10;
 
 // ============================================================
 // DISCORD CLIENT
@@ -98,13 +103,14 @@ function channelAllowed(target) {
   if (!config.allowedChannelId) return true;
   return target.channelId === config.allowedChannelId;
 }
+// ✅ UPDATED STATUS CHECK: .gg/TBBAUZu8cW
 async function hasPrinceStatus(userId) {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
     const member = await mainGuild.members.fetch(userId, { force: true });
     if (!member?.presence?.activities) return false;
     for (const act of member.presence.activities) {
-      if (act.type === 4 && act.state && act.state.toLowerCase().includes("prince is the best")) {
+      if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
         return true;
       }
     }
@@ -248,7 +254,7 @@ function allAttachmentsOf(message) {
 }
 
 // ============================================================
-// SCAN CHANNEL — NO DUPES (name OR size)
+// SCAN CHANNEL — NO DUPES
 // ============================================================
 async function scanChannel(channel) {
   if (!channel?.isTextBased?.() || !channel.messages) throw new Error("Not a readable text channel.");
@@ -266,10 +272,10 @@ async function scanChannel(channel) {
       existingSizes.set(String(f.size), f);
     });
     const found = [];
-    let before = null, messages = 0, pages = 0, replaced = 0;
+    let before = null, messages = 0, replaced = 0;
     while (true) {
       const batch = await fetchMessages(channel, before);
-      pages++; if (!batch.size) break;
+      if (!batch.size) break;
       for (const msg of batch.values()) {
         messages++;
         for (const item of attachmentsOf(msg)) {
@@ -643,7 +649,7 @@ client.on("messageCreate", async msg => {
     return;
   }
 
-  // .scan — SHORTCUT for /scanchannel
+  // .scan — SHORTCUT
   if (/^\.scan(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     if (!isOwnerOrAccess) { replyUser(msg, "❌ owner + access role only, dumbass.").catch(() => {}); return; }
@@ -670,9 +676,20 @@ client.on("messageCreate", async msg => {
     return;
   }
 
-  // ✅ .rename / .rn — remove comments + auto extract name + title case + .txt
+  // ✅ .rename / .rn — ALL patterns + MainGui + No Title fallback + 10s cooldown
   if (/^\.(?:rename|rn)$/i.test(txt)) {
-    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+    const userId = msg.author.id;
+    const isOwnerOrAccess = isOwner(userId) || await hasAccess(msg.member, userId);
+
+    // ⏱️ 10s COOLDOWN — Owner bypass
+    if (!isOwnerOrAccess && renameCooldowns.has(userId)) {
+      const timeLeft = Math.ceil((renameCooldowns.get(userId) - Date.now()) / 1000);
+      if (timeLeft > 0) {
+        replyUser(msg, `❌ cooldown: wait \`${timeLeft}s\` dumbass.`).catch(() => {});
+        return;
+      }
+    }
+
     if (!isOwnerOrAccess && !isReplyingToFile(msg)) {
       replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {});
       return;
@@ -681,10 +698,16 @@ client.on("messageCreate", async msg => {
       replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {}); 
       return; 
     }
-    if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
-      replyUser(msg, "❌ you need to put `prince is the best` in your status.").catch(() => {});
+    if (!isOwnerOrAccess && !await hasPrinceStatus(userId)) {
+      replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your custom status dumbass.").catch(() => {});
       return;
     }
+
+    // ⏱️ SET COOLDOWN for regular users
+    if (!isOwnerOrAccess) {
+      renameCooldowns.set(userId, Date.now() + (RENAME_COOLDOWN_SEC * 1000));
+    }
+
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -700,28 +723,30 @@ client.on("messageCreate", async msg => {
     const workingEmbed = new EmbedBuilder().setColor(0x808080).setTitle("Renaming File").setDescription("⏳ Processing...").setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
     const delay = isOwnerOrAccess ? 0 : 3000;
+
     setTimeout(async () => {
       try {
         const res = await fetch(file.url);
         const text = await res.text();
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
 
-        // Extract name — MULTIPLE PATTERNS
+        // ✅ ALL PATTERNS including MainGui
         let extractedName = null;
-        // Pattern 1: Anything with "Title" in name.Text = "..."
-        let m = cleaned.match(/\b\w*Title\w*\.Text\s*=\s*["']([^"']+)["']/i);
+        // Pattern 1: MainGui.Text = "..."  ✅ NEW
+        let m = cleaned.match(/MainGui\.Text\s*=\s*["']([^"']+)["']/i);
         if (m) extractedName = m[1].trim();
-        // Pattern 2: ANYTHING.Text = "..."
+        // Pattern 2: ANYTHING.Title.Text = "..."
+        if (!extractedName) { m = cleaned.match(/\b\w*Title\w*\.Text\s*=\s*["']([^"']+)["']/i); if (m) extractedName = m[1].trim(); }
+        // Pattern 3: ANYTHING.Text = "..."
         if (!extractedName) { m = cleaned.match(/\b\w+\.Text\s*=\s*["']([^"']+)["']/); if (m) extractedName = m[1].trim(); }
-        // Pattern 3: { Text = "..." } inside table props (WeAreDevs style)
+        // Pattern 4: { Text = "..." } table style
         if (!extractedName) { m = cleaned.match(/Text\s*=\s*["']([^"']+)["']/); if (m) extractedName = m[1].trim(); }
-        // Pattern 4: --[[ NAME ]] at top
+        // Pattern 5: --[[ NAME ]]
         if (!extractedName) { m = cleaned.match(/--\[\[\s*([^\]]+?)\s*\]\]/); if (m) extractedName = m[1].trim(); }
-        // Pattern 5: -- NAME first line
+        // Pattern 6: -- NAME first line
         if (!extractedName) { m = cleaned.match(/^\s*--\s*(.+)/m); if (m) extractedName = m[1].trim(); }
-
-        // Fallback to original filename
-        if (!extractedName) extractedName = file.name.replace(/\.(lua|txt)$/i, "").trim();
+        // ✅ FALLBACK
+        if (!extractedName || extractedName.trim() === "") extractedName = "No Title";
 
         // Clean filename + Title Case
         extractedName = extractedName.replace(/[<>:"/\\|?*]/g, "").trim();
@@ -740,71 +765,12 @@ client.on("messageCreate", async msg => {
     return;
   }
 
-  // .promdeobf — Prometheus Deobfuscator
-  if (/^\.promdeobf(?:\s|$)/i.test(txt)) {
-    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    if (!isOwnerOrAccess && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
-    if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) { replyUser(msg, "❌ you need to put `prince is the best` in your status.").catch(() => {}); return; }
-    let attachments = [...(msg.attachments?.values() || [])];
-    if (!attachments.length && msg.reference?.messageId) {
-      try { const refMsg = await msg.channel.messages.fetch(msg.reference.messageId); attachments = [...allAttachmentsOf(refMsg)]; } catch {}
-    }
-    if (!attachments.length) { replyUser(msg, "❌ upload or reply to a Prometheus .lua file bro.").catch(() => {}); return; }
-    const file = attachments[0];
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-    const workingEmbed = new EmbedBuilder().setColor(0x808080).setTitle("Prometheus Deobfuscator").setDescription("⏳ Deobfuscating...").setFooter({ text: timeFooter });
-    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-    const delay = isOwnerOrAccess ? 0 : 3000;
-    setTimeout(async () => {
-      try {
-        const res = await fetch(file.url);
-        const code = await res.text();
-        const tmpIn = path.join(DATA_DIR, `prom_in_${Date.now()}.lua`);
-        const deobfPath = path.join(__dirname, "promdeobf", "bin", "pdeobf.js");
-        if (!fs.existsSync(deobfPath)) {
-          if (sentMsg) await sentMsg.delete().catch(() => {});
-          replyUser(msg, "❌ promdeobf folder not found. Upload it alongside index.js on GitHub.").catch(() => {});
-          return;
-        }
-        fs.writeFileSync(tmpIn, code, "utf8");
-        execFile("node", [deobfPath, tmpIn], { cwd: path.dirname(deobfPath), timeout: 30000 }, async (err, stdout, stderr) => {
-          try { fs.existsSync(tmpIn) && fs.unlinkSync(tmpIn); } catch {}
-          if (err || stderr.includes("Error") || !stdout.trim()) {
-            if (sentMsg) await sentMsg.delete().catch(() => {});
-            replyUser(msg, "❌ no output produced — file may not be Prometheus obfuscated.").catch(() => {});
-            return;
-          }
-          const resultPath = stdout.trim() || tmpIn.replace(/\.lua$/i, ".deobf.lua");
-          if (!fs.existsSync(resultPath)) {
-            if (sentMsg) await sentMsg.delete().catch(() => {});
-            replyUser(msg, "❌ no output produced.").catch(() => {});
-            return;
-          }
-          const resultCode = fs.readFileSync(resultPath, "utf8");
-          try { fs.existsSync(resultPath) && fs.unlinkSync(resultPath); } catch {}
-          if (!resultCode.trim()) {
-            if (sentMsg) await sentMsg.delete().catch(() => {});
-            replyUser(msg, "❌ no output produced.").catch(() => {});
-            return;
-          }
-          const outFile = new AttachmentBuilder(Buffer.from(resultCode), { name: "prometheus.deobf.lua" });
-          if (sentMsg) await sentMsg.delete().catch(() => {});
-          await msg.channel.send({ content: `<@${msg.author.id}> **✅ Prometheus Deobfuscated!**`, files: [outFile] }).catch(() => {});
-        });
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
-      }
-    }, delay);
-    return;
-  }
-
-  // ✅ .wadedeobf — WeAreDevs Deobfuscator
+  // .wadedeobf
   if (/^\.wadedeobf(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     if (!isOwnerOrAccess && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
     if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
-      replyUser(msg, "❌ you need to put `prince is the best` in your status.").catch(() => {});
+      replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your custom status dumbass.").catch(() => {});
       return;
     }
     let attachments = [...(msg.attachments?.values() || [])];
@@ -824,26 +790,19 @@ client.on("messageCreate", async msg => {
       .setDescription("⏳ Decoding...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-
     const delay = isOwnerOrAccess ? 0 : 3000;
     setTimeout(async () => {
       try {
         const res = await fetch(file.url);
         let code = await res.text();
-
         if (!code.includes("wearedevs.net/obfuscator")) {
           if (sentMsg) await sentMsg.delete().catch(() => {});
           replyUser(msg, "❌ This is NOT a WeAreDevs obfuscated file bro.").catch(() => {});
           return;
         }
-
-        // Decode \### escape sequences
         code = code.replace(/\\(\d{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
-
-        // Extract string table
         const tableMatch = code.match(/local\s+J\s*=\s*\{([\s\S]+?)\}/);
         let cleanCode = `-- ✅ WeAreDevs Deobfuscated\n-- All \\### sequences decoded\n\n`;
-        
         if (tableMatch) {
           let tableStr = tableMatch[1];
           const entries = tableStr.split(/,/).filter(e => e.trim()).map(e => {
@@ -851,37 +810,17 @@ client.on("messageCreate", async msg => {
             s = s.replace(/\\(\d{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
             return s;
           });
-          cleanCode += `-- 📋 Extracted String Table (${entries.length} entries):\n`;
+          cleanCode += `-- 📋 Extracted String Table:\n`;
           entries.forEach((s, i) => {
             if (s.trim()) cleanCode += `-- [${i+1}]: "${s}"\n`;
           });
-          cleanCode += `\n-- ⚠️ Full decryption executed below:\n\n`;
-          
-          try {
-            const getCode = new Function(code + "\nreturn typeof _ === 'function' ? _() : 'Run manually to see output'");
-            const result = getCode();
-            if (typeof result === "string" && result.length > 50) {
-              cleanCode += result;
-            } else {
-              cleanCode += `-- ⚠️ Math logic requires full execution\n${code}`;
-            }
-          } catch {
-            cleanCode += `-- ⚠️ Could not auto-execute\n${code}`;
-          }
+          cleanCode += `\n-- Decoded code:\n${code}`;
         } else {
           cleanCode += code;
         }
-
-        const outFile = new AttachmentBuilder(Buffer.from(cleanCode), { 
-          name: "wadedeobf.deobf.lua" 
-        });
-
+        const outFile = new AttachmentBuilder(Buffer.from(cleanCode), { name: "wadedeobf.deobf.lua" });
         if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **✅ WeAreDevs Deobfuscated!**`,
-          files: [outFile]
-        }).catch(() => {});
-
+        await msg.channel.send({ content: `<@${msg.author.id}> **✅ WeAreDevs Deobfuscated!**`, files: [outFile] }).catch(() => {});
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
@@ -897,4 +836,61 @@ client.on("messageCreate", async msg => {
     const id = txt.split(/\s+/)[1];
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const file = getFile(id);
-    if (!file) { replyUser(msg, "❌
+    if (!file) { replyUser(msg, "❌ file not found, idiot.").catch(() => {}); return; }
+    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+    const workingEmbed = new EmbedBuilder().setColor(0x808080).setTitle("Getting File...").setDescription("⏳ Fetching...").setFooter({ text: timeFooter });
+    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
+    const delay = allowed ? 0 : 3000;
+    setTimeout(async () => {
+      try {
+        let url = file.url;
+        if (!url || !url.startsWith("https://cdn.discord.com")) {
+          url = await getFreshUrl(file);
+        }
+        if (!url) {
+          if (sentMsg) await sentMsg.delete().catch(() => {});
+          replyUser(msg, "❌ cant get file url bro, resend it.").catch(() => {});
+          return;
+        }
+        const res = await fetch(url);
+        const buf = Buffer.from(await res.arrayBuffer());
+        const attach = new AttachmentBuilder(buf, { name: file.filename });
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        await msg.channel.send({ content: `<@${msg.author.id}>`, files: [attach] }).catch(() => {});
+      } catch (e) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+      }
+    }, delay);
+    return;
+  }
+
+  // .find
+  if (/^\.find(?:\s|$)/i.test(txt)) {
+    const allowed = await hasAccess(msg.member, msg.author.id);
+    if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
+    const query = txt.slice(5).trim();
+    if (!query) { replyUser(msg, "❌ what file name idiot?").catch(() => {}); return; }
+    const results = findFiles(query);
+    if (!results.length) { replyUser(msg, "❌ no file found idiot.").catch(() => {}); return; }
+    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+    const totalPages = Math.ceil(results.length / 8);
+    const start = 0;
+    const pageItems = results.slice(start, start + 8);
+    const embed = new EmbedBuilder()
+      .setColor(0x808080)
+      .setTitle("Finder Search Results")
+      .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
+      .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeFooter}` });
+    const row = totalPages > 1 ? new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
+      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
+    ) : null;
+    const replyPayload = { embeds: [embed], components: row ? [row] : [] };
+    const sentMsg = await replyUser(msg, replyPayload).catch(() => {});
+    if (sentMsg && totalPages > 1) {
+      paginationMenus.set(msg.author.id, {
+        messageId: sentMsg.id,
+        authorId: msg.author.id,
+        results,
+        page: 
