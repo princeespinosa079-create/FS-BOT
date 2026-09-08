@@ -530,7 +530,7 @@ client.on("interactionCreate", async interaction => {
       const text = interaction.options.getString("text");
       const type = interaction.options.getString("type") || "good";
       const title = interaction.options.getString("title");
-      const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+      const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" )}`;
       await interaction.deleteReply().catch(() => {});
       if (type === "none") {
         await interaction.channel.send({ content: text });
@@ -675,7 +675,7 @@ client.on("messageCreate", async msg => {
     });
     return;
   }
-  // ✅ .rename / .rn — UPDATED
+  // ✅ .rename / .rn — MAIN TITLE PRIORITY FIXED
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
 
@@ -704,7 +704,7 @@ client.on("messageCreate", async msg => {
       return;
     }
 
-    // 🔒 UPDATED STATUS CHECK: .gg/TBBAUZu8cW
+    // 🔒 Status check
     if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
       replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your status first bro.").catch(() => {});
       return;
@@ -737,17 +737,35 @@ client.on("messageCreate", async msg => {
         // Remove ALL -- comments
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
 
-        // ✅ UPDATED: Title patterns include MainGui + all Title variants
+        // ✅ PRIORITY: MAIN TITLE FIRST
         let outputName = "no title.txt"; // DEFAULT IF NO NAME FOUND
-        // Try: Title variables + MainGui.Text
-        let nameMatch = cleaned.match(/(?:^|[.\s])(MainGui|[a-zA-Z_]\w*Title[a-zA-Z0-9_]*|Title[a-zA-Z0-9_]*)\.Text\s*=\s*"([^"]+)"/i);
-        if (!nameMatch) {
-          // Fallback: ANY .Text = "something"
-          nameMatch = cleaned.match(/\.Text\s*=\s*"([^"]+)"/);
-          if (nameMatch) nameMatch = [null, null, nameMatch[1]];
+        let extractedName = null;
+
+        // 1️⃣ HIGHEST PRIORITY: TitleMain.Text
+        let nameMatch = cleaned.match(/TitleMain\.Text\s*=\s*"([^"]+)"/i);
+        if (nameMatch) extractedName = nameMatch[1];
+
+        // 2️⃣ NEXT: MainTitle.Text
+        if (!extractedName) {
+          nameMatch = cleaned.match(/MainTitle\.Text\s*=\s*"([^"]+)"/i);
+          if (nameMatch) extractedName = nameMatch[1];
         }
 
-        const extractedName = nameMatch ? nameMatch[2] : null;
+        // 3️⃣ NEXT: MainGui.Text
+        if (!extractedName) {
+          nameMatch = cleaned.match(/MainGui\.Text\s*=\s*"([^"]+)"/i);
+          if (nameMatch) extractedName = nameMatch[1];
+        }
+
+        // 4️⃣ NEXT: ANY Title*.Text / *Title*.Text
+        if (!extractedName) {
+          nameMatch = cleaned.match(/(?:[a-zA-Z_]\w*Title[a-zA-Z0-9_]*|Title[a-zA-Z0-9_]*)\.Text\s*=\s*"([^"]+)"/i);
+          if (nameMatch) extractedName = nameMatch[1];
+        }
+
+        // ❌ NO FALLBACK TO RANDOM BUTTON/LABEL .Text — ONLY IF NOTHING FOUND ABOVE
+        // Removed the greedy fallback so it won't pick up random Button/Label names
+
         if (extractedName && extractedName.trim()) {
           let safeName = extractedName.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim();
           if (safeName) {
