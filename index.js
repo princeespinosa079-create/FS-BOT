@@ -15,7 +15,6 @@ const {
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-
 // ============================================================
 // ENV
 // ============================================================
@@ -29,7 +28,6 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
   process.exit(1);
 }
-
 // ============================================================
 // STORAGE
 // ============================================================
@@ -54,13 +52,11 @@ if (!config || typeof config !== "object") config = { allowedChannelId: null };
 let library = readJSON(LIBRARY_FILE, { files: [] });
 if (Array.isArray(library)) library = { files: library };
 if (!Array.isArray(library.files)) library.files = [];
-
 // ============================================================
 // COOLDOWN TRACKER
 // ============================================================
-const renameCooldowns = new Map();
-const RENAME_COOLDOWN_SEC = 10;
-
+const rnCooldown = new Map();
+const RN_COOLDOWN_SEC = 10;
 // ============================================================
 // DISCORD CLIENT
 // ============================================================
@@ -79,7 +75,6 @@ let isReady = false;
 let lastReady = Date.now();
 let registering = false;
 let reconnecting = false;
-
 // ============================================================
 // BASIC HELPERS
 // ============================================================
@@ -103,6 +98,7 @@ function channelAllowed(target) {
   if (!config.allowedChannelId) return true;
   return target.channelId === config.allowedChannelId;
 }
+// ✅ UPDATED STATUS CHECK: .gg/TBBAUZu8cW
 async function hasPrinceStatus(userId) {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
@@ -135,7 +131,6 @@ function replyUser(message, payload) {
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
   return message.reply(body);
 }
-
 // ============================================================
 // FILE HELPERS
 // ============================================================
@@ -155,9 +150,13 @@ function ext(name) {
   const match = String(name || "").match(/\.([a-z0-9]+)$/i);
   return match ? match[1].toLowerCase() : "";
 }
+function isImage(name, contentType) {
+  return String(contentType || "").toLowerCase().startsWith("image/") ||
+    /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|avif|heic|heif)$/i.test(String(name || ""));
+}
 function isAllowedFileType(name, contentType) {
   const e = ext(name);
-  return (e === "txt" || e === "lua");
+  return (e === "txt" || e === "lua") && !isImage(name, contentType);
 }
 function idForFile() {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -214,7 +213,6 @@ function findFiles(query) {
     .sort((a, b) => b.score - a.score)
     .map(item => item.file);
 }
-
 // ============================================================
 // FETCH & ATTACHMENT HELPERS
 // ============================================================
@@ -251,7 +249,6 @@ function allAttachmentsOf(message) {
   }
   return result;
 }
-
 // ============================================================
 // SCAN CHANNEL — NO DUPES
 // ============================================================
@@ -260,21 +257,14 @@ async function scanChannel(channel) {
   if (runningScans.has(channel.id)) throw new Error("Already scanning.");
   runningScans.add(channel.id);
   try {
-    const existingBases = new Map();
-    const existingFullNames = new Map();
-    const existingSizes = new Map();
-    library.files.forEach(f => {
-      const base = normalizeBase(f.filename);
-      const full = normalize(f.filename);
-      existingBases.set(base, f);
-      existingFullNames.set(full, f);
-      existingSizes.set(String(f.size), f);
-    });
+    const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
+    const existingFullNames = new Set(library.files.map(f => normalize(f.filename)));
+    const existingSizes = new Set(library.files.map(f => Number(f.size || 0)));
     const found = [];
-    let before = null, messages = 0, replaced = 0;
+    let before = null, messages = 0, pages = 0, skippedDup = 0, replacedDup = 0;
     while (true) {
       const batch = await fetchMessages(channel, before);
-      if (!batch.size) break;
+      pages++; if (!batch.size) break;
       for (const msg of batch.values()) {
         messages++;
         for (const item of attachmentsOf(msg)) {
@@ -284,27 +274,45 @@ async function scanChannel(channel) {
           const fullName = normalize(filename);
           const fileSize = Number(a.size || 0);
           const url = a.url || a.proxyURL || a.proxy_url;
-          if (!url) continue;
-
-          let oldFile = existingBases.get(baseName) || existingFullNames.get(fullName) || existingSizes.get(String(fileSize));
-          if (oldFile) {
-            library.files = library.files.filter(f => f !== oldFile);
-            existingBases.delete(baseName);
-            existingFullNames.delete(fullName);
-            existingSizes.delete(String(fileSize));
-            replaced++;
+          if (!baseName || !url) continue;
+          const isDupBase = existingBases.has(baseName);
+          const isDupFull = existingFullNames.has(fullName);
+          const isDupSize = fileSize > 0 && existingSizes.has(fileSize);
+          if (isDupBase || isDupFull || isDupSize) {
+            const beforeCount = library.files.length;
+            library.files = library.files.filter(f => {
+              const fBase = normalizeBase(f.filename);
+              const fFull = normalize(f.filename);
+              const fSize = Number(f.size || 0);
+              if (isDupBase && fBase === baseName) return false;
+              if (isDupFull && fFull === fullName) return false;
+              if (isDupSize && fSize === fileSize) return false;
+              return true;
+            });
+            const removed = beforeCount - library.files.length;
+            if (removed > 0) replacedDup += removed;
+            existingBases.clear(); existingFullNames.clear(); existingSizes.clear();
+            for (const lf of library.files) {
+              existingBases.add(normalizeBase(lf.filename));
+              existingFullNames.add(normalize(lf.filename));
+              existingSizes.add(Number(lf.size || 0));
+            }
+            for (let i = found.length - 1; i >= 0; i--) {
+              const ff = found[i];
+              if (isDupBase && normalizeBase(ff.filename) === baseName) { found.splice(i, 1); continue; }
+              if (isDupFull && normalize(ff.filename) === fullName) { found.splice(i, 1); continue; }
+              if (isDupSize && Number(ff.size || 0) === fileSize) { found.splice(i, 1); continue; }
+            }
           }
-
-          const newFile = {
+          existingBases.add(baseName);
+          existingFullNames.add(fullName);
+          existingSizes.add(fileSize);
+          found.push({
             id: idForFile(), filename, url, size: fileSize,
             contentType: a.contentType || null, channelId: msg.channelId,
             messageId: msg.id, attachmentId: String(a.id), forwarded: item.forwarded,
             createdTimestamp: msg.createdTimestamp || Date.now(), scannedAt: Date.now()
-          };
-          found.push(newFile);
-          existingBases.set(baseName, newFile);
-          existingFullNames.set(fullName, newFile);
-          existingSizes.set(String(fileSize), newFile);
+          });
         }
       }
       const oldest = batch.last();
@@ -314,13 +322,12 @@ async function scanChannel(channel) {
     library.files.push(...found);
     library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
     saveLibrary();
-    console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | Replaced: ${replaced}`);
-    return { messages, found: found.length, replaced, total: library.files.length };
+    console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | ${replacedDup} replaced | ${skippedDup} skipped | ${pages} pages`);
+    return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: library.files.length };
   } finally { runningScans.delete(channel.id); }
 }
-
 // ============================================================
-// FORWARDALL
+// FORWARDALL — SUPER FAST
 // ============================================================
 async function downloadURL(url) {
   const res = await fetch(url);
@@ -353,7 +360,6 @@ async function forwardTxt(source, destination) {
   await Promise.allSettled(sendBatch);
   return { messages, sent };
 }
-
 // ============================================================
 // SLASH COMMANDS
 // ============================================================
@@ -414,7 +420,6 @@ const commands = [
     .setName("setchannel")
     .setDescription("Set allowed channel — Owner Only.")
 ].map(c => c.toJSON());
-
 // ============================================================
 // REGISTER COMMANDS
 // ============================================================
@@ -430,7 +435,6 @@ async function registerCommands() {
     console.log("✅ Commands registered.");
   } catch (e) { registering = false; console.error("❌ Register fail:", e.message); }
 }
-
 // ============================================================
 // READY
 // ============================================================
@@ -451,7 +455,6 @@ client.on("shardDisconnect", (e, id) => { isReady = false; console.warn(`🔴 Sh
 client.on("presenceUpdate", () => {});
 client.on("error", e => console.error("❌ Discord error:", e));
 client.on("warn", w => console.warn("⚠️ Discord warn:", w));
-
 // ============================================================
 // BUTTON HANDLER
 // ============================================================
@@ -489,7 +492,6 @@ client.on("interactionCreate", async interaction => {
   await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
   paginationMenus.set(uid, menu);
 });
-
 // ============================================================
 // WATCHDOG
 // ============================================================
@@ -501,9 +503,8 @@ setInterval(async () => {
   catch (e) { console.error("❌ Reconnect fail:", e.message); }
   finally { reconnecting = false; }
 }, 30000).unref?.();
-
 // ============================================================
-// SLASH COMMAND HANDLER
+// SLASH COMMAND HANDLER — PERMISSIONS
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -557,7 +558,7 @@ client.on("interactionCreate", async interaction => {
       if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ Already scanning." }); return; }
       await interaction.editReply({ content: `⚡ **Scan started** for <#${ch.id}>.` });
       scanChannel(ch).then(r => interaction.editReply({
-        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced}\`\n📚 Total: \`${r.total}\``
+        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📚 Total: \`${r.total}\``
       }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
@@ -582,14 +583,12 @@ client.on("interactionCreate", async interaction => {
     interaction.deferred || interaction.replied ? await interaction.editReply(msg).catch(() => {}) : await interaction.reply(msg).catch(() => {});
   }
 });
-
 // ============================================================
 // PREFIX COMMANDS
 // ============================================================
 client.on("messageCreate", async msg => {
   if (msg.author.bot || !msg.guild) return;
   const txt = (msg.content || "").trim();
-
   // .serverlist — OWNER ONLY
   if (/^\.serverlist$/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
@@ -603,7 +602,6 @@ client.on("messageCreate", async msg => {
     ] }).catch(() => {});
     return;
   }
-
   // .getinv — OWNER ONLY
   if (/^\.getinv(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
@@ -620,7 +618,6 @@ client.on("messageCreate", async msg => {
     } catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
     return;
   }
-
   // .leave — OWNER ONLY
   if (/^\.leave(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
@@ -647,66 +644,73 @@ client.on("messageCreate", async msg => {
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
-
-  // .scan — SHORTCUT
+  // .scan — PREFIX SHORTCUT FOR /scanchannel
   if (/^\.scan(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     if (!isOwnerOrAccess) { replyUser(msg, "❌ owner + access role only, dumbass.").catch(() => {}); return; }
-    const arg = txt.slice(5).trim();
-    let ch = msg.channel;
-    if (arg) {
-      const chId = arg.replace(/[<#>]/g, "").trim();
-      try { ch = await client.channels.fetch(chId); }
-      catch { replyUser(msg, "❌ invalid channel, dumbass.").catch(() => {}); return; }
+    const args = txt.split(/\s+/).slice(1);
+    let ch = null;
+    const mentionMatch = txt.match(/<#(\d+)>/);
+    if (mentionMatch) {
+      try { ch = await client.channels.fetch(mentionMatch[1]); } catch {}
     }
-    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a text channel, dumbass.").catch(() => {}); return; }
-    if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning bro.").catch(() => {}); return; }
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-    const embed = new EmbedBuilder().setColor(0x808080).setTitle("Scan Started").setDescription(`⏳ Scanning <#${ch.id}>...`).setFooter({ text: timeFooter });
-    const sent = await replyUser(msg, { embeds: [embed] }).catch(() => {});
+    if (!ch && args[0]) {
+      try { ch = await client.channels.fetch(args[0].trim()); } catch {}
+    }
+    if (!ch && !args[0]) {
+      ch = msg.channel;
+    }
+    if (!ch) { replyUser(msg, "❌ provide a channel: `.scan #channel` or `.scan channel_id`, dumbass.").catch(() => {}); return; }
+    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
+    if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning that channel, bro.").catch(() => {}); return; }
+    const startMsg = await replyUser(msg, `⚡ **Scan started** for <#${ch.id}>...`).catch(() => {});
     scanChannel(ch).then(r => {
-      const doneEmbed = new EmbedBuilder().setColor(0x808080).setTitle("✅ Scan Complete")
-        .setDescription(`📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced}\`\n📚 Total: \`${r.total}\``)
-        .setFooter({ text: timeFooter });
-      if (sent) sent.edit({ embeds: [doneEmbed] }).catch(() => {});
+      const content = `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📚 Total: \`${r.total}\``;
+      if (startMsg) startMsg.edit(content).catch(() => {});
+      else replyUser(msg, content).catch(() => {});
     }).catch(e => {
-      if (sent) sent.edit({ content: `❌ failed: \`${e.message.slice(0,1000)}\``, embeds: [] }).catch(() => {});
+      const content = `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\``;
+      if (startMsg) startMsg.edit(content).catch(() => {});
+      else replyUser(msg, content).catch(() => {});
     });
     return;
   }
-
-  // ✅ .rename / .rn — ALL patterns + MainGui + No Title fallback + 10s cooldown
+  // ✅ .rename / .rn — UPDATED
   if (/^\.(?:rename|rn)$/i.test(txt)) {
-    const userId = msg.author.id;
-    const isOwnerOrAccess = isOwner(userId) || await hasAccess(msg.member, userId);
+    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
 
-    // ⏱️ 10s COOLDOWN — Owner bypass
-    if (!isOwnerOrAccess && renameCooldowns.has(userId)) {
-      const timeLeft = Math.ceil((renameCooldowns.get(userId) - Date.now()) / 1000);
-      if (timeLeft > 0) {
-        replyUser(msg, `❌ cooldown: wait \`${timeLeft}s\` dumbass.`).catch(() => {});
-        return;
+    // ⏱️ 10s COOLDOWN for regular users only
+    if (!isOwnerOrAccess) {
+      const now = Date.now();
+      if (rnCooldown.has(msg.author.id)) {
+        const remaining = Math.ceil((rnCooldown.get(msg.author.id) + RN_COOLDOWN_SEC * 1000 - now) / 1000);
+        if (remaining > 0) {
+          replyUser(msg, `❌ wait ${remaining}s before using .rn again, bro.`).catch(() => {});
+          return;
+        }
       }
+      rnCooldown.set(msg.author.id, now);
     }
 
+    // 🔒 Regular users MUST reply to a file
     if (!isOwnerOrAccess && !isReplyingToFile(msg)) {
       replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {});
       return;
     }
-    if (!isOwnerOrAccess && !channelAllowed(msg)) { 
-      replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {}); 
-      return; 
-    }
-    if (!isOwnerOrAccess && !await hasPrinceStatus(userId)) {
-      replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your custom status dumbass.").catch(() => {});
+
+    // 🔒 Regular users MUST be in allowed channel
+    if (!isOwnerOrAccess && !channelAllowed(msg)) {
+      replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {});
       return;
     }
 
-    // ⏱️ SET COOLDOWN for regular users
-    if (!isOwnerOrAccess) {
-      renameCooldowns.set(userId, Date.now() + (RENAME_COOLDOWN_SEC * 1000));
+    // 🔒 UPDATED STATUS CHECK: .gg/TBBAUZu8cW
+    if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
+      replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your status first bro.").catch(() => {});
+      return;
     }
 
+    // Get file: from upload OR from replied message
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -719,107 +723,47 @@ client.on("messageCreate", async msg => {
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-    const workingEmbed = new EmbedBuilder().setColor(0x808080).setTitle("Renaming File").setDescription("⏳ Processing...").setFooter({ text: timeFooter });
-    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-    const delay = isOwnerOrAccess ? 0 : 3000;
-
-    setTimeout(async () => {
-      try {
-        const res = await fetch(file.url);
-        const text = await res.text();
-        const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
-
-        // ✅ ALL PATTERNS including MainGui
-        let extractedName = null;
-        // Pattern 1: MainGui.Text = "..."
-        let m = cleaned.match(/MainGui\.Text\s*=\s*["']([^"']+)["']/i);
-        if (m) extractedName = m[1].trim();
-        // Pattern 2: ANYTHING.Title.Text = "..."
-        if (!extractedName) { m = cleaned.match(/\b\w*Title\w*\.Text\s*=\s*["']([^"']+)["']/i); if (m) extractedName = m[1].trim(); }
-        // Pattern 3: ANYTHING.Text = "..."
-        if (!extractedName) { m = cleaned.match(/\b\w+\.Text\s*=\s*["']([^"']+)["']/); if (m) extractedName = m[1].trim(); }
-        // Pattern 4: { Text = "..." } table style
-        if (!extractedName) { m = cleaned.match(/Text\s*=\s*["']([^"']+)["']/); if (m) extractedName = m[1].trim(); }
-        // Pattern 5: --[[ NAME ]]
-        if (!extractedName) { m = cleaned.match(/--\[\[\s*([^\]]+?)\s*\]\]/); if (m) extractedName = m[1].trim(); }
-        // Pattern 6: -- NAME first line
-        if (!extractedName) { m = cleaned.match(/^\s*--\s*(.+)/m); if (m) extractedName = m[1].trim(); }
-        // ✅ FALLBACK
-        if (!extractedName || extractedName.trim() === "") extractedName = "No Title";
-
-        // Clean filename + Title Case
-        extractedName = extractedName.replace(/[<>:"/\\|?*]/g, "").trim();
-        extractedName = extractedName.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
-
-        const outName = `${extractedName}.txt`;
-        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outName });
-
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({ content: `<@${msg.author.id}> **Here is the file bro!**`, files: [fixedFile] }).catch(() => {});
-      } catch (e) { 
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ error: ${e.message}`).catch(() => {}); 
-      }
-    }, delay);
-    return;
-  }
-
-  // .wadedeobf
-  if (/^\.wadedeobf(?:\s|$)/i.test(txt)) {
-    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    if (!isOwnerOrAccess && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
-    if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
-      replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your custom status dumbass.").catch(() => {});
-      return;
-    }
-    let attachments = [...(msg.attachments?.values() || [])];
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        attachments = [...allAttachmentsOf(refMsg)];
-      } catch {}
-    }
-    if (!attachments.length) { replyUser(msg, "❌ upload or reply to a WeAreDevs .lua file bro.").catch(() => {}); return; }
-    
-    const file = attachments[0];
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
     const workingEmbed = new EmbedBuilder()
       .setColor(0x808080)
-      .setTitle("WeAreDevs Deobfuscator")
-      .setDescription("⏳ Decoding...")
+      .setTitle("Working in File")
+      .setDescription("⏳ Processing...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
     const delay = isOwnerOrAccess ? 0 : 3000;
     setTimeout(async () => {
       try {
         const res = await fetch(file.url);
-        let code = await res.text();
-        if (!code.includes("wearedevs.net/obfuscator")) {
-          if (sentMsg) await sentMsg.delete().catch(() => {});
-          replyUser(msg, "❌ This is NOT a WeAreDevs obfuscated file bro.").catch(() => {});
-          return;
+        const text = await res.text();
+        // Remove ALL -- comments
+        const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
+
+        // ✅ UPDATED: Title patterns include MainGui + all Title variants
+        let outputName = "no title.txt"; // DEFAULT IF NO NAME FOUND
+        // Try: Title variables + MainGui.Text
+        let nameMatch = cleaned.match(/(?:^|[.\s])(MainGui|[a-zA-Z_]\w*Title[a-zA-Z0-9_]*|Title[a-zA-Z0-9_]*)\.Text\s*=\s*"([^"]+)"/i);
+        if (!nameMatch) {
+          // Fallback: ANY .Text = "something"
+          nameMatch = cleaned.match(/\.Text\s*=\s*"([^"]+)"/);
+          if (nameMatch) nameMatch = [null, null, nameMatch[1]];
         }
-        code = code.replace(/\\(\d{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
-        const tableMatch = code.match(/local\s+J\s*=\s*\{([\s\S]+?)\}/);
-        let cleanCode = `-- ✅ WeAreDevs Deobfuscated\n-- All \\### sequences decoded\n\n`;
-        if (tableMatch) {
-          let tableStr = tableMatch[1];
-          const entries = tableStr.split(/,/).filter(e => e.trim()).map(e => {
-            let s = e.trim().replace(/^["']|["']$/g, "");
-            s = s.replace(/\\(\d{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
-            return s;
-          });
-          cleanCode += `-- 📋 Extracted String Table:\n`;
-          entries.forEach((s, i) => {
-            if (s.trim()) cleanCode += `-- [${i+1}]: "${s}"\n`;
-          });
-          cleanCode += `\n-- Decoded code:\n${code}`;
-        } else {
-          cleanCode += code;
+
+        const extractedName = nameMatch ? nameMatch[2] : null;
+        if (extractedName && extractedName.trim()) {
+          let safeName = extractedName.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim();
+          if (safeName) {
+            safeName = safeName.toLowerCase().replace(/(^|\s)([a-z])/g, (_, sp, c) => sp + c.toUpperCase());
+            safeName = safeName.replace(/\.[^.]+$/, "");
+            outputName = `${safeName}.txt`;
+          }
         }
-        const outFile = new AttachmentBuilder(Buffer.from(cleanCode), { name: "wadedeobf.deobf.lua" });
+
+        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
+
         if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({ content: `<@${msg.author.id}> **✅ WeAreDevs Deobfuscated!**`, files: [outFile] }).catch(() => {});
+        await msg.channel.send({
+          content: `<@${msg.author.id}> **Here is the file bro!**`,
+          files: [fixedFile]
+        }).catch(() => {});
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
@@ -827,7 +771,6 @@ client.on("messageCreate", async msg => {
     }, delay);
     return;
   }
-
   // .get
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const allowed = await hasAccess(msg.member, msg.author.id);
@@ -835,55 +778,59 @@ client.on("messageCreate", async msg => {
     const id = txt.split(/\s+/)[1];
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const file = getFile(id);
-    if (!file) { replyUser(msg, "❌ file not found, idiot.").catch(() => {}); return; }
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-    const workingEmbed = new EmbedBuilder().setColor(0x808080).setTitle("Getting File...").setDescription("⏳ Fetching...").setFooter({ text: timeFooter });
-    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-    const delay = allowed ? 0 : 3000;
-    setTimeout(async () => {
-      try {
-        let url = file.url;
-        if (!url || !url.startsWith("https://cdn.discord.com")) {
-          url = await getFreshUrl(file);
-        }
-        if (!url) {
-          if (sentMsg) await sentMsg.delete().catch(() => {});
-          replyUser(msg, "❌ cant get file url bro, resend it.").catch(() => {});
-          return;
-        }
-        const res = await fetch(url);
-        const buf = Buffer.from(await res.arrayBuffer());
-        const attach = new AttachmentBuilder(buf, { name: file.filename });
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({ content: `<@${msg.author.id}>`, files: [attach] }).catch(() => {});
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
-      }
-    }, delay);
+    if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
+    const freshUrl = await getFreshUrl(file);
+    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
     return;
   }
-
-  // .find
+  // .find — SEARCH ORDER FIXED
   if (/^\.find(?:\s|$)/i.test(txt)) {
     const allowed = await hasAccess(msg.member, msg.author.id);
     if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
     const query = txt.slice(5).trim();
-    if (!query) { replyUser(msg, "❌ what file name idiot?").catch(() => {}); return; }
+    if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
     const results = findFiles(query);
-    if (!results.length) { replyUser(msg, "❌ no file found idiot.").catch(() => {}); return; }
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-    const totalPages = Math.ceil(results.length / 8);
-    const start = 0;
-    const pageItems = results.slice(start, start + 8);
-    const embed = new EmbedBuilder()
-      .setColor(0x808080)
-      .setTitle("Finder Search Results")
+    if (!results.length) { replyUser(msg, "❌ no matching file name for that, dumbass.").catch(() => {}); return; }
+    const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
+    const pageItems = results.slice(0, perPage);
+    const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
+    const embed = new EmbedBuilder().setColor(0x808080).setTitle("Finder Search Results")
       .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
-      .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeFooter}` });
-    const row = totalPages > 1 ? new ActionRowBuilder().addComponents(
+      .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeNow}` });
+    const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
-    ) : null;
-    const replyPayload = { embeds: [embed], components: row ? [row] : [] };
-    const sentMsg = await replyUser(msg, replyPayload).catch(() => {}
+    );
+    const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+    if (sent) paginationMenus.set(msg.author.id, { results, page: 1, totalPages, messageId: sent.id, authorId: msg.author.id, createdAt: Date.now() });
+    return;
+  }
+});
+// ============================================================
+// EXPRESS SERVER
+// ============================================================
+const app = express();
+app.get("/", (req, res) => res.status(200).send(isReady ? "✅ ONLINE" : "⏳ Starting..."));
+app.get("/health", (req, res) => res.status(200).json({
+  process: "online", discord: isReady ? "ready" : "offline", bot: client.user?.tag, guild: GUILD_ID, files: library.files.length
+}));
+app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
+// ============================================================
+// KEEP-ALIVE
+// ============================================================
+const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
+if (keepAliveUrl) {
+  setInterval(() => {
+    try { require("https").get(`${keepAliveUrl}/health`).on("error", () => {}); } catch(e) {}
+  }, 180000);
+}
+// ============================================================
+// ERROR HANDLERS
+// ============================================================
+process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
+process.on("uncaughtException", e => console.error("❌ Exception:", e));
+// ============================================================
+// LOGIN
+// ============================================================
+console.log("🔑 Connecting...");
+client.login(TOKEN).catch(e => { console.error("❌ Login fail:", e); process.exit(1); });
