@@ -886,5 +886,4 @@ client.on("messageCreate", async msg => {
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
     ) : null;
     const replyPayload = { embeds: [embed], components: row ? [row] : [] };
-    const sentMsg = await replyUser(msg, replyPayload).catch(() => {});
-    if (sentMsg && totalPages > 1)
+    const sentMsg = await replyUser(msg, replyPayload).catch(() => {}
