@@ -693,13 +693,18 @@ client.on("messageCreate", async msg => {
         const text = await res.text();
         // Remove ALL -- comments, CODE STAYS 100%
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
-        // Auto-extract name from: TitleMain.Text = "something"
-        let outputName = "prince is the best.lua";
-        const nameMatch = cleaned.match(/TitleMain\.Text\s*=\s*"([^"]+)"/);
-        if (nameMatch && nameMatch[1] && nameMatch[1].trim()) {
-          const extracted = nameMatch[1].trim();
-          // Sanitize: remove invalid filename chars
-          const safeName = extracted.replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim();
+        // Auto-extract name from any *.Text = "something" (prioritize *Title* variables)
+        let outputName = file.name || "renamed.lua";
+        // First try: variable name contains "title" (e.g., TitleMain.Text, MainTitle.Text, TitleLabel.Text)
+        let nameMatch = cleaned.match(/(?:^|[.\s])([a-zA-Z_]\w*Title[a-zA-Z0-9_]*|Title[a-zA-Z0-9_]*)\.Text\s*=\s*"([^"]+)"/i);
+        if (!nameMatch) {
+          // Fallback: ANY .Text = "something" (e.g., Label.Text, Gui.Text, etc.)
+          nameMatch = cleaned.match(/\.Text\s*=\s*"([^"]+)"/);
+          if (nameMatch) nameMatch = [null, null, nameMatch[1]]; // normalize: [full, var, name]
+        }
+        const extractedName = nameMatch ? nameMatch[2] : null;
+        if (extractedName && extractedName.trim()) {
+          const safeName = extractedName.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim();
           if (safeName) outputName = safeName.endsWith(".lua") ? safeName : `${safeName}.lua`;
         }
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
