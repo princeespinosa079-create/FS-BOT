@@ -15,6 +15,7 @@ const {
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const child_process = require("child_process");
 // ============================================================
 // ENV
 // ============================================================
@@ -735,16 +736,21 @@ client.on("messageCreate", async msg => {
         const text = await res.text();
         // Remove ALL -- comments, CODE STAYS 100%
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
-        // Auto-extract name from any *.Text = "something" (prioritize *Title* variables)
+        // Auto-extract name from multiple patterns
         let outputName = (file.name || "renamed.txt").replace(/\.[^.]+$/, "") + ".txt";
-        // First try: variable name contains "title" (e.g., TitleMain.Text, MainTitle.Text, TitleLabel.Text)
-        let nameMatch = cleaned.match(/(?:^|[.\s])([a-zA-Z_]\w*Title[a-zA-Z0-9_]*|Title[a-zA-Z0-9_]*)\.Text\s*=\s*"([^"]+)"/i);
-        if (!nameMatch) {
-          // Fallback: ANY .Text = "something" (e.g., Label.Text, Gui.Text, etc.)
-          nameMatch = cleaned.match(/\.Text\s*=\s*"([^"]+)"/);
-          if (nameMatch) nameMatch = [null, null, nameMatch[1]]; // normalize: [full, var, name]
-        }
-        const extractedName = nameMatch ? nameMatch[2] : null;
+        let extractedName = null;
+        // Priority 1: variable with "title" + .Text (e.g., TitleMain.Text = "...")
+        let m = cleaned.match(/(?:^|[.\s])([a-zA-Z_]\w*Title[a-zA-Z0-9_]*|Title[a-zA-Z0-9_]*)\.Text\s*=\s*"([^"]+)"/i);
+        if (m) extractedName = m[2];
+        // Priority 2: ANY .Text = "..." (e.g., Label.Text = "...")
+        if (!extractedName) { m = cleaned.match(/\.Text\s*=\s*"([^"]+)"/); if (m) extractedName = m[1]; }
+        // Priority 3: standalone Text = "..." inside table props (e.g., { Text = "NAME" })
+        if (!extractedName) { m = cleaned.match(/[\{,]\s*Text\s*=\s*"([^"]+)"/); if (m) extractedName = m[1]; }
+        // Priority 4: multi-line comment at top --[[ NAME ... ]]
+        if (!extractedName) { m = text.match(/--\[\[[\s\r\n]*([^\]\r\n]+?)(?:\s+-|\s*\]\])/); if (m) extractedName = m[1]; }
+        // Priority 5: first single-line comment -- NAME
+        if (!extractedName) { m = text.match(/^\s*--\s*([^\r\n]+?)(?:\s+-|$)/m); if (m) extractedName = m[1]; }
+        
         if (extractedName && extractedName.trim()) {
           let safeName = extractedName.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim();
           if (safeName) {
@@ -760,6 +766,100 @@ client.on("messageCreate", async msg => {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
           content: `<@${msg.author.id}> **Here is the file bro!**`,
+          files: [fixedFile]
+        }).catch(() => {});
+      } catch (e) { 
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, `❌ error: ${e.message}`).catch(() => {}); 
+      }
+    }, delay);
+    return;
+  }
+  // .promdeobf — PROMETHEUS DEOBFUSCATOR
+  if (/^\.promdeobf$/i.test(txt)) {
+    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+    // 🔒 Regular users MUST reply to a file
+    if (!isOwnerOrAccess && !isReplyingToFile(msg)) {
+      replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {});
+      return;
+    }
+    // 🔒 Regular users MUST be in allowed channel
+    if (!isOwnerOrAccess && !channelAllowed(msg)) { 
+      replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {}); 
+      return; 
+    }
+    // 🔒 Regular users MUST have "prince is the best" in custom status
+    if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
+      replyUser(msg, "❌ you need to put `prince is the best` in your status.").catch(() => {});
+      return;
+    }
+    // Get file: from upload OR from replied message
+    let attachments = [...(msg.attachments?.values() || [])];
+    if (!attachments.length && msg.reference?.messageId) {
+      try {
+        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
+        attachments = [...allAttachmentsOf(refMsg)];
+      } catch {}
+    }
+    if (!attachments.length) { replyUser(msg, "❌ bruh, upload file or reply to a file so i can deobfuscate it.").catch(() => {}); return; }
+    const file = attachments[0];
+    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+    const workingEmbed = new EmbedBuilder()
+      .setColor(0x808080)
+      .setTitle("Prometheus Deobfuscator")
+      .setDescription("⏳ Deobfuscating...")
+      .setFooter({ text: timeFooter });
+    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
+    const delay = isOwnerOrAccess ? 0 : 3000;
+    setTimeout(async () => {
+      try {
+        const res = await fetch(file.url);
+        const source = await res.text();
+        // Write input to temp file
+        const tmpDir = path.join(DATA_DIR, "tmp");
+        if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+        const jobId = Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+        const inFile = path.join(tmpDir, `${jobId}_in.lua`);
+        const outFile = path.join(tmpDir, `${jobId}_out.lua`);
+        fs.writeFileSync(inFile, source, "latin1");
+        // Locate deobfuscator
+        const deobfDir = path.join(__dirname, "promdeobf");
+        const deobfBin = path.join(deobfDir, "bin", "pdeobf.js");
+        if (!fs.existsSync(deobfBin)) {
+          if (sentMsg) await sentMsg.delete().catch(() => {});
+          replyUser(msg, "❌ promdeobf folder not found. Upload the `promdeobf/` folder alongside index.js on Render.").catch(() => {});
+          return;
+        }
+        // Run deobfuscator
+        try {
+          child_process.execFileSync("node", [deobfBin, inFile, "-o", outFile, "--force"], {
+            cwd: deobfDir,
+            timeout: 60000,
+            maxBuffer: 10 * 1024 * 1024
+          });
+        } catch (execErr) {
+          // Try without --force if detection fails
+          try {
+            child_process.execFileSync("node", [deobfBin, inFile, "-o", outFile], {
+              cwd: deobfDir,
+              timeout: 60000,
+              maxBuffer: 10 * 1024 * 1024
+            });
+          } catch (e2) {
+            throw new Error("deobfuscation failed — file may not be Prometheus-obfuscated or is corrupted");
+          }
+        }
+        if (!fs.existsSync(outFile)) throw new Error("no output produced");
+        const deobfCode = fs.readFileSync(outFile, "latin1");
+        // Output filename: original name + .deobf.lua
+        const baseName = (file.name || "deobfuscated").replace(/\.[^.]+$/, "");
+        const outputFileName = `${baseName}.deobf.lua`;
+        const fixedFile = new AttachmentBuilder(Buffer.from(deobfCode, "latin1"), { name: outputFileName });
+        // Cleanup temp files
+        try { fs.unlinkSync(inFile); fs.unlinkSync(outFile); } catch {}
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        await msg.channel.send({
+          content: `<@${msg.author.id}> **Deobfuscated!**`,
           files: [fixedFile]
         }).catch(() => {});
       } catch (e) { 
