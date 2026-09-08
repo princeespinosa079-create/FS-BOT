@@ -257,6 +257,7 @@ async function scanChannel(channel) {
   runningScans.add(channel.id);
   try {
     const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
+    const existingFullNames = new Set(library.files.map(f => normalize(f.filename)));
     const existingSizes = new Set(library.files.map(f => Number(f.size || 0)));
     const found = [];
     let before = null, messages = 0, pages = 0, skippedDup = 0, replacedDup = 0;
@@ -269,38 +270,45 @@ async function scanChannel(channel) {
           const a = item.attachment;
           const filename = a.name || "unknown_file";
           const baseName = normalizeBase(filename);
+          const fullName = normalize(filename);
           const fileSize = Number(a.size || 0);
           const url = a.url || a.proxyURL || a.proxy_url;
           if (!baseName || !url) continue;
-          // Check duplicate: same base name OR same size
-          const isDupName = existingBases.has(baseName);
+          // Check duplicate: same base name OR same full name OR same size
+          const isDupBase = existingBases.has(baseName);
+          const isDupFull = existingFullNames.has(fullName);
           const isDupSize = fileSize > 0 && existingSizes.has(fileSize);
-          if (isDupName || isDupSize) {
+          if (isDupBase || isDupFull || isDupSize) {
             // Delete old matching files from library
             const beforeCount = library.files.length;
             library.files = library.files.filter(f => {
               const fBase = normalizeBase(f.filename);
+              const fFull = normalize(f.filename);
               const fSize = Number(f.size || 0);
-              if (isDupName && fBase === baseName) return false;
+              if (isDupBase && fBase === baseName) return false;
+              if (isDupFull && fFull === fullName) return false;
               if (isDupSize && fSize === fileSize) return false;
               return true;
             });
             const removed = beforeCount - library.files.length;
             if (removed > 0) replacedDup += removed;
             // Rebuild sets after removal
-            existingBases.clear(); existingSizes.clear();
+            existingBases.clear(); existingFullNames.clear(); existingSizes.clear();
             for (const lf of library.files) {
               existingBases.add(normalizeBase(lf.filename));
+              existingFullNames.add(normalize(lf.filename));
               existingSizes.add(Number(lf.size || 0));
             }
             // Also remove from found batch if already added there
             for (let i = found.length - 1; i >= 0; i--) {
               const ff = found[i];
-              if (isDupName && normalizeBase(ff.filename) === baseName) { found.splice(i, 1); continue; }
+              if (isDupBase && normalizeBase(ff.filename) === baseName) { found.splice(i, 1); continue; }
+              if (isDupFull && normalize(ff.filename) === fullName) { found.splice(i, 1); continue; }
               if (isDupSize && Number(ff.size || 0) === fileSize) { found.splice(i, 1); continue; }
             }
           }
           existingBases.add(baseName);
+          existingFullNames.add(fullName);
           existingSizes.add(fileSize);
           found.push({
             id: idForFile(), filename, url, size: fileSize,
@@ -642,6 +650,40 @@ client.on("messageCreate", async msg => {
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
+  // .scan — PREFIX SHORTCUT FOR /scanchannel
+  if (/^\.scan(?:\s|$)/i.test(txt)) {
+    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+    if (!isOwnerOrAccess) { replyUser(msg, "❌ owner + access role only, dumbass.").catch(() => {}); return; }
+    const args = txt.split(/\s+/).slice(1);
+    let ch = null;
+    // Try channel mention first
+    const mentionMatch = txt.match(/<#(\d+)>/);
+    if (mentionMatch) {
+      try { ch = await client.channels.fetch(mentionMatch[1]); } catch {}
+    }
+    // Try raw ID from args
+    if (!ch && args[0]) {
+      try { ch = await client.channels.fetch(args[0].trim()); } catch {}
+    }
+    // Try current channel if no arg
+    if (!ch && !args[0]) {
+      ch = msg.channel;
+    }
+    if (!ch) { replyUser(msg, "❌ provide a channel: `.scan #channel` or `.scan channel_id`, dumbass.").catch(() => {}); return; }
+    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
+    if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning that channel, bro.").catch(() => {}); return; }
+    const startMsg = await replyUser(msg, `⚡ **Scan started** for <#${ch.id}>...`).catch(() => {});
+    scanChannel(ch).then(r => {
+      const content = `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📚 Total: \`${r.total}\``;
+      if (startMsg) startMsg.edit(content).catch(() => {});
+      else replyUser(msg, content).catch(() => {});
+    }).catch(e => {
+      const content = `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\``;
+      if (startMsg) startMsg.edit(content).catch(() => {});
+      else replyUser(msg, content).catch(() => {});
+    });
+    return;
+  }
   // ✅ .rename / .rn — REMOVE COMMENTS + AUTO-RENAME FROM TitleMain.Text
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
@@ -694,7 +736,7 @@ client.on("messageCreate", async msg => {
         // Remove ALL -- comments, CODE STAYS 100%
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
         // Auto-extract name from any *.Text = "something" (prioritize *Title* variables)
-        let outputName = file.name || "renamed.lua";
+        let outputName = (file.name || "renamed.txt").replace(/\.[^.]+$/, "") + ".txt";
         // First try: variable name contains "title" (e.g., TitleMain.Text, MainTitle.Text, TitleLabel.Text)
         let nameMatch = cleaned.match(/(?:^|[.\s])([a-zA-Z_]\w*Title[a-zA-Z0-9_]*|Title[a-zA-Z0-9_]*)\.Text\s*=\s*"([^"]+)"/i);
         if (!nameMatch) {
@@ -704,8 +746,13 @@ client.on("messageCreate", async msg => {
         }
         const extractedName = nameMatch ? nameMatch[2] : null;
         if (extractedName && extractedName.trim()) {
-          const safeName = extractedName.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim();
-          if (safeName) outputName = safeName.endsWith(".lua") ? safeName : `${safeName}.lua`;
+          let safeName = extractedName.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim();
+          if (safeName) {
+            // Title Case: capitalize first letter of each word
+            safeName = safeName.toLowerCase().replace(/(^|\s)([a-z])/g, (_, sp, c) => sp + c.toUpperCase());
+            safeName = safeName.replace(/\.[^.]+$/, ""); // strip any existing extension
+            outputName = `${safeName}.txt`;
+          }
         }
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
         
