@@ -15,6 +15,8 @@ const {
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const fetch = require("node-fetch");
+const AdmZip = require("adm-zip");
 // ============================================================
 // ENV
 // ============================================================
@@ -57,7 +59,7 @@ if (!Array.isArray(library.files)) library.files = [];
 const rnCooldown = new Map();
 const RN_COOLDOWN_SEC = 10;
 // ============================================================
-// DISCORD CLIENT — DMs ENABLED
+// DISCORD CLIENT
 // ============================================================
 const client = new Client({
   intents: [
@@ -149,6 +151,47 @@ function getTimeFooter() {
   return `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
 }
 // ============================================================
+// URL PARSER FOR ALL SUPPORTED SITES
+// ============================================================
+async function resolveAnyUrl(url) {
+  try {
+    let targetUrl = url;
+    
+    // Pastebin
+    if (url.includes("pastebin.com") && !url.includes("/raw")) {
+      const id = url.split("/").pop().split("#")[0];
+      targetUrl = `https://pastebin.com/raw/${id}`;
+    }
+    // Pastefy
+    else if (url.includes("pastefy.app") && !url.includes("/raw")) {
+      targetUrl = url.replace("/", "/raw/").replace("//raw/", "/raw/");
+    }
+    // GitHub gist / blob
+    else if (url.includes("github.com")) {
+      targetUrl = url
+        .replace(/github\.com\/([^\/]+)\/([^\/]+)\/blob\//, "raw.githubusercontent.com/$1/$2/refs/heads/")
+        .replace(/github\.com\/([^\/]+)\/([^\/]+)\/gist\//, "gist.githubusercontent.com/$1/$2/raw/");
+    }
+    // Luarmor
+    else if (url.includes("luarmor.net")) {
+      if (url.includes("/d/")) targetUrl = url.replace("/d/", "/raw/");
+    }
+    // Rubis
+    else if (url.includes("rubis.gg") || url.includes("rubis.xyz")) {
+      if (!url.includes("/raw")) targetUrl = url + "/raw";
+    }
+    // Vercel / Lovable / all others — follow redirect
+    const res = await fetch(targetUrl, {
+      redirect: "follow",
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } catch (e) {
+    throw e;
+  }
+}
+// ============================================================
 // FILE HELPERS
 // ============================================================
 function normalize(name) {
@@ -173,7 +216,8 @@ function isImage(name, contentType) {
 }
 function isAllowedFileType(name, contentType) {
   const e = ext(name);
-  return (e === "txt" || e === "lua") && !isImage(name, contentType);
+  return (e === "txt" || e === "lua") && !isImage(name, contentType
+);
 }
 function idForFile() {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -376,7 +420,7 @@ async function forwardTxt(source, destination) {
   return { messages, sent };
 }
 // ============================================================
-// SLASH COMMANDS — GLOBAL & OWNER ONLY
+// SLASH COMMANDS — RESTORED /say & /forwardall
 // ============================================================
 const commands = [
   new SlashCommandBuilder()
@@ -390,6 +434,46 @@ const commands = [
     .addStringOption(o => o
       .setName("channel_id")
       .setDescription("Or paste raw channel ID.")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("say")
+    .setDescription("Send message — OWNER ONLY.")
+    .addStringOption(o => o
+      .setName("text")
+      .setDescription("Message content.")
+      .setRequired(true))
+    .addStringOption(o => o
+      .setName("type")
+      .setDescription("Message style.")
+      .setRequired(true)
+      .addChoices(
+        { name: "With Embed", value: "good" },
+        { name: "No Embed", value: "none" }
+      ))
+    .addStringOption(o => o
+      .setName("title")
+      .setDescription("Optional embed title.")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("forwardall")
+    .setDescription("Forward files — OWNER ONLY.")
+    .addChannelOption(o => o
+      .setName("source")
+      .setDescription("Source channel.")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(false))
+    .addStringOption(o => o
+      .setName("source_id")
+      .setDescription("Or raw source ID.")
+      .setRequired(false))
+    .addChannelOption(o => o
+      .setName("destination")
+      .setDescription("Destination channel.")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(false))
+    .addStringOption(o => o
+      .setName("destination_id")
+      .setDescription("Or raw destination ID.")
       .setRequired(false)),
   new SlashCommandBuilder()
     .setName("setchannel")
@@ -416,7 +500,8 @@ client.once("ready", () => {
   console.log(`✅ ONLINE: ${client.user.tag}`);
   console.log(`🏠 Guilds: ${client.guilds.cache.size}`);
   console.log(`📚 Files: ${library.files.length}`);
-  console.log(`💬 DM Support: ENABLED for Access Role (.get/.find/.rn/.fetch)`);
+  console.log(`🔑 Access Role ID: ${ACCESS_ROLE_ID}`);
+  console.log(`💬 Supported sites: GitHub, Luarmor, Rubis, Pastefy, Pastebin, Vercel, Lovable`);
   console.log("⚡ Bot ready!");
   console.log("==========================================");
   registerCommands().catch(e => console.error("❌ Register:", e.message));
@@ -490,7 +575,25 @@ client.on("interactionCreate", async interaction => {
     }
     if (interaction.commandName === "setchannel") {
       config.allowedChannelId = interaction.channelId; saveConfig();
-      await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Regular users can ONLY use .get/.find/.rn/.fetch HERE.\n🔑 Access Role: works everywhere + DMs + INSTANT.` }); return;
+      await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Regular users can ONLY use .get/.find/.rn/.fetch/.extract HERE.\n🔑 Access Role: works everywhere + DMs + INSTANT.` }); return;
+    }
+    if (interaction.commandName === "say") {
+      const text = interaction.options.getString("text");
+      const type = interaction.options.getString("type") || "good";
+      const title = interaction.options.getString("title");
+      const timeFooter = getTimeFooter();
+      await interaction.deleteReply().catch(() => {});
+      if (type === "none") {
+        await interaction.channel.send({ content: text });
+      } else {
+        const embed = new EmbedBuilder()
+          .setColor(0x808080)
+          .setDescription(text)
+          .setFooter({ text: timeFooter });
+        if (title) embed.setTitle(title);
+        await interaction.channel.send({ embeds: [embed] });
+      }
+      return;
     }
     if (interaction.commandName === "scanchannel") {
       let ch = interaction.options.getChannel("channel");
@@ -508,6 +611,21 @@ client.on("interactionCreate", async interaction => {
       }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
+    if (interaction.commandName === "forwardall") {
+      let src = interaction.options.getChannel("source");
+      let dst = interaction.options.getChannel("destination");
+      const srcId = interaction.options.getString("source_id");
+      const dstId = interaction.options.getString("destination_id");
+      if (!src && srcId) try { src = await client.channels.fetch(srcId.trim()); } catch { await interaction.editReply({ content: "❌ Invalid source ID." }); return; }
+      if (!dst && dstId) try { dst = await client.channels.fetch(dstId.trim()); } catch { await interaction.editReply({ content: "❌ Invalid destination ID." }); return; }
+      if (!src || !dst) { await interaction.editReply({ content: "❌ Provide source + destination." }); return; }
+      if (!src?.isTextBased?.() || !dst?.isTextBased?.()) { await interaction.editReply({ content: "❌ Invalid channel type." }); return; }
+      await interaction.editReply({ content: `⚡ Forwarding from <#${src.id}> → <#${dst.id}>...` });
+      forwardTxt(src, dst).then(r => interaction.editReply({
+        content: `✅ **Forward started!**\n📂 <#${src.id}> → <#${dst.id}>\n📄 Found: \`${r.sent}\` files sending...`
+      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ Failed: \`${e.message.slice(0,1500)}\`` }).catch(() => {}));
+      return;
+    }
   } catch (e) {
     console.error("❌ Interaction:", e);
     const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
@@ -515,7 +633,7 @@ client.on("interactionCreate", async interaction => {
   }
 });
 // ============================================================
-// PREFIX COMMANDS — DMs SUPPORTED
+// PREFIX COMMANDS
 // ============================================================
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
@@ -599,7 +717,7 @@ client.on("messageCreate", async msg => {
   }
 
   // ==========================================================
-  // .get — ACCESS ROLE: ALL + DM + INSTANT | REGULAR: ALLOWED CHANNEL ONLY
+  // .get
   // ==========================================================
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
@@ -617,7 +735,7 @@ client.on("messageCreate", async msg => {
   }
 
   // ==========================================================
-  // .find — ACCESS ROLE: ALL + DM + INSTANT | REGULAR: ALLOWED CHANNEL ONLY
+  // .find
   // ==========================================================
   if (/^\.find(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
@@ -645,7 +763,7 @@ client.on("messageCreate", async msg => {
   }
 
   // ==========================================================
-  // .rn/.rename — ACCESS ROLE: ALL + DM + INSTANT | REGULAR: ALLOWED CHANNEL + 10s CD + RULES
+  // .rn/.rename
   // ==========================================================
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
@@ -726,7 +844,7 @@ client.on("messageCreate", async msg => {
   }
 
   // ==========================================================
-  // .fetch — ALL URL SUPPORTED + NEW EMBED FORMAT
+  // .fetch — SUPPORTS ALL SITES
   // ==========================================================
   if (/^\.fetch(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
@@ -741,7 +859,6 @@ client.on("messageCreate", async msg => {
     if (!url) { replyUser(msg, "❌ usage: `.fetch <url>`, bro.").catch(() => {}); return; }
 
     const timeNow = getTimeFooter();
-    // ✅ NEW EMBED: Title = Fetching URL... | Description = URL ONLY
     const fetchingEmbed = new EmbedBuilder()
       .setColor(0x0066FF)
       .setTitle("Fetching URL...")
@@ -751,13 +868,7 @@ client.on("messageCreate", async msg => {
     const statusMsg = await replyUser(msg, { embeds: [fetchingEmbed] }).catch(() => {});
 
     try {
-      // ✅ SUPPORTS ALL URLS — NO RESTRICTIONS
-      const res = await fetch(url, {
-        redirect: "follow",
-        headers: { "User-Agent": "Mozilla/5.0" }
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const content = await res.text();
+      const content = await resolveAnyUrl(url);
       
       const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/g;
       const foundUrls = content.match(urlRegex) || [];
@@ -793,23 +904,17 @@ client.on("messageCreate", async msg => {
     }
     return;
   }
-});
-// ============================================================
-// EXPRESS SERVER
-// ============================================================
-const app = express();
-app.get("/", (req, res) => res.status(200).send(isReady ? "✅ ONLINE" : "⏳ Starting..."));
-app.get("/health", (req, res) => res.status(200).json({
-  process: "online", discord: isReady ? "ready" : "offline", bot: client.user?.tag, servers: client.guilds.cache.size, files: library.files.length
-}));
-app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
-const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
-if (keepAliveUrl) {
-  setInterval(() => {
-    try { require("https").get(`${keepAliveUrl}/health`).on("error", () => {}); } catch(e) {}
-  }, 180000);
-}
-process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
-process.on("uncaughtException", e => console.error("❌ Exception:", e));
-console.log("🔑 Connecting...");
-client.login(TOKEN).catch(e => { console.error("❌ Login fail:", e); process.exit(1); });
+
+  // ==========================================================
+  // .extract — ZIP EXTRACT COMMAND 🆕
+  // ==========================================================
+  if (/^\.extract(?:\s|$)/i.test(txt)) {
+    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+    
+    if (!isOwnerOrAccess) {
+      if (isDM) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
+      if (!channelAllowed(msg)) { replyUser(msg, "❌ use in allowed channel only, dumbass.").catch(() => {}); return; }
+    }
+
+    let zipAttachments = [...(msg.attachments?.values() || [])];
+    if (!zipAttachments.length && msg
