@@ -57,7 +57,7 @@ if (!Array.isArray(library.files)) library.files = [];
 const rnCooldown = new Map();
 const RN_COOLDOWN_SEC = 10;
 // ============================================================
-// DISCORD CLIENT
+// DISCORD CLIENT — DMs ENABLED
 // ============================================================
 const client = new Client({
   intents: [
@@ -65,7 +65,9 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildPresences,
-    GatewayIntentBits.DirectMessages
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.DirectMessageReactions,
+    GatewayIntentBits.DirectMessageTyping
   ],
   partials: ['CHANNEL']
 });
@@ -104,16 +106,8 @@ async function hasAccess(member, userId) {
 }
 function channelAllowed(target) {
   if (!config.allowedChannelId) return true;
-  if (!target.guild) return true; // DMs allowed for access role check separately
+  if (!target.guild) return true;
   return target.channelId === config.allowedChannelId;
-}
-function isAllowedContext(msg) {
-  // Owner & Access Role: works everywhere + DMs
-  if (isOwner(msg.author.id)) return true;
-  // Check if DM
-  if (!msg.guild) return false; // Regular users NO DMs
-  // Regular users: ONLY allowed channel
-  return msg.channelId === config.allowedChannelId;
 }
 async function hasPrinceStatus(userId) {
   try {
@@ -398,46 +392,6 @@ const commands = [
       .setDescription("Or paste raw channel ID.")
       .setRequired(false)),
   new SlashCommandBuilder()
-    .setName("say")
-    .setDescription("Send message — OWNER ONLY.")
-    .addStringOption(o => o
-      .setName("text")
-      .setDescription("Message content.")
-      .setRequired(true))
-    .addStringOption(o => o
-      .setName("type")
-      .setDescription("Message style.")
-      .setRequired(true)
-      .addChoices(
-        { name: "With Embed", value: "good" },
-        { name: "No Embed", value: "none" }
-      ))
-    .addStringOption(o => o
-      .setName("title")
-      .setDescription("Optional embed title.")
-      .setRequired(false)),
-  new SlashCommandBuilder()
-    .setName("forwardall")
-    .setDescription("Forward files — OWNER ONLY.")
-    .addChannelOption(o => o
-      .setName("source")
-      .setDescription("Source channel.")
-      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-      .setRequired(false))
-    .addStringOption(o => o
-      .setName("source_id")
-      .setDescription("Or raw source ID.")
-      .setRequired(false))
-    .addChannelOption(o => o
-      .setName("destination")
-      .setDescription("Destination channel.")
-      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-      .setRequired(false))
-    .addStringOption(o => o
-      .setName("destination_id")
-      .setDescription("Or raw destination ID.")
-      .setRequired(false)),
-  new SlashCommandBuilder()
     .setName("setchannel")
     .setDescription("Set allowed channel — OWNER ONLY.")
 ].map(c => c.toJSON());
@@ -462,8 +416,7 @@ client.once("ready", () => {
   console.log(`✅ ONLINE: ${client.user.tag}`);
   console.log(`🏠 Guilds: ${client.guilds.cache.size}`);
   console.log(`📚 Files: ${library.files.length}`);
-  console.log(`🔑 Access Role ID: ${ACCESS_ROLE_ID}`);
-  console.log(`💬 DM Support: Access Role Only (.get/.find/.rn/.fetch)`);
+  console.log(`💬 DM Support: ENABLED for Access Role (.get/.find/.rn/.fetch)`);
   console.log("⚡ Bot ready!");
   console.log("==========================================");
   registerCommands().catch(e => console.error("❌ Register:", e.message));
@@ -532,31 +485,12 @@ client.on("interactionCreate", async interaction => {
   try {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const isOwnerUser = isOwner(interaction.user.id);
-    // ALL SLASH COMMANDS = OWNER ONLY
     if (!isOwnerUser) {
       await interaction.editReply({ content: "❌ OWNER ONLY, dumbass." }); return;
     }
     if (interaction.commandName === "setchannel") {
       config.allowedChannelId = interaction.channelId; saveConfig();
       await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Regular users can ONLY use .get/.find/.rn/.fetch HERE.\n🔑 Access Role: works everywhere + DMs + INSTANT.` }); return;
-    }
-    if (interaction.commandName === "say") {
-      const text = interaction.options.getString("text");
-      const type = interaction.options.getString("type") || "good";
-      const title = interaction.options.getString("title");
-      const timeFooter = getTimeFooter();
-      await interaction.deleteReply().catch(() => {});
-      if (type === "none") {
-        await interaction.channel.send({ content: text });
-      } else {
-        const embed = new EmbedBuilder()
-          .setColor(0x808080)
-          .setDescription(text)
-          .setFooter({ text: timeFooter });
-        if (title) embed.setTitle(title);
-        await interaction.channel.send({ embeds: [embed] });
-      }
-      return;
     }
     if (interaction.commandName === "scanchannel") {
       let ch = interaction.options.getChannel("channel");
@@ -574,21 +508,6 @@ client.on("interactionCreate", async interaction => {
       }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
-    if (interaction.commandName === "forwardall") {
-      let src = interaction.options.getChannel("source");
-      let dst = interaction.options.getChannel("destination");
-      const srcId = interaction.options.getString("source_id");
-      const dstId = interaction.options.getString("destination_id");
-      if (!src && srcId) try { src = await client.channels.fetch(srcId.trim()); } catch { await interaction.editReply({ content: "❌ Invalid source ID." }); return; }
-      if (!dst && dstId) try { dst = await client.channels.fetch(dstId.trim()); } catch { await interaction.editReply({ content: "❌ Invalid destination ID." }); return; }
-      if (!src || !dst) { await interaction.editReply({ content: "❌ Provide source + destination." }); return; }
-      if (!src?.isTextBased?.() || !dst?.isTextBased?.()) { await interaction.editReply({ content: "❌ Invalid channel type." }); return; }
-      await interaction.editReply({ content: `⚡ Forwarding from <#${src.id}> → <#${dst.id}>...` });
-      forwardTxt(src, dst).then(r => interaction.editReply({
-        content: `✅ **Forward started!**\n📂 <#${src.id}> → <#${dst.id}>\n📄 Found: \`${r.sent}\` files sending...`
-      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ Failed: \`${e.message.slice(0,1500)}\`` }).catch(() => {}));
-      return;
-    }
   } catch (e) {
     console.error("❌ Interaction:", e);
     const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
@@ -596,11 +515,12 @@ client.on("interactionCreate", async interaction => {
   }
 });
 // ============================================================
-// PREFIX COMMANDS
+// PREFIX COMMANDS — DMs SUPPORTED
 // ============================================================
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
   const txt = (msg.content || "").trim();
+  const isDM = !msg.guild;
 
   // ==========================================================
   // OWNER ONLY COMMANDS
@@ -683,9 +603,8 @@ client.on("messageCreate", async msg => {
   // ==========================================================
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    // Regular user check
     if (!isOwnerOrAccess) {
-      if (!msg.guild) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
+      if (isDM) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
       if (!channelAllowed(msg)) { replyUser(msg, "❌ use in allowed channel only, dumbass.").catch(() => {}); return; }
     }
     const id = txt.split(/\s+/)[1];
@@ -703,7 +622,7 @@ client.on("messageCreate", async msg => {
   if (/^\.find(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     if (!isOwnerOrAccess) {
-      if (!msg.guild) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
+      if (isDM) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
       if (!channelAllowed(msg)) { replyUser(msg, "❌ use in allowed channel only, dumbass.").catch(() => {}); return; }
     }
     const query = txt.slice(5).trim();
@@ -731,22 +650,16 @@ client.on("messageCreate", async msg => {
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     
-    // Regular user restrictions
     if (!isOwnerOrAccess) {
-      // No DMs for regular users
-      if (!msg.guild) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
-      // Must be in allowed channel
+      if (isDM) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
       if (!channelAllowed(msg)) { replyUser(msg, "❌ use in allowed channel only, dumbass.").catch(() => {}); return; }
-      // Cooldown
       const now = Date.now();
       if (rnCooldown.has(msg.author.id)) {
         const remaining = Math.ceil((rnCooldown.get(msg.author.id) + RN_COOLDOWN_SEC * 1000 - now) / 1000);
         if (remaining > 0) { replyUser(msg, `❌ wait ${remaining}s before using .rn again, bro.`).catch(() => {}); return; }
       }
       rnCooldown.set(msg.author.id, now);
-      // Must reply to file
       if (!isReplyingToFile(msg)) { replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {}); return; }
-      // Must have status
       if (!await hasPrinceStatus(msg.author.id)) { replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your status first bro.").catch(() => {}); return; }
     }
 
@@ -770,7 +683,6 @@ client.on("messageCreate", async msg => {
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
     
-    // Delay: Owner/Access = 0 | Regular = 10s
     const delay = isOwnerOrAccess ? 0 : 10000;
 
     setTimeout(async () => {
@@ -814,13 +726,13 @@ client.on("messageCreate", async msg => {
   }
 
   // ==========================================================
-  // .fetch — ACCESS ROLE: ALL + DM + INSTANT | REGULAR: ALLOWED CHANNEL ONLY
+  // .fetch — ALL URL SUPPORTED + NEW EMBED FORMAT
   // ==========================================================
   if (/^\.fetch(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     
     if (!isOwnerOrAccess) {
-      if (!msg.guild) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
+      if (isDM) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
       if (!channelAllowed(msg)) { replyUser(msg, "❌ use in allowed channel only, dumbass.").catch(() => {}); return; }
     }
 
@@ -829,16 +741,21 @@ client.on("messageCreate", async msg => {
     if (!url) { replyUser(msg, "❌ usage: `.fetch <url>`, bro.").catch(() => {}); return; }
 
     const timeNow = getTimeFooter();
+    // ✅ NEW EMBED: Title = Fetching URL... | Description = URL ONLY
     const fetchingEmbed = new EmbedBuilder()
       .setColor(0x0066FF)
-      .setTitle("Fetching URL")
-      .setDescription(url + "\n...")
+      .setTitle("Fetching URL...")
+      .setDescription(url)
       .setFooter({ text: timeNow });
     
     const statusMsg = await replyUser(msg, { embeds: [fetchingEmbed] }).catch(() => {});
 
     try {
-      const res = await fetch(url);
+      // ✅ SUPPORTS ALL URLS — NO RESTRICTIONS
+      const res = await fetch(url, {
+        redirect: "follow",
+        headers: { "User-Agent": "Mozilla/5.0" }
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const content = await res.text();
       
