@@ -20,12 +20,11 @@ const path = require("path");
 // ============================================================
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
 const OWNER_ID = "1302080645987569694";
 const ACCESS_ROLE_ID = "1539883004950876160";
 const PORT = Number(process.env.PORT) || 10000;
-if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
+if (!TOKEN || !CLIENT_ID) {
+  console.error("❌ Missing DISCORD_TOKEN or CLIENT_ID.");
   process.exit(1);
 }
 // ============================================================
@@ -65,8 +64,10 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildPresences
-  ]
+    GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.DirectMessages
+  ],
+  partials: ['CHANNEL']
 });
 const runningScans = new Set();
 const paginationMenus = new Map();
@@ -87,26 +88,46 @@ async function hasAccess(member, userId) {
   const uid = userId || member?.id;
   if (uid === OWNER_ID) return true;
   try {
-    const mainGuild = await client.guilds.fetch(GUILD_ID);
-    const mainMember = await mainGuild.members.fetch(uid);
-    return mainMember?.roles?.cache?.has(ACCESS_ROLE_ID);
-  } catch {
+    if (!member) {
+      for (const guild of client.guilds.cache.values()) {
+        try {
+          const m = await guild.members.fetch(uid);
+          if (m?.roles?.cache?.has(ACCESS_ROLE_ID)) return true;
+        } catch {}
+      }
+      return false;
+    }
     return member?.roles?.cache?.has(ACCESS_ROLE_ID) || false;
+  } catch {
+    return false;
   }
 }
 function channelAllowed(target) {
   if (!config.allowedChannelId) return true;
+  if (!target.guild) return true; // DMs allowed for access role check separately
   return target.channelId === config.allowedChannelId;
+}
+function isAllowedContext(msg) {
+  // Owner & Access Role: works everywhere + DMs
+  if (isOwner(msg.author.id)) return true;
+  // Check if DM
+  if (!msg.guild) return false; // Regular users NO DMs
+  // Regular users: ONLY allowed channel
+  return msg.channelId === config.allowedChannelId;
 }
 async function hasPrinceStatus(userId) {
   try {
-    const mainGuild = await client.guilds.fetch(GUILD_ID);
-    const member = await mainGuild.members.fetch(userId, { force: true });
-    if (!member?.presence?.activities) return false;
-    for (const act of member.presence.activities) {
-      if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
-        return true;
-      }
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        const member = await guild.members.fetch(userId, { force: true });
+        if (member?.presence?.activities) {
+          for (const act of member.presence.activities) {
+            if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
+              return true;
+            }
+          }
+        }
+      } catch {}
     }
     return false;
   } catch {
@@ -120,8 +141,8 @@ function isReplyingToFile(msg) {
   const repliedMsg = channel.messages.cache.get(ref);
   if (!repliedMsg) return false;
   if (repliedMsg.attachments.size > 0) return true;
-  for (const snap of repliedMsg.messageSnapshots.values()) {
-    if (snap.attachments.size > 0) return true;
+  for (const snap of repliedMsg.messageSnapshots?.values?.() || []) {
+    if (snap.attachments?.size > 0) return true;
   }
   return false;
 }
@@ -129,6 +150,9 @@ function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
   return message.reply(body);
+}
+function getTimeFooter() {
+  return `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
 }
 // ============================================================
 // FILE HELPERS
@@ -322,7 +346,7 @@ async function scanChannel(channel) {
     library.files.push(...found);
     library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
     saveLibrary();
-    console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | ${replacedDup} replaced | ${skippedDup} skipped | ${pages} pages`);
+    console.log(`📂 Scan done | ${channel.name} | ${messages} msgs | ${found.length} new | ${replacedDup} replaced | ${skippedDup} skipped`);
     return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: library.files.length };
   } finally { runningScans.delete(channel.id); }
 }
@@ -358,12 +382,12 @@ async function forwardTxt(source, destination) {
   return { messages, sent };
 }
 // ============================================================
-// SLASH COMMANDS
+// SLASH COMMANDS — GLOBAL & OWNER ONLY
 // ============================================================
 const commands = [
   new SlashCommandBuilder()
     .setName("scanchannel")
-    .setDescription("Scan channel — Owner + Access Role Only.")
+    .setDescription("Scan channel — OWNER ONLY.")
     .addChannelOption(o => o
       .setName("channel")
       .setDescription("Channel to scan.")
@@ -375,7 +399,7 @@ const commands = [
       .setRequired(false)),
   new SlashCommandBuilder()
     .setName("say")
-    .setDescription("Send message — Owner + Access Role Only.")
+    .setDescription("Send message — OWNER ONLY.")
     .addStringOption(o => o
       .setName("text")
       .setDescription("Message content.")
@@ -394,7 +418,7 @@ const commands = [
       .setRequired(false)),
   new SlashCommandBuilder()
     .setName("forwardall")
-    .setDescription("Forward files — Owner Only.")
+    .setDescription("Forward files — OWNER ONLY.")
     .addChannelOption(o => o
       .setName("source")
       .setDescription("Source channel.")
@@ -415,7 +439,7 @@ const commands = [
       .setRequired(false)),
   new SlashCommandBuilder()
     .setName("setchannel")
-    .setDescription("Set allowed channel — Owner Only.")
+    .setDescription("Set allowed channel — OWNER ONLY.")
 ].map(c => c.toJSON());
 async function registerCommands() {
   if (registering) return;
@@ -424,9 +448,9 @@ async function registerCommands() {
   try {
     console.log("🧹 Clearing old commands...");
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
-    console.log("🧩 Registering guild commands...");
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log("✅ Commands registered.");
+    console.log("🌐 Registering GLOBAL commands (OWNER ONLY)...");
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log("✅ Global commands registered!");
   } catch (e) { registering = false; console.error("❌ Register fail:", e.message); }
 }
 // ============================================================
@@ -438,6 +462,8 @@ client.once("ready", () => {
   console.log(`✅ ONLINE: ${client.user.tag}`);
   console.log(`🏠 Guilds: ${client.guilds.cache.size}`);
   console.log(`📚 Files: ${library.files.length}`);
+  console.log(`🔑 Access Role ID: ${ACCESS_ROLE_ID}`);
+  console.log(`💬 DM Support: Access Role Only (.get/.find/.rn/.fetch)`);
   console.log("⚡ Bot ready!");
   console.log("==========================================");
   registerCommands().catch(e => console.error("❌ Register:", e.message));
@@ -473,12 +499,12 @@ client.on("interactionCreate", async interaction => {
   if (menu.page > menu.totalPages) menu.page = menu.totalPages;
   const start = (menu.page - 1) * 8;
   const pageItems = menu.results.slice(start, start + 8);
-  const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
+  const timeNow = getTimeFooter();
   const embed = new EmbedBuilder()
     .setColor(0x808080)
     .setTitle("Finder Search Results")
     .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
-    .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
+    .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ ${timeNow}` });
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
     new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
@@ -498,33 +524,27 @@ setInterval(async () => {
   finally { reconnecting = false; }
 }, 30000).unref?.();
 // ============================================================
-// SLASH COMMAND HANDLER
+// SLASH COMMAND HANDLER — OWNER ONLY
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
-  console.log(`📨 /${interaction.commandName}`);
+  console.log(`📨 /${interaction.commandName} in ${interaction.guild?.name || "DM"}`);
   try {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const isOwnerUser = isOwner(interaction.user.id);
-    const isAccessUser = await hasAccess(interaction.member, interaction.user.id);
-    if (interaction.commandName === "forwardall" && !isOwnerUser) {
-      await interaction.editReply({ content: "❌ owner only, dumbass." }); return;
-    }
-    if (interaction.commandName === "setchannel" && !isOwnerUser) {
-      await interaction.editReply({ content: "❌ owner only, dumbass." }); return;
-    }
-    if (!isOwnerUser && !isAccessUser) {
-      await interaction.editReply({ content: "❌ No permission." }); return;
+    // ALL SLASH COMMANDS = OWNER ONLY
+    if (!isOwnerUser) {
+      await interaction.editReply({ content: "❌ OWNER ONLY, dumbass." }); return;
     }
     if (interaction.commandName === "setchannel") {
       config.allowedChannelId = interaction.channelId; saveConfig();
-      await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Owner + Access Role can use commands everywhere.` }); return;
+      await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Regular users can ONLY use .get/.find/.rn/.fetch HERE.\n🔑 Access Role: works everywhere + DMs + INSTANT.` }); return;
     }
     if (interaction.commandName === "say") {
       const text = interaction.options.getString("text");
       const type = interaction.options.getString("type") || "good";
       const title = interaction.options.getString("title");
-      const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+      const timeFooter = getTimeFooter();
       await interaction.deleteReply().catch(() => {});
       if (type === "none") {
         await interaction.channel.send({ content: text });
@@ -545,9 +565,7 @@ client.on("interactionCreate", async interaction => {
         try { ch = await client.channels.fetch(chId.trim()); }
         catch { await interaction.editReply({ content: "❌ Invalid channel ID." }); return; }
       }
-      if (!ch) {
-        await interaction.editReply({ content: "❌ Provide a channel mention or channel_id." }); return;
-      }
+      if (!ch) ch = interaction.channel;
       if (!ch?.isTextBased?.()) { await interaction.editReply({ content: "❌ Not a readable text channel." }); return; }
       if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ Already scanning." }); return; }
       await interaction.editReply({ content: `⚡ **Scan started** for <#${ch.id}>.` });
@@ -567,7 +585,7 @@ client.on("interactionCreate", async interaction => {
       if (!src?.isTextBased?.() || !dst?.isTextBased?.()) { await interaction.editReply({ content: "❌ Invalid channel type." }); return; }
       await interaction.editReply({ content: `⚡ Forwarding from <#${src.id}> → <#${dst.id}>...` });
       forwardTxt(src, dst).then(r => interaction.editReply({
-        content: `✅ **Forward started!**\n📂 <#${src.id}> → <#${dst.id}>\n📄 Found: \`${r.sent}\` files sending...\n⚡ Forward runs in background, use other commands freely.`
+        content: `✅ **Forward started!**\n📂 <#${src.id}> → <#${dst.id}>\n📄 Found: \`${r.sent}\` files sending...`
       }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ Failed: \`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
@@ -581,22 +599,26 @@ client.on("interactionCreate", async interaction => {
 // PREFIX COMMANDS
 // ============================================================
 client.on("messageCreate", async msg => {
-  if (msg.author.bot || !msg.guild) return;
+  if (msg.author.bot) return;
   const txt = (msg.content || "").trim();
+
+  // ==========================================================
+  // OWNER ONLY COMMANDS
+  // ==========================================================
   if (/^\.serverlist$/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ OWNER ONLY, dumbass.").catch(() => {}); return; }
     const guilds = client.guilds.cache.sort((a, b) => b.memberCount - a.memberCount);
     let lines = []; let num = 1;
     for (const g of guilds.values()) {
       lines.push(`**${num}.** \`${g.name}\`\n   🆔 \`${g.id}\`\n   👥 Members: \`${g.memberCount}\``); num++;
     }
     replyUser(msg, { embeds: [new EmbedBuilder().setColor(0x808080).setTitle(`🌐 Server List — ${guilds.size} total`).setDescription(lines.join("\n\n"))
-      .setFooter({ text: `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}` })
+      .setFooter({ text: getTimeFooter() })
     ] }).catch(() => {});
     return;
   }
   if (/^\.getinv(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ OWNER ONLY, dumbass.").catch(() => {}); return; }
     const serverId = txt.split(/\s+/)[1];
     if (!serverId) { replyUser(msg, "❌ usage: `.getinv <server id>`, dumbass.").catch(() => {}); return; }
     try {
@@ -611,10 +633,9 @@ client.on("messageCreate", async msg => {
     return;
   }
   if (/^\.leave(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ OWNER ONLY, dumbass.").catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1); const target = args[0];
     if (!target) {
-      if (msg.guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
       try { await msg.guild.leave(); replyUser(msg, `✅ left **${msg.guild.name}**, bro.`).catch(() => {}); }
       catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
       return;
@@ -622,31 +643,24 @@ client.on("messageCreate", async msg => {
     if (target.toLowerCase() === "all") {
       let left = 0, failed = 0;
       for (const g of client.guilds.cache.values()) {
-        if (g.id === GUILD_ID) continue;
         try { await g.leave(); left++; } catch { failed++; }
       }
-      replyUser(msg, `✅ left **${left}** servers${failed ? ` (${failed} failed)` : ""}. Main server safe.`).catch(() => {});
+      replyUser(msg, `✅ left **${left}** servers${failed ? ` (${failed} failed)` : ""}.`).catch(() => {});
       return;
     }
     try {
       const guild = await client.guilds.fetch(target.trim());
-      if (guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
       await guild.leave(); replyUser(msg, `✅ left **${guild.name}**, bro.`).catch(() => {});
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
   if (/^\.scan(?:\s|$)/i.test(txt)) {
-    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    if (!isOwnerOrAccess) { replyUser(msg, "❌ owner + access role only, dumbass.").catch(() => {}); return; }
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ OWNER ONLY, dumbass.").catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1);
     let ch = null;
     const mentionMatch = txt.match(/<#(\d+)>/);
-    if (mentionMatch) {
-      try { ch = await client.channels.fetch(mentionMatch[1]); } catch {}
-    }
-    if (!ch && args[0]) {
-      try { ch = await client.channels.fetch(args[0].trim()); } catch {}
-    }
+    if (mentionMatch) { try { ch = await client.channels.fetch(mentionMatch[1]); } catch {} }
+    if (!ch && args[0]) { try { ch = await client.channels.fetch(args[0].trim()); } catch {} }
     if (!ch && !args[0]) { ch = msg.channel; }
     if (!ch) { replyUser(msg, "❌ provide a channel: `.scan #channel` or `.scan channel_id`, dumbass.").catch(() => {}); return; }
     if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
@@ -663,32 +677,79 @@ client.on("messageCreate", async msg => {
     });
     return;
   }
-  // ✅ .rename / .rn — FINAL VERSION
-  if (/^\.(?:rename|rn)$/i.test(txt)) {
+
+  // ==========================================================
+  // .get — ACCESS ROLE: ALL + DM + INSTANT | REGULAR: ALLOWED CHANNEL ONLY
+  // ==========================================================
+  if (/^\.get(?:\s|$)/i.test(txt)) {
+    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+    // Regular user check
+    if (!isOwnerOrAccess) {
+      if (!msg.guild) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
+      if (!channelAllowed(msg)) { replyUser(msg, "❌ use in allowed channel only, dumbass.").catch(() => {}); return; }
+    }
+    const id = txt.split(/\s+/)[1];
+    if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
+    const file = getFile(id);
+    if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
+    const freshUrl = await getFreshUrl(file);
+    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
+    return;
+  }
+
+  // ==========================================================
+  // .find — ACCESS ROLE: ALL + DM + INSTANT | REGULAR: ALLOWED CHANNEL ONLY
+  // ==========================================================
+  if (/^\.find(?:\s|$)/i.test(txt)) {
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     if (!isOwnerOrAccess) {
+      if (!msg.guild) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
+      if (!channelAllowed(msg)) { replyUser(msg, "❌ use in allowed channel only, dumbass.").catch(() => {}); return; }
+    }
+    const query = txt.slice(5).trim();
+    if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
+    const results = findFiles(query);
+    if (!results.length) { replyUser(msg, "❌ no matching file name for that, dumbass.").catch(() => {}); return; }
+    const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
+    const pageItems = results.slice(0, perPage);
+    const timeNow = getTimeFooter();
+    const embed = new EmbedBuilder().setColor(0x808080).setTitle("Finder Search Results")
+      .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
+      .setFooter({ text: `Pages 1/${totalPages} │ ${timeNow}` });
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
+      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
+    );
+    const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+    if (sent) paginationMenus.set(msg.author.id, { results, page: 1, totalPages, messageId: sent.id, authorId: msg.author.id, createdAt: Date.now() });
+    return;
+  }
+
+  // ==========================================================
+  // .rn/.rename — ACCESS ROLE: ALL + DM + INSTANT | REGULAR: ALLOWED CHANNEL + 10s CD + RULES
+  // ==========================================================
+  if (/^\.(?:rename|rn)$/i.test(txt)) {
+    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+    
+    // Regular user restrictions
+    if (!isOwnerOrAccess) {
+      // No DMs for regular users
+      if (!msg.guild) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
+      // Must be in allowed channel
+      if (!channelAllowed(msg)) { replyUser(msg, "❌ use in allowed channel only, dumbass.").catch(() => {}); return; }
+      // Cooldown
       const now = Date.now();
       if (rnCooldown.has(msg.author.id)) {
         const remaining = Math.ceil((rnCooldown.get(msg.author.id) + RN_COOLDOWN_SEC * 1000 - now) / 1000);
-        if (remaining > 0) {
-          replyUser(msg, `❌ wait ${remaining}s before using .rn again, bro.`).catch(() => {});
-          return;
-        }
+        if (remaining > 0) { replyUser(msg, `❌ wait ${remaining}s before using .rn again, bro.`).catch(() => {}); return; }
       }
       rnCooldown.set(msg.author.id, now);
+      // Must reply to file
+      if (!isReplyingToFile(msg)) { replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {}); return; }
+      // Must have status
+      if (!await hasPrinceStatus(msg.author.id)) { replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your status first bro.").catch(() => {}); return; }
     }
-    if (!isOwnerOrAccess && !isReplyingToFile(msg)) {
-      replyUser(msg, "❌ reply to a file or forwarded file, dumbass.").catch(() => {});
-      return;
-    }
-    if (!isOwnerOrAccess && !channelAllowed(msg)) {
-      replyUser(msg, "❌ use this command in the allowed channel only, dumbass.").catch(() => {});
-      return;
-    }
-    if (!isOwnerOrAccess && !await hasPrinceStatus(msg.author.id)) {
-      replyUser(msg, "❌ put `.gg/TBBAUZu8cW` in your status first bro.").catch(() => {});
-      return;
-    }
+
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -701,7 +762,7 @@ client.on("messageCreate", async msg => {
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
     
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+    const timeFooter = getTimeFooter();
     const workingEmbed = new EmbedBuilder()
       .setColor(0x808080)
       .setTitle("Renaming your File")
@@ -709,6 +770,7 @@ client.on("messageCreate", async msg => {
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
     
+    // Delay: Owner/Access = 0 | Regular = 10s
     const delay = isOwnerOrAccess ? 0 : 10000;
 
     setTimeout(async () => {
@@ -724,7 +786,6 @@ client.on("messageCreate", async msg => {
         }
         outputName += ".lua";
 
-        // ✅ Preview: ONLY FIRST 5 lines + "..."
         const allLines = cleaned.split("\n");
         const previewLines = allLines.slice(0, 5);
         let previewText = previewLines.join("\n");
@@ -739,7 +800,6 @@ client.on("messageCreate", async msg => {
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         
-        // ✅ ALL IN ONE: mention + file + embed
         await msg.channel.send({
           content: `<@${msg.author.id}> **Here is the file bro!**`,
           files: [fixedFile],
@@ -752,36 +812,68 @@ client.on("messageCreate", async msg => {
     }, delay);
     return;
   }
-  if (/^\.get(?:\s|$)/i.test(txt)) {
-    const allowed = await hasAccess(msg.member, msg.author.id);
-    if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
-    const id = txt.split(/\s+/)[1];
-    if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
-    const file = getFile(id);
-    if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
-    const freshUrl = await getFreshUrl(file);
-    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
-    return;
-  }
-  if (/^\.find(?:\s|$)/i.test(txt)) {
-    const allowed = await hasAccess(msg.member, msg.author.id);
-    if (!allowed && !channelAllowed(msg)) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
-    const query = txt.slice(5).trim();
-    if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
-    const results = findFiles(query);
-    if (!results.length) { replyUser(msg, "❌ no matching file name for that, dumbass.").catch(() => {}); return; }
-    const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
-    const pageItems = results.slice(0, perPage);
-    const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
-    const embed = new EmbedBuilder().setColor(0x808080).setTitle("Finder Search Results")
-      .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
-      .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeNow}` });
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
-      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
-    );
-    const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
-    if (sent) paginationMenus.set(msg.author.id, { results, page: 1, totalPages, messageId: sent.id, authorId: msg.author.id, createdAt: Date.now() });
+
+  // ==========================================================
+  // .fetch — ACCESS ROLE: ALL + DM + INSTANT | REGULAR: ALLOWED CHANNEL ONLY
+  // ==========================================================
+  if (/^\.fetch(?:\s|$)/i.test(txt)) {
+    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+    
+    if (!isOwnerOrAccess) {
+      if (!msg.guild) { replyUser(msg, "❌ DMs for ACCESS ROLE ONLY, dumbass.").catch(() => {}); return; }
+      if (!channelAllowed(msg)) { replyUser(msg, "❌ use in allowed channel only, dumbass.").catch(() => {}); return; }
+    }
+
+    const args = txt.split(/\s+/);
+    const url = args[1];
+    if (!url) { replyUser(msg, "❌ usage: `.fetch <url>`, bro.").catch(() => {}); return; }
+
+    const timeNow = getTimeFooter();
+    const fetchingEmbed = new EmbedBuilder()
+      .setColor(0x0066FF)
+      .setTitle("Fetching URL")
+      .setDescription(url + "\n...")
+      .setFooter({ text: timeNow });
+    
+    const statusMsg = await replyUser(msg, { embeds: [fetchingEmbed] }).catch(() => {});
+
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const content = await res.text();
+      
+      const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/g;
+      const foundUrls = content.match(urlRegex) || [];
+      const uniqueUrls = [...new Set(foundUrls)].slice(0, 2);
+      
+      let descText;
+      if (uniqueUrls.length === 0) {
+        descText = "No URL Founded.";
+      } else {
+        descText = "URL Found:\n";
+        uniqueUrls.forEach(u => { descText += `- ${u}\n`; });
+      }
+
+      const resultEmbed = new EmbedBuilder()
+        .setColor(0x808080)
+        .setDescription(descText.trim())
+        .setFooter({ text: `${timeNow} │ Prince Bot` });
+
+      const fileName = "fetched_content.txt";
+      const contentFile = new AttachmentBuilder(Buffer.from(content), { name: fileName });
+
+      if (statusMsg) await statusMsg.delete().catch(() => {});
+
+      await msg.channel.send({
+        content: `<@${msg.author.id}> **Here you go bro!**`,
+        files: [contentFile],
+        embeds: [resultEmbed]
+      }).catch(() => {});
+
+    } catch (e) {
+      if (statusMsg) await statusMsg.delete().catch(() => {});
+      replyUser(msg, `❌ failed to fetch: ${e.message}`).catch(() => {});
+    }
     return;
   }
 });
@@ -791,7 +883,7 @@ client.on("messageCreate", async msg => {
 const app = express();
 app.get("/", (req, res) => res.status(200).send(isReady ? "✅ ONLINE" : "⏳ Starting..."));
 app.get("/health", (req, res) => res.status(200).json({
-  process: "online", discord: isReady ? "ready" : "offline", bot: client.user?.tag, guild: GUILD_ID, files: library.files.length
+  process: "online", discord: isReady ? "ready" : "offline", bot: client.user?.tag, servers: client.guilds.cache.size, files: library.files.length
 }));
 app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
 const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
