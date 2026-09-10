@@ -72,6 +72,7 @@ const client = new Client({
 });
 const runningScans = new Set();
 const paginationMenus = new Map();
+const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false;
 let lastReady = Date.now();
@@ -181,6 +182,10 @@ function isZipFile(name, contentType) {
   const e = ext(name);
   return e === "zip" || String(contentType || "").toLowerCase().includes("zip");
 }
+function isHtmlFile(name, contentType) {
+  const e = ext(name);
+  return e === "html" || e === "htm" || String(contentType || "").toLowerCase().includes("html");
+}
 function idForFile() {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let id;
@@ -288,6 +293,18 @@ function zipAttachmentsOf(message) {
   }
   return result;
 }
+function extractAttachmentsOf(message) {
+  const result = [];
+  for (const a of message.attachments?.values?.() || []) {
+    if (isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType)) result.push(a);
+  }
+  for (const s of message.messageSnapshots?.values?.() || []) {
+    for (const a of s.attachments?.values?.() || []) {
+      if (isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType)) result.push(a);
+    }
+  }
+  return result;
+}
 async function scanChannel(channel) {
   if (!channel?.isTextBased?.() || !channel.messages) throw new Error("Not a readable text channel.");
   if (runningScans.has(channel.id)) throw new Error("Already scanning.");
@@ -358,8 +375,9 @@ async function scanChannel(channel) {
     library.files.push(...found);
     library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
     saveLibrary();
+    const channelTotal = library.files.filter(f => f.channelId === channel.id).length;
     console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | ${replacedDup} replaced | ${skippedDup} skipped | ${pages} pages`);
-    return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: library.files.length };
+    return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: library.files.length, channelTotal };
   } finally { runningScans.delete(channel.id); }
 }
 async function downloadURL(url) {
@@ -396,53 +414,22 @@ async function forwardTxt(source, destination) {
 // ============================================================
 // ZIP EXTRACT HELPERS
 // ============================================================
-async function extractZipAndSend(zipBuffer, originalName, msg) {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zip-extract-"));
-  try {
-    const zip = new AdmZip(zipBuffer);
-    const entries = zip.getEntries();
-    const extractedFiles = [];
-
-    for (const entry of entries) {
-      if (entry.isDirectory) continue;
-      const entryName = path.basename(entry.entryName);
-      if (!entryName || entryName.startsWith(".")) continue;
-      try {
-        const data = entry.getData();
-        extractedFiles.push({ name: entryName, data });
-      } catch (e) {
-        console.warn(`⚠️ Could not extract ${entry.entryName}:`, e.message);
-      }
+function extractFilesFromZip(zipBuffer) {
+  const zip = new AdmZip(zipBuffer);
+  const entries = zip.getEntries();
+  const extractedFiles = [];
+  for (const entry of entries) {
+    if (entry.isDirectory) continue;
+    const entryName = path.basename(entry.entryName);
+    if (!entryName || entryName.startsWith(".")) continue;
+    try {
+      const data = entry.getData();
+      extractedFiles.push({ name: entryName, data });
+    } catch (e) {
+      console.warn(`⚠️ Could not extract ${entry.entryName}:`, e.message);
     }
-
-    if (!extractedFiles.length) {
-      replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
-      return;
-    }
-
-    // Send files in batches of 10 (Discord limit)
-    const maxPerBatch = 10;
-    let sentCount = 0;
-    for (let i = 0; i < extractedFiles.length; i += maxPerBatch) {
-      const batch = extractedFiles.slice(i, i + maxPerBatch);
-      const attachments = batch.map(f => new AttachmentBuilder(f.data, { name: f.name }));
-      if (i === 0) {
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Extracted \`${originalName}\` — ${extractedFiles.length} file(s):**`,
-          files: attachments
-        }).catch(() => {});
-      } else {
-        await msg.channel.send({ files: attachments }).catch(() => {});
-      }
-      sentCount += batch.length;
-    }
-    return sentCount;
-  } catch (e) {
-    replyUser(msg, `❌ failed to extract zip: \`${e.message}\``).catch(() => {});
-    return 0;
-  } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
+  return extractedFiles;
 }
 // ============================================================
 // SLASH COMMANDS
@@ -542,6 +529,40 @@ client.on("warn", w => console.warn("⚠️ Discord warn:", w));
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
   const uid = interaction.user.id;
+
+  // ─── EXTRACT CAROUSEL BUTTONS ───
+  if (interaction.customId === "extract_prev" || interaction.customId === "extract_next") {
+    if (!extractCarouselMenus.has(uid)) {
+      return interaction.reply({ content: "❌ this is expired, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const menu = extractCarouselMenus.get(uid);
+    if (Date.now() - menu.createdAt > EXPIRY_MS) {
+      extractCarouselMenus.delete(uid);
+      return interaction.reply({ content: "❌ this is expired, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (interaction.message.id !== menu.messageId) return;
+    if (interaction.user.id !== menu.authorId) {
+      return interaction.reply({ content: "❌ this is not yours, idiot.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (interaction.customId === "extract_prev") menu.index--;
+    if (interaction.customId === "extract_next") menu.index++;
+    if (menu.index < 0) menu.index = 0;
+    if (menu.index >= menu.files.length) menu.index = menu.files.length - 1;
+
+    const currentFile = menu.files[menu.index];
+    const attachment = new AttachmentBuilder(currentFile.data, { name: currentFile.name });
+    const label = menu.sourceType === "zip" ? "zip!" : "html!";
+    const content = `<@${menu.authorId}> **Here is all file in your ${label}** — \`${currentFile.name}\`\n**${menu.index + 1}/${menu.files.length}**`;
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("extract_prev").setLabel("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index <= 0),
+      new ButtonBuilder().setCustomId("extract_next").setLabel("➡️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index >= menu.files.length - 1)
+    );
+    await interaction.update({ content, files: [attachment], components: [row] }).catch(() => {});
+    extractCarouselMenus.set(uid, menu);
+    return;
+  }
+
+  // ─── FINDER PAGINATION BUTTONS ───
   if (!paginationMenus.has(uid)) {
     return interaction.reply({ content: "❌ this is expired, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
   }
@@ -636,7 +657,7 @@ client.on("interactionCreate", async interaction => {
       if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ Already scanning." }); return; }
       await interaction.editReply({ content: `⚡ **Scan started** for <#${ch.id}>.` });
       scanChannel(ch).then(r => interaction.editReply({
-        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📚 Total: \`${r.total}\``
+        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📁 Channel Files: \`${r.channelTotal}\`\n📚 Library Total: \`${r.total}\``
       }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
@@ -730,29 +751,30 @@ client.on("messageCreate", async msg => {
   // Others → allowed channel + prince status
   // ─────────────────────────────────────────────
 
-  // .extract — extract zip file
-  if (/^\.extract(?:\s|$)/i.test(txt)) {
+  // .extract / .et — extract zip or html file with carousel pagination
+  if (/^\.(?:extract|et)(?:\s|$)/i.test(txt)) {
     const perm = await checkDotCommandPermission(msg, true);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
 
-    let attachments = zipAttachmentsOf(msg);
+    let attachments = extractAttachmentsOf(msg);
     if (!attachments.length && msg.reference?.messageId) {
       try {
         const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        attachments = zipAttachmentsOf(refMsg);
+        attachments = extractAttachmentsOf(refMsg);
       } catch {}
     }
     if (!attachments.length) {
-      replyUser(msg, "❌ upload a .zip file or reply to a zip, dumbass.").catch(() => {});
+      replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {});
       return;
     }
 
-    const zipFile = attachments[0];
+    const sourceFile = attachments[0];
+    const sourceType = isZipFile(sourceFile.name, sourceFile.contentType) ? "zip" : "html";
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
     const workingEmbed = new EmbedBuilder()
       .setColor(0x808080)
-      .setTitle("Extracting Zip")
-      .setDescription(`⏳ Processing \`${zipFile.name}\`...`)
+      .setTitle("Processing File")
+      .setDescription(`⏳ Processing \`${sourceFile.name}\`...`)
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
 
@@ -761,9 +783,44 @@ client.on("messageCreate", async msg => {
 
     setTimeout(async () => {
       try {
-        const buf = await downloadURL(zipFile.url);
+        const buf = await downloadURL(sourceFile.url);
+        let files = [];
+
+        if (sourceType === "zip") {
+          files = extractFilesFromZip(buf);
+          if (!files.length) {
+            if (sentMsg) await sentMsg.delete().catch(() => {});
+            replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
+            return;
+          }
+        } else {
+          // HTML: single file
+          files = [{ name: sourceFile.name, data: buf }];
+        }
+
         if (sentMsg) await sentMsg.delete().catch(() => {});
-        await extractZipAndSend(buf, zipFile.name, msg);
+
+        // Send first page of carousel
+        const firstFile = files[0];
+        const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
+        const label = sourceType === "zip" ? "zip!" : "html!";
+        const content = `<@${msg.author.id}> **Here is all file in your ${label}** — \`${firstFile.name}\`\n**1/${files.length}**`;
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("extract_prev").setLabel("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
+          new ButtonBuilder().setCustomId("extract_next").setLabel("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
+        );
+
+        const carouselMsg = await msg.channel.send({ content, files: [attachment], components: [row] }).catch(() => {});
+        if (carouselMsg) {
+          extractCarouselMenus.set(msg.author.id, {
+            files,
+            index: 0,
+            sourceType,
+            messageId: carouselMsg.id,
+            authorId: msg.author.id,
+            createdAt: Date.now()
+          });
+        }
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
@@ -792,7 +849,7 @@ client.on("messageCreate", async msg => {
     if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning that channel, bro.").catch(() => {}); return; }
     const startMsg = await replyUser(msg, `⚡ **Scan started** for <#${ch.id}>...`).catch(() => {});
     scanChannel(ch).then(r => {
-      const content = `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📚 Total: \`${r.total}\``;
+      const content = `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📁 Channel Files: \`${r.channelTotal}\`\n📚 Library Total: \`${r.total}\``;
       if (startMsg) startMsg.edit(content).catch(() => {});
       else replyUser(msg, content).catch(() => {});
     }).catch(e => {
