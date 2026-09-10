@@ -547,9 +547,11 @@ client.on("interactionCreate", async interaction => {
 
     const currentFile = menu.files[menu.index];
     const attachment = new AttachmentBuilder(currentFile.data, { name: currentFile.name });
+    const pageLabel = `${menu.index + 1}/${menu.files.length}`;
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("extract_prev").setLabel("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index <= 0),
-      new ButtonBuilder().setCustomId("extract_next").setLabel("➡️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index >= menu.files.length - 1)
+      new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index <= 0),
+      new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Secondary).setDisabled(true),
+      new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index >= menu.files.length - 1)
     );
     await interaction.update({ content: null, files: [attachment], components: [row] }).catch(() => {});
     extractCarouselMenus.set(uid, menu);
@@ -763,26 +765,27 @@ client.on("messageCreate", async msg => {
     }
 
     const sourceFile = attachments[0];
+    const MAX_SIZE = 20 * 1024 * 1024; // 20MB
+    if (sourceFile.size > MAX_SIZE) {
+      replyUser(msg, "❌ max file is 20MB, lol.").catch(() => {});
+      return;
+    }
     const sourceType = isZipFile(sourceFile.name, sourceFile.contentType) ? "zip" : "html";
     const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
 
-    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    const delay = isOwnerOrAccess ? 0 : 10000;
+    try {
+      const buf = await downloadURL(sourceFile.url);
+      let files = [];
 
-    setTimeout(async () => {
-      try {
-        const buf = await downloadURL(sourceFile.url);
-        let files = [];
-
-        if (sourceType === "zip") {
-          files = extractFilesFromZip(buf);
-          if (!files.length) {
-            if (sentMsg) await sentMsg.delete().catch(() => {});
-            replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
-            return;
-          }
-        } else {
-          // HTML: single file
+      if (sourceType === "zip") {
+        files = extractFilesFromZip(buf);
+        if (!files.length) {
+          if (sentMsg) await sentMsg.delete().catch(() => {});
+          replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
+          return;
+        }
+      } else {
+        // HTML: single file
           files = [{ name: sourceFile.name, data: buf }];
         }
 
@@ -791,9 +794,11 @@ client.on("messageCreate", async msg => {
         // Send first page of carousel — FILE + BUTTONS only
         const firstFile = files[0];
         const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
+        const pageLabel = `1/${files.length}`;
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("extract_prev").setLabel("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
-          new ButtonBuilder().setCustomId("extract_next").setLabel("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
+          new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
+          new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Secondary).setDisabled(true),
+          new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
         );
 
         const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
@@ -811,7 +816,6 @@ client.on("messageCreate", async msg => {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
       }
-    }, delay);
     return;
   }
 
