@@ -16,7 +16,7 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const AdmZip = require("adm-zip");
-
+const os = require("os");
 // ============================================================
 // ENV
 // ============================================================
@@ -26,21 +26,16 @@ const GUILD_ID = process.env.GUILD_ID;
 const OWNER_ID = "1302080645987569694";
 const ACCESS_ROLE_ID = "1539883004950876160";
 const PORT = Number(process.env.PORT) || 10000;
-const STATUS_REQUIREMENT = ".gg/TBBAUZu8cW";
-const MB = 1048576;
-
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
   process.exit(1);
 }
-
 // ============================================================
 // STORAGE
 // ============================================================
 const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
-
 function readJSON(file, fallback) {
   try {
     return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : fallback;
@@ -54,20 +49,40 @@ function writeJSON(file, data) {
   try { fs.writeFileSync(tmp, JSON.stringify(data, null, 2)); fs.renameSync(tmp, file); }
   catch (e) { console.error(`❌ Saving ${path.basename(file)}:`, e.message); }
 }
-
 let config = readJSON(CONFIG_FILE, { allowedChannelId: null });
 if (!config || typeof config !== "object") config = { allowedChannelId: null };
 let library = readJSON(LIBRARY_FILE, { files: [] });
 if (Array.isArray(library)) library = { files: library };
 if (!Array.isArray(library.files)) library.files = [];
-
 // ============================================================
-// HELPERS
+// COOLDOWN TRACKER
 // ============================================================
 const rnCooldown = new Map();
 const RN_COOLDOWN_SEC = 10;
+// ============================================================
+// DISCORD CLIENT
+// ============================================================
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildPresences
+  ]
+});
+const runningScans = new Set();
+const paginationMenus = new Map();
 const extractCarouselMenus = new Map();
-
+const EXPIRY_MS = 5 * 60 * 1000;
+let isReady = false;
+let lastReady = Date.now();
+let registering = false;
+let reconnecting = false;
+// ============================================================
+// BASIC HELPERS
+// ============================================================
+const saveLibrary = () => writeJSON(LIBRARY_FILE, library);
+const saveConfig = () => writeJSON(CONFIG_FILE, config);
 function isOwner(userId) {
   return userId === OWNER_ID;
 }
@@ -92,72 +107,53 @@ async function hasPrinceStatus(userId) {
     const member = await mainGuild.members.fetch(userId, { force: true });
     if (!member?.presence?.activities) return false;
     for (const act of member.presence.activities) {
-      if (act.type === 4 && act.state && act.state.toLowerCase().includes(STATUS_REQUIREMENT)) {
+      if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
         return true;
       }
     }
     return false;
-  } catch { return false; }
-}
-async function checkDotCommandPermission(msg, needFileAttached = false) {
-  const uid = msg.author.id;
-  if (isOwner(uid) || await hasAccess(msg.member, uid)) return { ok: true };
-  if (!channelAllowed(msg)) return { ok: false, reason: "❌ not here, dumbass." };
-  if (!await hasPrinceStatus(uid)) return { ok: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro." };
-  if (needFileAttached) {
-    const hasAtt = msg.attachments.size > 0 || msg.reference;
-    if (!hasAtt) return { ok: false, reason: "❌ reply to a file or upload one, dumbass." };
+  } catch {
+    return false;
   }
-  return { ok: true };
+}
+// ============================================================
+// STANDARD DOT COMMAND PERMISSION CHECK
+// ============================================================
+async function checkDotCommandPermission(msg, needsFileReply = false) {
+  const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+  if (isOwnerOrAccess) return { allowed: true };
+
+  if (!channelAllowed(msg)) {
+    return { allowed: false, reason: "❌ use this command in the allowed channel only, dumbass." };
+  }
+  if (!await hasPrinceStatus(msg.author.id)) {
+    return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro." };
+  }
+  if (needsFileReply && !isReplyingToFile(msg)) {
+    return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass." };
+  }
+  return { allowed: true };
+}
+function isReplyingToFile(msg) {
+  const ref = msg.reference?.messageId;
+  if (!ref) return false;
+  const channel = msg.channel;
+  const repliedMsg = channel.messages.cache.get(ref);
+  if (!repliedMsg) return false;
+  if (repliedMsg.attachments.size > 0) return true;
+  for (const snap of repliedMsg.messageSnapshots.values()) {
+    if (snap.attachments.size > 0) return true;
+  }
+  return false;
 }
 function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
   return message.reply(body);
 }
-function ext(name) {
-  const match = String(name || "").match(/\.([a-z0-9]+)$/i);
-  return match ? match[1].toLowerCase() : "";
-}
-function isZipFile(name) { return /\.zip$/i.test(name); }
-function isHtmlFile(name) { return /\.html?$/i.test(name); }
-function getAllowedMaxBytes(guild) {
-  return guild?.premiumTier >= 2 ? 50 * MB : 20 * MB;
-}
-async function getZipOrHtmlFiles(attachment) {
-  const buf = await fetch(attachment.url).then(r => r.arrayBuffer()).then(b => Buffer.from(b));
-  if (isZipFile(attachment.name)) {
-    const zip = new AdmZip(buf);
-    return zip.getEntries().filter(e => !e.isDirectory && !e.name.startsWith('.')).map(e => ({ name: e.name, buffer: e.getData() }));
-  }
-  return [{ name: attachment.name, buffer: buf }];
-}
-
 // ============================================================
-// DISCORD CLIENT
+// FILE HELPERS
 // ============================================================
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildPresences
-  ]
-});
-
-const runningScans = new Set();
-const paginationMenus = new Map();
-let isReady = false;
-let lastReady = Date.now();
-let registering = false;
-let reconnecting = false;
-
-// ============================================================
-// FILE HELPERS (scan/library)
-// ============================================================
-const saveLibrary = () => writeJSON(LIBRARY_FILE, library);
-const saveConfig = () => writeJSON(CONFIG_FILE, config);
-
 function normalize(name) {
   return String(name || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
     .replace(/\.[^/.]+$/, "").replace(/[_\-.()[\]{}]+/g, " ")
@@ -167,467 +163,899 @@ function normalizeBase(name) {
   let n = normalize(name);
   n = n.replace(/\s*\d+$/, "").trim();
   n = n.replace(/\s*(copy|ver|version|v)\s*\d*$/i, "").trim();
-  return n.replace(/\s+/g, " ").trim();
+  n = n.replace(/\s+/g, " ").trim();
+  return n;
+}
+function ext(name) {
+  const match = String(name || "").match(/\.([a-z0-9]+)$/i);
+  return match ? match[1].toLowerCase() : "";
+}
+function isImage(name, contentType) {
+  return String(contentType || "").toLowerCase().startsWith("image/") ||
+    /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|avif|heic|heif)$/i.test(String(name || ""));
 }
 function isAllowedFileType(name, contentType) {
   const e = ext(name);
-  return e === "txt" || e === "lua";
+  return (e === "txt" || e === "lua") && !isImage(name, contentType);
+}
+function isZipFile(name, contentType) {
+  const e = ext(name);
+  return e === "zip" || String(contentType || "").toLowerCase().includes("zip");
+}
+function isHtmlFile(name, contentType) {
+  const e = ext(name);
+  return e === "html" || e === "htm" || String(contentType || "").toLowerCase().includes("html");
 }
 function idForFile() {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let id;
-  do { id = Array.from({length:4}, ()=>chars[Math.random()*chars.length|0]).join(''); }
-  while (library.files.some(f => f.id === id));
+  do {
+    id = "";
+    for (let i = 0; i < 4; i++) {
+      id += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+  } while (library.files.some(file => file.id === id));
   return id;
 }
 function getFile(id) {
-  return library.files.find(f => f.id === String(id||"").trim()) || null;
+  return library.files.find(file => file.id === String(id || "").trim()) || null;
 }
 async function getFreshUrl(file) {
   try {
     const ch = await client.channels.fetch(file.channelId);
     const orig = await ch.messages.fetch(file.messageId);
     let fresh = orig.attachments.get(file.attachmentId);
-    if (!fresh) for (const s of orig.messageSnapshots?.values?.()||[]) {
-      fresh = s.attachments?.get(file.attachmentId);
-      if (fresh) break;
+    if (!fresh) {
+      for (const s of orig.messageSnapshots?.values?.() || []) {
+        fresh = s.attachments?.get(file.attachmentId);
+        if (fresh) break;
+      }
     }
-    if (fresh?.url) { file.url = fresh.url; saveLibrary(); return fresh.url; }
-  } catch(e){ console.warn(`⚠️ Refresh: ${e.message}`); }
+    if (fresh?.url) {
+      file.url = fresh.url;
+      saveLibrary();
+      return fresh.url;
+    }
+  } catch (e) {
+    console.warn(`⚠️ Could not refresh URL for ${file.filename}:`, e.message);
+  }
   return null;
 }
 function findFiles(query) {
-  query = normalize(query); if (!query) return [];
-  const tokens = query.split(" ").filter(Boolean), seen=new Set();
-  return library.files.map(file=>{
-    const n=normalize(file.filename); let s=0;
-    if(n===query)s+=5000; if(n.startsWith(query))s+=2000; if(n.includes(query))s+=1000;
-    for(const t of tokens){ if(n===t)s+=500; else if(n.startsWith(t))s+=200; else if(n.includes(t))s+=100; }
-    return {file,score:s};
-  }).filter(i=>i.score>0).sort((a,b)=>b.score-a.score).filter(i=>{
-    const nm=normalize(i.file.filename); if(seen.has(nm))return false; seen.add(nm); return true;
-  }).map(i=>i.file);
+  query = normalize(query);
+  if (!query) return [];
+  const tokens = query.split(" ").filter(Boolean);
+  const seenNames = new Set();
+  return library.files.map(file => {
+    const name = normalize(file.filename);
+    let score = 0;
+    if (name === query) score += 5000;
+    if (name.startsWith(query)) score += 2000;
+    if (name.includes(query)) score += 1000;
+    for (const token of tokens) {
+      if (name === token) score += 500;
+      else if (name.startsWith(token)) score += 200;
+      else if (name.includes(token)) score += 100;
+    }
+    return { file, score };
+  }).filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .filter(item => {
+      const normName = normalize(item.file.filename);
+      if (seenNames.has(normName)) return false;
+      seenNames.add(normName);
+      return true;
+    })
+    .map(item => item.file);
 }
 async function fetchMessages(channel, before) {
-  const opt={limit:100}; if(before)opt.before=before; return channel.messages.fetch(opt);
+  const options = { limit: 100 };
+  if (before) options.before = before;
+  return await channel.messages.fetch(options);
 }
-function attachmentsOf(msg) {
-  const r=[];
-  for(const a of msg.attachments?.values()||[]) if(isAllowedFileType(a.name,a.contentType))r.push({attachment:a,forwarded:false});
-  for(const s of msg.messageSnapshots?.values()||[]) for(const a of s.attachments?.values()||[]) if(isAllowedFileType(a.name,a.contentType))r.push({attachment:a,forwarded:true});
-  return r;
+function attachmentsOf(message) {
+  const result = [];
+  for (const a of message.attachments?.values?.() || []) {
+    if (isAllowedFileType(a.name, a.contentType)) {
+      result.push({ attachment: a, forwarded: false });
+    }
+  }
+  for (const s of message.messageSnapshots?.values?.() || []) {
+    for (const a of s.attachments?.values?.() || []) {
+      if (isAllowedFileType(a.name, a.contentType)) {
+        result.push({ attachment: a, forwarded: true });
+      }
+    }
+  }
+  return result;
 }
-function allAttachmentsOf(msg) {
-  const r=[];
-  for(const a of msg.attachments?.values()||[]) if(isAllowedFileType(a.name,a.contentType))r.push(a);
-  for(const s of msg.messageSnapshots?.values()||[]) for(const a of s.attachments?.values()||[]) if(isAllowedFileType(a.name,a.contentType))r.push(a);
-  return r;
+function allAttachmentsOf(message) {
+  const result = [];
+  for (const a of message.attachments?.values?.() || []) {
+    if (isAllowedFileType(a.name, a.contentType)) result.push(a);
+  }
+  for (const s of message.messageSnapshots?.values?.() || []) {
+    for (const a of s.attachments?.values?.() || []) {
+      if (isAllowedFileType(a.name, a.contentType)) result.push(a);
+    }
+  }
+  return result;
+}
+function zipAttachmentsOf(message) {
+  const result = [];
+  for (const a of message.attachments?.values?.() || []) {
+    if (isZipFile(a.name, a.contentType)) result.push(a);
+  }
+  for (const s of message.messageSnapshots?.values?.() || []) {
+    for (const a of s.attachments?.values?.() || []) {
+      if (isZipFile(a.name, a.contentType)) result.push(a);
+    }
+  }
+  return result;
+}
+function extractAttachmentsOf(message) {
+  const result = [];
+  for (const a of message.attachments?.values?.() || []) {
+    if (isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType)) result.push(a);
+  }
+  for (const s of message.messageSnapshots?.values?.() || []) {
+    for (const a of s.attachments?.values?.() || []) {
+      if (isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType)) result.push(a);
+    }
+  }
+  return result;
 }
 async function scanChannel(channel) {
-  if(!channel?.isTextBased?.())throw new Error("Not readable.");
-  if(runningScans.has(channel.id))throw new Error("Already scanning.");
+  if (!channel?.isTextBased?.() || !channel.messages) throw new Error("Not a readable text channel.");
+  if (runningScans.has(channel.id)) throw new Error("Already scanning.");
   runningScans.add(channel.id);
   try {
-    const bases=new Set(library.files.map(f=>normalizeBase(f.filename)));
-    const names=new Set(library.files.map(f=>normalize(f.filename)));
-    const sizes=new Set(library.files.map(f=>Number(f.size||0)));
-    const found=[]; let before=null,messages=0,replaced=0;
-    while(true){
-      const batch=await fetchMessages(channel,before); if(!batch.size)break;
-      for(const msg of batch.values()){ messages++;
-        for(const item of attachmentsOf(msg)){
-          const a=item.attachment,fn=a.name||"unknown",bn=normalizeBase(fn),nm=normalize(fn),sz=Number(a.size||0);
-          if(!bn)continue;
-          const dupB=bases.has(bn),dupN=names.has(nm),dupS=sz>0&&sizes.has(sz);
-          if(dupB||dupN||dupS){
-            const bc=library.files.length;
-            library.files=library.files.filter(f=>{
-              const fb=normalizeBase(f.filename),fn_=normalize(f.filename),fs=Number(f.size||0);
-              if(dupB&&fb===bn)return false; if(dupN&&fn_===nm)return false; if(dupS&&fs===sz)return false;
+    const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
+    const existingFullNames = new Set(library.files.map(f => normalize(f.filename)));
+    const existingSizes = new Set(library.files.map(f => Number(f.size || 0)));
+    const found = [];
+    let before = null, messages = 0, pages = 0, skippedDup = 0, replacedDup = 0;
+    while (true) {
+      const batch = await fetchMessages(channel, before);
+      pages++; if (!batch.size) break;
+      for (const msg of batch.values()) {
+        messages++;
+        for (const item of attachmentsOf(msg)) {
+          const a = item.attachment;
+          const filename = a.name || "unknown_file";
+          const baseName = normalizeBase(filename);
+          const fullName = normalize(filename);
+          const fileSize = Number(a.size || 0);
+          const url = a.url || a.proxyURL || a.proxy_url;
+          if (!baseName || !url) continue;
+          const isDupBase = existingBases.has(baseName);
+          const isDupFull = existingFullNames.has(fullName);
+          const isDupSize = fileSize > 0 && existingSizes.has(fileSize);
+          if (isDupBase || isDupFull || isDupSize) {
+            const beforeCount = library.files.length;
+            library.files = library.files.filter(f => {
+              const fBase = normalizeBase(f.filename);
+              const fFull = normalize(f.filename);
+              const fSize = Number(f.size || 0);
+              if (isDupBase && fBase === baseName) return false;
+              if (isDupFull && fFull === fullName) return false;
+              if (isDupSize && fSize === fileSize) return false;
               return true;
             });
-            replaced+=bc-library.files.length;
-            bases.clear();names.clear();sizes.clear();
-            library.files.forEach(l=>{bases.add(normalizeBase(l.filename));names.add(normalize(l.filename));sizes.add(Number(l.size||0));});
+            const removed = beforeCount - library.files.length;
+            if (removed > 0) replacedDup += removed;
+            existingBases.clear(); existingFullNames.clear(); existingSizes.clear();
+            for (const lf of library.files) {
+              existingBases.add(normalizeBase(lf.filename));
+              existingFullNames.add(normalize(lf.filename));
+              existingSizes.add(Number(lf.size || 0));
+            }
+            for (let i = found.length - 1; i >= 0; i--) {
+              const ff = found[i];
+              if (isDupBase && normalizeBase(ff.filename) === baseName) { found.splice(i, 1); continue; }
+              if (isDupFull && normalize(ff.filename) === fullName) { found.splice(i, 1); continue; }
+              if (isDupSize && Number(ff.size || 0) === fileSize) { found.splice(i, 1); continue; }
+            }
           }
-          bases.add(bn);names.add(nm);sizes.add(sz);
-          found.push({id:idForFile(),filename:fn,url:a.url,size:sz,contentType:a.contentType||null,channelId:msg.channelId,messageId:msg.id,attachmentId:String(a.id),forwarded:item.forwarded,createdTimestamp:msg.createdTimestamp||Date.now(),scannedAt:Date.now()});
+          existingBases.add(baseName);
+          existingFullNames.add(fullName);
+          existingSizes.add(fileSize);
+          found.push({
+            id: idForFile(), filename, url, size: fileSize,
+            contentType: a.contentType || null, channelId: msg.channelId,
+            messageId: msg.id, attachmentId: String(a.id), forwarded: item.forwarded,
+            createdTimestamp: msg.createdTimestamp || Date.now(), scannedAt: Date.now()
+          });
         }
       }
-      const o=batch.last(); if(!o||batch.size<100)break; before=o.id;
+      const oldest = batch.last();
+      if (!oldest || batch.size < 100) break;
+      before = oldest.id;
     }
     library.files.push(...found);
-    library.files.sort((a,b)=>Number(a.createdTimestamp||0)-Number(b.createdTimestamp||0));
+    library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
     saveLibrary();
-    const chFiles=library.files.filter(f=>f.channelId===channel.id).length;
-    return {messages,found:found.length,replaced,skipped:0,channelFiles:chFiles,total:library.files.length};
+    const channelTotal = library.files.filter(f => f.channelId === channel.id).length;
+    console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | ${replacedDup} replaced | ${skippedDup} skipped | ${pages} pages`);
+    return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: library.files.length, channelTotal };
   } finally { runningScans.delete(channel.id); }
 }
-async function downloadURL(url){return Buffer.from(await (await fetch(url)).arrayBuffer());}
-async function forwardTxt(src,dst){
-  if(!src?.isTextBased?.()||!dst?.isTextBased?.())throw new Error("Invalid channels.");
-  let before=null,sent=0;
-  while(true){
-    const batch=await fetchMessages(src,before); if(!batch.size)break;
-    for(const msg of batch.values()){
-      for(const a of allAttachmentsOf(msg)){
-        try{ await dst.send({files:[new AttachmentBuilder(await downloadURL(a.url),{name:a.name})]}); sent++; }
-        catch(e){console.warn(`⚠️ Forward: ${e.message}`);}
+async function downloadURL(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+async function forwardTxt(source, destination) {
+  if (!source?.isTextBased?.()) throw new Error("Source not readable.");
+  if (!destination?.isTextBased?.()) throw new Error("Dest not writable.");
+  let before = null, messages = 0, sent = 0;
+  const sendBatch = [];
+  while (true) {
+    const batch = await fetchMessages(source, before);
+    if (!batch.size) break;
+    for (const msg of batch.values()) {
+      messages++;
+      for (const a of allAttachmentsOf(msg)) {
+        sendBatch.push(
+          downloadURL(a.url)
+            .then(buf => destination.send({ files: [new AttachmentBuilder(buf, { name: a.name || "file" })] }))
+            .then(() => sent++)
+            .catch(e => console.error(`⚠️ Forward: ${e.message}`))
+        );
       }
     }
-    const o=batch.last(); if(!o||batch.size<100)break; before=o.id;
+    const oldest = batch.last();
+    if (!oldest || batch.size < 100) break;
+    before = oldest.id;
   }
-  return {sent};
+  await Promise.allSettled(sendBatch);
+  return { messages, sent };
 }
-
 // ============================================================
-// SLASH COMMANDS — OWNER ONLY
+// ZIP EXTRACT HELPERS
+// ============================================================
+function extractFilesFromZip(zipBuffer) {
+  const zip = new AdmZip(zipBuffer);
+  const entries = zip.getEntries();
+  const extractedFiles = [];
+  for (const entry of entries) {
+    if (entry.isDirectory) continue;
+    const entryName = path.basename(entry.entryName);
+    if (!entryName || entryName.startsWith(".")) continue;
+    try {
+      const data = entry.getData();
+      extractedFiles.push({ name: entryName, data });
+    } catch (e) {
+      console.warn(`⚠️ Could not extract ${entry.entryName}:`, e.message);
+    }
+  }
+  return extractedFiles;
+}
+// ============================================================
+// SLASH COMMANDS
 // ============================================================
 const commands = [
-  new SlashCommandBuilder().setName("scanchannel").setDescription("Scan channel — Owner Only.")
-    .addChannelOption(o=>o.setName("channel").setDescription("Channel to scan.").addChannelTypes(ChannelType.GuildText,ChannelType.GuildAnnouncement))
-    .addStringOption(o=>o.setName("channel_id").setDescription("Or raw channel ID.")),
-  new SlashCommandBuilder().setName("say").setDescription("Send message — Owner Only.")
-    .addStringOption(o=>o.setName("text").setDescription("Content.").setRequired(true))
-    .addStringOption(o=>o.setName("type").setDescription("Style.").setRequired(true).addChoices({name:"Embed",value:"good"},{name:"Plain",value:"none"}))
-    .addStringOption(o=>o.setName("title").setDescription("Optional title.")),
-  new SlashCommandBuilder().setName("forwardall").setDescription("Forward files — Owner Only.")
-    .addChannelOption(o=>o.setName("source").setDescription("Source.").addChannelTypes(ChannelType.GuildText,ChannelType.GuildAnnouncement))
-    .addStringOption(o=>o.setName("source_id"))
-    .addChannelOption(o=>o.setName("destination").setDescription("Dest.").addChannelTypes(ChannelType.GuildText,ChannelType.GuildAnnouncement))
-    .addStringOption(o=>o.setName("destination_id")),
-  new SlashCommandBuilder().setName("setchannel").setDescription("Set allowed channel — Owner Only.")
-].map(c=>c.toJSON());
-
-async function registerCommands(){
-  if(registering)return; registering=true;
-  const rest=new REST({version:"10",timeout:15000}).setToken(TOKEN);
-  try{ console.log("🧹 Clearing old..."); await rest.put(Routes.applicationCommands(CLIENT_ID),{body:[]});
-    console.log("🧩 Registering..."); await rest.put(Routes.applicationGuildCommands(CLIENT_ID,GUILD_ID),{body:commands});
-    console.log("✅ Registered.");
-  }catch(e){registering=false;console.error("❌ Register:",e.message);}
+  new SlashCommandBuilder()
+    .setName("scanchannel")
+    .setDescription("Scan channel — Owner Only.")
+    .addChannelOption(o => o
+      .setName("channel")
+      .setDescription("Channel to scan.")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(false))
+    .addStringOption(o => o
+      .setName("channel_id")
+      .setDescription("Or paste raw channel ID.")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("say")
+    .setDescription("Send message — Owner Only.")
+    .addStringOption(o => o
+      .setName("text")
+      .setDescription("Message content.")
+      .setRequired(true))
+    .addStringOption(o => o
+      .setName("type")
+      .setDescription("Message style.")
+      .setRequired(true)
+      .addChoices(
+        { name: "With Embed", value: "good" },
+        { name: "No Embed", value: "none" }
+      ))
+    .addStringOption(o => o
+      .setName("title")
+      .setDescription("Optional embed title.")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("forwardall")
+    .setDescription("Forward files — Owner Only.")
+    .addChannelOption(o => o
+      .setName("source")
+      .setDescription("Source channel.")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(false))
+    .addStringOption(o => o
+      .setName("source_id")
+      .setDescription("Or raw source ID.")
+      .setRequired(false))
+    .addChannelOption(o => o
+      .setName("destination")
+      .setDescription("Destination channel.")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setRequired(false))
+    .addStringOption(o => o
+      .setName("destination_id")
+      .setDescription("Or raw destination ID.")
+      .setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("setchannel")
+    .setDescription("Set allowed channel — Owner Only.")
+].map(c => c.toJSON());
+async function registerCommands() {
+  if (registering) return;
+  registering = true;
+  const rest = new REST({ version: "10", timeout: 15000 }).setToken(TOKEN);
+  try {
+    console.log("🧹 Clearing old commands...");
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+    console.log("🧩 Registering guild commands...");
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log("✅ Commands registered.");
+  } catch (e) { registering = false; console.error("❌ Register fail:", e.message); }
 }
-
 // ============================================================
-// READY / WATCHDOG
+// READY
 // ============================================================
-client.once("ready",()=>{isReady=true;lastReady=Date.now();
+client.once("ready", () => {
+  isReady = true; lastReady = Date.now();
   console.log("==========================================");
   console.log(`✅ ONLINE: ${client.user.tag}`);
+  console.log(`🏠 Guilds: ${client.guilds.cache.size}`);
   console.log(`📚 Files: ${library.files.length}`);
-  registerCommands().catch(e=>console.error("❌ Register:",e.message));
+  console.log("⚡ Bot ready!");
+  console.log("==========================================");
+  registerCommands().catch(e => console.error("❌ Register:", e.message));
 });
-client.on("shardReady",id=>{isReady=true;console.log(`🟢 Shard ${id}`);});
-client.on("shardResume",id=>{isReady=true;console.log(`🟢 Resumed ${id}`);});
-client.on("shardReconnecting",id=>{isReady=false;console.warn(`🟡 Reconnecting ${id}`);});
-client.on("shardDisconnect",e=>{isReady=false;console.warn(`🔴 Disconnected: ${e?.code}`);});
-client.on("error",e=>console.error("❌ Discord:",e));
-client.on("warn",w=>console.warn("⚠️ Discord:",w));
-
-setInterval(async()=>{
-  if(isReady||reconnecting||Date.now()-lastReady<60000)return;
-  reconnecting=true; console.warn("🟡 Reconnecting...");
-  try{client.destroy();await new Promise(r=>setTimeout(r,1500));await client.login(TOKEN);console.log("🟢 Reconnected.");}
-  catch(e){console.error("❌ Reconnect fail:",e.message);}
-  finally{reconnecting=false;}
-},30000).unref?.();
-
+client.on("shardReady", id => { isReady = true; lastReady = Date.now(); console.log(`🟢 Shard ${id} ready`); });
+client.on("shardResume", id => { isReady = true; lastReady = Date.now(); console.log(`🟢 Shard ${id} resumed`); });
+client.on("shardReconnecting", id => { isReady = false; console.warn(`🟡 Shard ${id} reconnecting...`); });
+client.on("shardDisconnect", (e, id) => { isReady = false; console.warn(`🔴 Shard ${id} down: ${e?.code}`); });
+client.on("presenceUpdate", () => {});
+client.on("error", e => console.error("❌ Discord error:", e));
+client.on("warn", w => console.warn("⚠️ Discord warn:", w));
 // ============================================================
-// EXTRACT CAROUSEL BUTTONS — NO EXPIRY
+// BUTTON HANDLER
 // ============================================================
-client.on("interactionCreate",async interaction=>{
-  if(!interaction.isButton())return;
-  const cid=interaction.customId;
-  if(!cid.startsWith("extract_"))return;
-  const [,action,menuId]=cid.split("_");
-  if(!["prev","next"].includes(action))return;
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isButton()) return;
+  const uid = interaction.user.id;
 
-  if(!extractCarouselMenus.has(menuId))
-    return interaction.reply({content:"❌ menu not found, dumbass.",flags:MessageFlags.Ephemeral}).catch(()=>{});
-
-  const menu=extractCarouselMenus.get(menuId);
-  if(interaction.user.id!==menu.userId)
-    return interaction.reply({content:"❌ not yours, dumbass.",flags:MessageFlags.Ephemeral}).catch(()=>{});
-
-  if(action==="prev")menu.page--; else menu.page++;
-  if(menu.page<0)menu.page=0; if(menu.page>=menu.files.length)menu.page=menu.files.length-1;
-
-  const total=menu.files.length,cur=menu.page+1;
-  const row=new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`extract_prev_${menuId}`).setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(menu.page<=0),
-    new ButtonBuilder().setLabel(`${cur}/${total}`).setStyle(ButtonStyle.Primary).setDisabled(true),
-    new ButtonBuilder().setCustomId(`extract_next_${menuId}`).setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(menu.page>=total-1)
-  );
-  const file=menu.files[menu.page];
-  await interaction.update({
-    content:"", files:[new AttachmentBuilder(file.buffer,{name:file.name})], components:[row]
-  }).catch(()=>{});
-  extractCarouselMenus.set(menuId,menu);
-});
-
-// ============================================================
-// FINDER PAGINATION BUTTONS
-// ============================================================
-client.on("interactionCreate",async interaction=>{
-  if(!interaction.isButton())return;
-  if(!paginationMenus.has(interaction.user.id))
-    return interaction.reply({content:"❌ this is expired, dumbass.",flags:MessageFlags.Ephemeral}).catch(()=>{});
-  const menu=paginationMenus.get(interaction.user.id);
-  if(Date.now()-menu.createdAt>5*60*1000){paginationMenus.delete(interaction.user.id);return interaction.reply({content:"❌ this is expired, dumbass.",flags:MessageFlags.Ephemeral}).catch(()=>{});}
-  if(interaction.message.id!==menu.messageId||interaction.user.id!==menu.authorId)
-    return interaction.reply({content:"❌ this is not yours, idiot.",flags:MessageFlags.Ephemeral}).catch(()=>{});
-
-  if(interaction.customId==="prev_page")menu.page--;
-  if(interaction.customId==="next_page")menu.page++;
-  if(menu.page<1)menu.page=1; if(menu.page>menu.totalPages)menu.page=menu.totalPages;
-  const start=(menu.page-1)*8, items=menu.results.slice(start,start+8);
-  const time=new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Asia/Manila"});
-  const emb=new EmbedBuilder().setColor(0x808080).setTitle("Finder Search Results").setDescription(items.map(f=>`\`${f.filename}\` — ID: \`${f.id}\``).join("\n")).setFooter({text:`Pages ${menu.page}/${menu.totalPages} │ Today at ${time}`});
-  const row=new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page<=1),
-    new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page>=menu.totalPages)
-  );
-  await interaction.update({embeds:[emb],components:[row]}).catch(()=>{});
-  paginationMenus.set(interaction.user.id,menu);
-});
-
-// ============================================================
-// SLASH COMMAND HANDLER — OWNER ONLY
-// ============================================================
-client.on("interactionCreate",async interaction=>{
-  if(!interaction.isChatInputCommand())return;
-  console.log(`📨 /${interaction.commandName}`);
-  try{
-    await interaction.deferReply({flags:MessageFlags.Ephemeral});
-    if(!isOwner(interaction.user.id))
-      return interaction.editReply({content:"❌ owner only, dumbass."});
-
-    if(interaction.commandName==="setchannel"){
-      config.allowedChannelId=interaction.channelId; saveConfig();
-      return interaction.editReply({content:`✅ Allowed channel set to <#${interaction.channelId}>.`});
+  // ─── EXTRACT CAROUSEL BUTTONS ───
+  if (interaction.customId === "extract_prev" || interaction.customId === "extract_next") {
+    if (!extractCarouselMenus.has(uid)) {
+      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
-    if(interaction.commandName==="say"){
-      const text=interaction.options.getString("text"), type=interaction.options.getString("type"), title=interaction.options.getString("title");
-      const foot=`Today at ${new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Asia/Manila"})}`;
-      await interaction.deleteReply().catch(()=>{});
-      if(type==="none")await interaction.channel.send({content:text});
-      else {
-        const emb=new EmbedBuilder().setColor(0x808080).setDescription(text).setFooter({text:foot});
-        if(title)emb.setTitle(title);
-        await interaction.channel.send({embeds:[emb]});
+    const menu = extractCarouselMenus.get(uid);
+    if (interaction.message.id !== menu.messageId) return;
+    if (interaction.user.id !== menu.authorId) {
+      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (interaction.customId === "extract_prev") menu.index--;
+    if (interaction.customId === "extract_next") menu.index++;
+    if (menu.index < 0) menu.index = 0;
+    if (menu.index >= menu.files.length) menu.index = menu.files.length - 1;
+
+    const currentFile = menu.files[menu.index];
+    const attachment = new AttachmentBuilder(currentFile.data, { name: currentFile.name });
+    const pageLabel = `${menu.index + 1}/${menu.files.length}`;
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index <= 0),
+      new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
+      new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index >= menu.files.length - 1)
+    );
+    await interaction.update({ content: null, files: [attachment], components: [row] }).catch(() => {});
+    extractCarouselMenus.set(uid, menu);
+    return;
+  }
+
+  // ─── FINDER PAGINATION BUTTONS ───
+  if (!paginationMenus.has(uid)) {
+    return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  const menu = paginationMenus.get(uid);
+  if (Date.now() - menu.createdAt > EXPIRY_MS) {
+    paginationMenus.delete(uid);
+    return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  if (interaction.message.id !== menu.messageId) return;
+  if (interaction.user.id !== menu.authorId) {
+    return interaction.reply({ content: "❌ this is not yours, idiot.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  if (interaction.customId === "prev_page") menu.page--;
+  if (interaction.customId === "next_page") menu.page++;
+  if (menu.page < 1) menu.page = 1;
+  if (menu.page > menu.totalPages) menu.page = menu.totalPages;
+  const start = (menu.page - 1) * 8;
+  const pageItems = menu.results.slice(start, start + 8);
+  const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
+  const embed = new EmbedBuilder()
+    .setColor(0x808080)
+    .setTitle("Finder Search Results")
+    .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
+    .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
+    new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
+  );
+  await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
+  paginationMenus.set(uid, menu);
+});
+// ============================================================
+// WATCHDOG
+// ============================================================
+setInterval(async () => {
+  if (isReady || reconnecting || Date.now() - lastReady < 60000) return;
+  reconnecting = true;
+  console.warn("🟡 Reconnecting...");
+  try { client.destroy(); await new Promise(r => setTimeout(r, 1500)); await client.login(TOKEN); console.log("🟢 Reconnected."); }
+  catch (e) { console.error("❌ Reconnect fail:", e.message); }
+  finally { reconnecting = false; }
+}, 30000).unref?.();
+// ============================================================
+// SLASH COMMAND HANDLER — ALL OWNER ONLY
+// ============================================================
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+  console.log(`📨 /${interaction.commandName}`);
+  try {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const isOwnerUser = isOwner(interaction.user.id);
+
+    // ALL SLASH COMMANDS: OWNER ONLY
+    if (!isOwnerUser) {
+      await interaction.editReply({ content: "❌ owner only, dumbass." });
+      return;
+    }
+
+    if (interaction.commandName === "setchannel") {
+      config.allowedChannelId = interaction.channelId; saveConfig();
+      await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Owner only can use slash commands.` }); return;
+    }
+    if (interaction.commandName === "say") {
+      const text = interaction.options.getString("text");
+      const type = interaction.options.getString("type") || "good";
+      const title = interaction.options.getString("title");
+      const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+      await interaction.deleteReply().catch(() => {});
+      if (type === "none") {
+        await interaction.channel.send({ content: text });
+      } else {
+        const embed = new EmbedBuilder()
+          .setColor(0x808080)
+          .setDescription(text)
+          .setFooter({ text: timeFooter });
+        if (title) embed.setTitle(title);
+        await interaction.channel.send({ embeds: [embed] });
       }
       return;
     }
-    if(interaction.commandName==="scanchannel"){
-      let ch=interaction.options.getChannel("channel");
-      const chId=interaction.options.getString("channel_id");
-      if(!ch&&chId)try{ch=await client.channels.fetch(chId.trim());}catch{return interaction.editReply({content:"❌ Invalid channel ID."});}
-      if(!ch)return interaction.editReply({content:"❌ Provide channel or channel_id."});
-      if(!ch?.isTextBased?.())return interaction.editReply({content:"❌ Not readable."});
-      if(runningScans.has(ch.id))return interaction.editReply({content:"⚠️ Already scanning."});
-      await interaction.editReply({content:`⚡ Scan started for <#${ch.id}>.`});
-      scanChannel(ch).then(r=>interaction.editReply({content:`✅ Scan complete!\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced||0}\`\n📁 Channel Files: \`${r.channelFiles}\`\n📚 Library Total: \`${r.total}\``}).catch(()=>{})).catch(e=>interaction.editReply({content:`❌ Failed: \`${e.message.slice(0,1500)}\``}).catch(()=>{}));
+    if (interaction.commandName === "scanchannel") {
+      let ch = interaction.options.getChannel("channel");
+      const chId = interaction.options.getString("channel_id");
+      if (!ch && chId) {
+        try { ch = await client.channels.fetch(chId.trim()); }
+        catch { await interaction.editReply({ content: "❌ Invalid channel ID." }); return; }
+      }
+      if (!ch) {
+        await interaction.editReply({ content: "❌ Provide a channel mention or channel_id." }); return;
+      }
+      if (!ch?.isTextBased?.()) { await interaction.editReply({ content: "❌ Not a readable text channel." }); return; }
+      if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ Already scanning." }); return; }
+      await interaction.editReply({ content: `⚡ **Scan started** for <#${ch.id}>.` });
+      scanChannel(ch).then(r => interaction.editReply({
+        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📁 Channel Files: \`${r.channelTotal}\`\n📚 Library Total: \`${r.total}\``
+      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
-    if(interaction.commandName==="forwardall"){
-      let src=interaction.options.getChannel("source"), dst=interaction.options.getChannel("destination");
-      const srcId=interaction.options.getString("source_id"), dstId=interaction.options.getString("destination_id");
-      if(!src&&srcId)try{src=await client.channels.fetch(srcId.trim());}catch{return interaction.editReply({content:"❌ Invalid source ID."});}
-      if(!dst&&dstId)try{dst=await client.channels.fetch(dstId.trim());}catch{return interaction.editReply({content:"❌ Invalid dest ID."});}
-      if(!src||!dst||!src?.isTextBased?.()||!dst?.isTextBased?.())
-        return interaction.editReply({content:"❌ Invalid channels."});
-      await interaction.editReply({content:`⚡ Forwarding <#${src.id}> → <#${dst.id}>...`});
-      forwardTxt(src,dst).then(r=>interaction.editReply({content:`✅ Started! Sent: \`${r.sent}\``}).catch(()=>{})).catch(e=>interaction.editReply({content:`❌ Failed: \`${e.message.slice(0,1500)}\``}).catch(()=>{}));
+    if (interaction.commandName === "forwardall") {
+      let src = interaction.options.getChannel("source");
+      let dst = interaction.options.getChannel("destination");
+      const srcId = interaction.options.getString("source_id");
+      const dstId = interaction.options.getString("destination_id");
+      if (!src && srcId) try { src = await client.channels.fetch(srcId.trim()); } catch { await interaction.editReply({ content: "❌ Invalid source ID." }); return; }
+      if (!dst && dstId) try { dst = await client.channels.fetch(dstId.trim()); } catch { await interaction.editReply({ content: "❌ Invalid destination ID." }); return; }
+      if (!src || !dst) { await interaction.editReply({ content: "❌ Provide source + destination." }); return; }
+      if (!src?.isTextBased?.() || !dst?.isTextBased?.()) { await interaction.editReply({ content: "❌ Invalid channel type." }); return; }
+      await interaction.editReply({ content: `⚡ Forwarding from <#${src.id}> → <#${dst.id}>...` });
+      forwardTxt(src, dst).then(r => interaction.editReply({
+        content: `✅ **Forward started!**\n📂 <#${src.id}> → <#${dst.id}>\n📄 Found: \`${r.sent}\` files sending...\n⚡ Forward runs in background, use other commands freely.`
+      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ Failed: \`${e.message.slice(0,1500)}\`` }).catch(() => {}));
       return;
     }
-  }catch(e){console.error("❌ Interaction:",e);
-    const m={content:"❌ Error.",flags:MessageFlags.Ephemeral};
-    interaction.deferred||interaction.replied?await interaction.editReply(m).catch(()=>{}):await interaction.reply(m).catch(()=>{});}
+  } catch (e) {
+    console.error("❌ Interaction:", e);
+    const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
+    interaction.deferred || interaction.replied ? await interaction.editReply(msg).catch(() => {}) : await interaction.reply(msg).catch(() => {});
+  }
 });
-
 // ============================================================
 // PREFIX COMMANDS
 // ============================================================
-client.on("messageCreate",async msg=>{
-  if(msg.author.bot||!msg.guild)return;
-  const txt=(msg.content||"").trim();
+client.on("messageCreate", async msg => {
+  if (msg.author.bot || !msg.guild) return;
+  const txt = (msg.content || "").trim();
 
-  // OWNER ONLY: serverlist / getinv / leave
-  if(/^\.serverlist$/i.test(txt)){
-    if(!isOwner(msg.author.id))return replyUser(msg,"❌ owner only, dumbass.").catch(()=>{});
-    const glds=client.guilds.cache.sort((a,b)=>b.memberCount-a.memberCount);
-    let lines=[],n=1;for(const g of glds.values())lines.push(`**${n++}.** \`${g.name}\`\n   🆔 \`${g.id}\`\n   👥 Members: \`${g.memberCount}\``);
-    replyUser(msg,{embeds:[new EmbedBuilder().setColor(0x808080).setTitle("🌐 Server List").setDescription(lines.join("\n\n")).setFooter({text:`Today at ${new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Asia/Manila"})}`})]}).catch(()=>{});
+  // ─────────────────────────────────────────────
+  // OWNER-ONLY DOT COMMANDS
+  // ─────────────────────────────────────────────
+  if (/^\.serverlist$/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const guilds = client.guilds.cache.sort((a, b) => b.memberCount - a.memberCount);
+    let lines = []; let num = 1;
+    for (const g of guilds.values()) {
+      lines.push(`**${num}.** \`${g.name}\`\n   🆔 \`${g.id}\`\n   👥 Members: \`${g.memberCount}\``); num++;
+    }
+    replyUser(msg, { embeds: [new EmbedBuilder().setColor(0x808080).setTitle(`🌐 Server List — ${guilds.size} total`).setDescription(lines.join("\n\n"))
+      .setFooter({ text: `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}` })
+    ] }).catch(() => {});
     return;
   }
-  if(/^\.getinv(?:\s|$)/i.test(txt)){
-    if(!isOwner(msg.author.id))return replyUser(msg,"❌ owner only, dumbass.").catch(()=>{});
-    const sid=txt.split(/\s+/)[1];if(!sid)return replyUser(msg,"❌ usage: `.getinv <server id>`").catch(()=>{});
-    try{const g=await client.guilds.fetch(sid.trim());const ch=(await g.channels.fetch()).find(c=>c.type===0&&c.permissionsFor(g.members.me)?.has("CreateInstantInvite"));
-      if(!ch)return replyUser(msg,"❌ no channel found").catch(()=>{});
-      const inv=await ch.createInvite({maxAge:1800,maxUses:1,unique:true});
-      replyUser(msg,`✅ **Invite for \`${g.name}\`**\n🔗 https://discord.gg/${inv.code}\n⏱️ 30 min | 👤 1 use`).catch(()=>{});
-    }catch(e){replyUser(msg,`❌ failed: \`${e.message}\``).catch(()=>{});}
+  if (/^\.getinv(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const serverId = txt.split(/\s+/)[1];
+    if (!serverId) { replyUser(msg, "❌ usage: `.getinv <server id>`, dumbass.").catch(() => {}); return; }
+    try {
+      const guild = await client.guilds.fetch(serverId.trim());
+      const channels = await guild.channels.fetch();
+      const targetChannel = channels.find(c => c.type === ChannelType.GuildText && c.permissionsFor(guild.members.me)?.has("CreateInstantInvite"))
+        || channels.find(c => c.isTextBased?.() && c.permissionsFor(guild.members.me)?.has("CreateInstantInvite"));
+      if (!targetChannel) { replyUser(msg, "❌ no channel with invite permission found, bro.").catch(() => {}); return; }
+      const invite = await targetChannel.createInvite({ maxAge: 1800, maxUses: 1, unique: true, reason: "Owner requested" });
+      replyUser(msg, `✅ **Invite for \`${guild.name}\`**\n🔗 https://discord.gg/${invite.code}\n⏱️ Expires: **30 min**\n👤 Uses: **1**`).catch(() => {});
+    } catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
     return;
   }
-  if(/^\.leave(?:\s|$)/i.test(txt)){
-    if(!isOwner(msg.author.id))return replyUser(msg,"❌ owner only, dumbass.").catch(()=>{});
-    const args=txt.split(/\s+/).slice(1),tgt=args[0];
-    if(!tgt){if(msg.guild.id===GUILD_ID)return replyUser(msg,"❌ can't leave main server").catch(()=>{});
-      try{await msg.guild.leave();replyUser(msg,`✅ left **${msg.guild.name}**`).catch(()=>{});}catch(e){replyUser(msg,`❌ failed: \`${e.message}\``).catch(()=>{});}
+  if (/^\.leave(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const args = txt.split(/\s+/).slice(1); const target = args[0];
+    if (!target) {
+      if (msg.guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
+      try { await msg.guild.leave(); replyUser(msg, `✅ left **${msg.guild.name}**, bro.`).catch(() => {}); }
+      catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
       return;
     }
-    if(tgt.toLowerCase()==="all"){let l=0,f=0;for(const g of client.guilds.cache.values()){if(g.id===GUILD_ID)continue;try{await g.leave();l++;}catch{f++;}}
-      replyUser(msg,`✅ left **${l}** servers${f?` (${f} failed)`:""}`).catch(()=>{});return;}
-    try{const g=await client.guilds.fetch(tgt.trim());if(g.id===GUILD_ID)return replyUser(msg,"❌ can't leave main server").catch(()=>{});
-      await g.leave();replyUser(msg,`✅ left **${g.name}**`).catch(()=>{});
-    }catch{replyUser(msg,"❌ invalid server id").catch(()=>{});}
+    if (target.toLowerCase() === "all") {
+      let left = 0, failed = 0;
+      for (const g of client.guilds.cache.values()) {
+        if (g.id === GUILD_ID) continue;
+        try { await g.leave(); left++; } catch { failed++; }
+      }
+      replyUser(msg, `✅ left **${left}** servers${failed ? ` (${failed} failed)` : ""}. Main server safe.`).catch(() => {});
+      return;
+    }
+    try {
+      const guild = await client.guilds.fetch(target.trim());
+      if (guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
+      await guild.leave(); replyUser(msg, `✅ left **${guild.name}**, bro.`).catch(() => {});
+    } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
+    return;
+  }
+
+  // ─────────────────────────────────────────────
+  // STANDARD DOT COMMANDS (same requirements)
+  // Owner / Access Role → bypass
+  // Others → allowed channel + prince status
+  // ─────────────────────────────────────────────
+
+  // .et — carousel mode (buttons + page counter)
+  if (/^\.et(?:\s|$)/i.test(txt)) {
+    const perm = await checkDotCommandPermission(msg, true);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+
+    let attachments = extractAttachmentsOf(msg);
+    if (!attachments.length && msg.reference?.messageId) {
+      try {
+        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
+        attachments = extractAttachmentsOf(refMsg);
+      } catch {}
+    }
+    if (!attachments.length) {
+      replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {});
+      return;
+    }
+
+    const sourceFile = attachments[0];
+    // Dynamic max size based on server boost level
+    const MAX_SIZE = (msg.guild.premiumTier >= 2) ? 50 * 1024 * 1024 : 20 * 1024 * 1024;
+    const sizeLabel = msg.guild.premiumTier >= 2 ? "50MB" : "20MB";
+    if (sourceFile.size > MAX_SIZE) {
+      replyUser(msg, `❌ max file is ${sizeLabel}, lol.`).catch(() => {});
+      return;
+    }
+    const sourceType = isZipFile(sourceFile.name, sourceFile.contentType) ? "zip" : "html";
+    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
+
+    try {
+      const buf = await downloadURL(sourceFile.url);
+      let files = [];
+
+      if (sourceType === "zip") {
+        files = extractFilesFromZip(buf);
+        if (!files.length) {
+          if (sentMsg) await sentMsg.delete().catch(() => {});
+          replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
+          return;
+        }
+      } else {
+        files = [{ name: sourceFile.name, data: buf }];
+      }
+
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+
+      // CAROUSEL MODE: FILE + BUTTONS only
+      const firstFile = files[0];
+      const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
+      const pageLabel = `1/${files.length}`;
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
+        new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
+        new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
+      );
+
+      const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
+      if (carouselMsg) {
+        extractCarouselMenus.set(msg.author.id, {
+          files,
+          index: 0,
+          sourceType,
+          messageId: carouselMsg.id,
+          authorId: msg.author.id,
+          createdAt: Date.now()
+        });
+      }
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  // .extract — dump all files at once to the channel
+  if (/^\.extract(?:\s|$)/i.test(txt)) {
+    const perm = await checkDotCommandPermission(msg, true);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+
+    let attachments = extractAttachmentsOf(msg);
+    if (!attachments.length && msg.reference?.messageId) {
+      try {
+        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
+        attachments = extractAttachmentsOf(refMsg);
+      } catch {}
+    }
+    if (!attachments.length) {
+      replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {});
+      return;
+    }
+
+    const sourceFile = attachments[0];
+    // Dynamic max size based on server boost level
+    const MAX_SIZE = (msg.guild.premiumTier >= 2) ? 50 * 1024 * 1024 : 20 * 1024 * 1024;
+    const sizeLabel = msg.guild.premiumTier >= 2 ? "50MB" : "20MB";
+    if (sourceFile.size > MAX_SIZE) {
+      replyUser(msg, `❌ max file is ${sizeLabel}, lol.`).catch(() => {});
+      return;
+    }
+    const sourceType = isZipFile(sourceFile.name, sourceFile.contentType) ? "zip" : "html";
+    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
+
+    try {
+      const buf = await downloadURL(sourceFile.url);
+      let files = [];
+
+      if (sourceType === "zip") {
+        files = extractFilesFromZip(buf);
+        if (!files.length) {
+          if (sentMsg) await sentMsg.delete().catch(() => {});
+          replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
+          return;
+        }
+      } else {
+        files = [{ name: sourceFile.name, data: buf }];
+      }
+
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+
+      // DUMP MODE: send all files in batches of 10
+      const maxPerBatch = 10;
+      for (let i = 0; i < files.length; i += maxPerBatch) {
+        const batch = files.slice(i, i + maxPerBatch);
+        const batchAttachments = batch.map(f => new AttachmentBuilder(f.data, { name: f.name }));
+        await msg.channel.send({ files: batchAttachments }).catch(() => {});
+      }
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+    }
     return;
   }
 
   // .scan
-  if(/^\.scan(?:\s|$)/i.test(txt)){
-    const perm=await checkDotCommandPermission(msg);
-    if(!perm.ok)return replyUser(msg,perm.reason).catch(()=>{});
-    let ch=null;const m=txt.match(/<#(\d+)>/);if(m)try{ch=await client.channels.fetch(m[1]);}catch{}
-    if(!ch&&txt.split(/\s+/)[1])try{ch=await client.channels.fetch(txt.split(/\s+/)[1].trim());}catch{}
-    if(!ch)ch=msg.channel;
-    if(!ch?.isTextBased?.())return replyUser(msg,"❌ not readable").catch(()=>{});
-    if(runningScans.has(ch.id))return replyUser(msg,"⚠️ already scanning").catch(()=>{});
-    const start=await replyUser(msg,`⚡ Scan started for <#${ch.id}>...`).catch(()=>{});
-    scanChannel(ch).then(r=>{const c=`✅ Scan complete!\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced||0}\`\n📁 Channel Files: \`${r.channelFiles}\`\n📚 Library Total: \`${r.total}\``;
-      start?start.edit(c).catch(()=>{}):replyUser(msg,c).catch(()=>{});
-    }).catch(e=>{const c=`❌ Failed: \`${e.message.slice(0,1500)}\``;start?start.edit(c).catch(()=>{}):replyUser(msg,c).catch(()=>{});});
+  if (/^\.scan(?:\s|$)/i.test(txt)) {
+    const perm = await checkDotCommandPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+
+    const args = txt.split(/\s+/).slice(1);
+    let ch = null;
+    const mentionMatch = txt.match(/<#(\d+)>/);
+    if (mentionMatch) {
+      try { ch = await client.channels.fetch(mentionMatch[1]); } catch {}
+    }
+    if (!ch && args[0]) {
+      try { ch = await client.channels.fetch(args[0].trim()); } catch {}
+    }
+    if (!ch && !args[0]) { ch = msg.channel; }
+    if (!ch) { replyUser(msg, "❌ provide a channel: `.scan #channel` or `.scan channel_id`, dumbass.").catch(() => {}); return; }
+    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
+    if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning that channel, bro.").catch(() => {}); return; }
+    const startMsg = await replyUser(msg, `⚡ **Scan started** for <#${ch.id}>...`).catch(() => {});
+    scanChannel(ch).then(r => {
+      const content = `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📁 Channel Files: \`${r.channelTotal}\`\n📚 Library Total: \`${r.total}\``;
+      if (startMsg) startMsg.edit(content).catch(() => {});
+      else replyUser(msg, content).catch(() => {});
+    }).catch(e => {
+      const content = `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\``;
+      if (startMsg) startMsg.edit(content).catch(() => {});
+      else replyUser(msg, content).catch(() => {});
+    });
     return;
   }
 
-  // .rn / .rename
-  if(/^\.(?:rename|rn)$/i.test(txt)){
-    const perm=await checkDotCommandPermission(msg,true);
-    if(!perm.ok)return replyUser(msg,perm.reason).catch(()=>{});
-    const isPriv=isOwner(msg.author.id)||await hasAccess(msg.member,msg.author.id);
-    if(!isPriv){
-      if(rnCooldown.has(msg.author.id)){
-        const rem=Math.ceil((rnCooldown.get(msg.author.id)+RN_COOLDOWN_SEC*1000-Date.now())/1000);
-        if(rem>0)return replyUser(msg,`❌ wait ${rem}s before using .rn again, bro.`).catch(()=>{});
+  // .rename / .rn
+  if (/^\.(?:rename|rn)$/i.test(txt)) {
+    const perm = await checkDotCommandPermission(msg, true);
+    if (!perm.allowed) {
+      // Cooldown only applies to non-privileged users
+      const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+      if (!isOwnerOrAccess) {
+        const now = Date.now();
+        if (rnCooldown.has(msg.author.id)) {
+          const remaining = Math.ceil((rnCooldown.get(msg.author.id) + RN_COOLDOWN_SEC * 1000 - now) / 1000);
+          if (remaining > 0) {
+            replyUser(msg, `❌ wait ${remaining}s before using .rn again, bro.`).catch(() => {});
+            return;
+          }
+        }
+        rnCooldown.set(msg.author.id, now);
       }
-      rnCooldown.set(msg.author.id,Date.now());
+      replyUser(msg, perm.reason).catch(() => {});
+      return;
     }
-    let atts=[...(msg.attachments?.values()||[])];
-    if(!atts.length&&msg.reference?.messageId)try{atts=[...allAttachmentsOf(await msg.channel.messages.fetch(msg.reference.messageId))];}catch{}
-    if(!atts.length)return replyUser(msg,"❌ upload or reply to a file").catch(()=>{});
-    const file=atts[0],e=ext(file.name);
-    if(e!=="lua"&&e!=="txt")return replyUser(msg,"❌ only .lua and .txt supported").catch(()=>{});
-    const sent=await replyUser(msg,{embeds:[new EmbedBuilder().setColor(0x808080).setTitle("Renaming your File").setDescription("⏳ Processing...").setFooter({text:`Today at ${new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Asia/Manila"})}`})]}).catch(()=>{});
-    setTimeout(async()=>{try{
-      const text=await (await fetch(file.url)).text();
-      const cleaned=text.replace(/--.*$/gm,"").split("\n").filter(l=>l.trim()!=="").join("\n");
-      let name="";for(let i=0;i<20;i++)name+="abcdefghijklmnopqrstuvwxyz"[Math.random()*26|0];name+=".lua";
-      const lines=cleaned.split("\n").slice(0,5).join("\n")+"\n...";
-      if(sent)await sent.delete().catch(()=>{});
-      await msg.channel.send({content:`<@${msg.author.id}> **Here is the file bro!**`,files:[new AttachmentBuilder(Buffer.from(cleaned),{name})],embeds:[new EmbedBuilder().setColor(0x808080).setTitle("Rename File").setDescription(`\`\`\`lua\n${lines}\n\`\`\``).setFooter({text:`Requested by @${msg.author.username} │ Prince Rename`})]}).catch(()=>{});
-    }catch(e){if(sent)await sent.delete().catch(()=>{});replyUser(msg,`❌ error: ${e.message}`).catch(()=>{});}},isPriv?0:10000);
+
+    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
+    if (!isOwnerOrAccess) {
+      const now = Date.now();
+      if (rnCooldown.has(msg.author.id)) {
+        const remaining = Math.ceil((rnCooldown.get(msg.author.id) + RN_COOLDOWN_SEC * 1000 - now) / 1000);
+        if (remaining > 0) {
+          replyUser(msg, `❌ wait ${remaining}s before using .rn again, bro.`).catch(() => {});
+          return;
+        }
+      }
+      rnCooldown.set(msg.author.id, now);
+    }
+
+    let attachments = [...(msg.attachments?.values() || [])];
+    if (!attachments.length && msg.reference?.messageId) {
+      try {
+        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
+        attachments = [...allAttachmentsOf(refMsg)];
+      } catch {}
+    }
+    if (!attachments.length) { replyUser(msg, "❌ bruh, upload file or reply to a file so i can fix it.").catch(() => {}); return; }
+    const file = attachments[0];
+    const fileExt = ext(file.name);
+    if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
+
+    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+    const workingEmbed = new EmbedBuilder()
+      .setColor(0x808080)
+      .setTitle("Renaming your File")
+      .setDescription("⏳ Processing...")
+      .setFooter({ text: timeFooter });
+    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
+
+    const delay = isOwnerOrAccess ? 0 : 10000;
+    setTimeout(async () => {
+      try {
+        const res = await fetch(file.url);
+        const text = await res.text();
+        const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
+
+        const randChars = "abcdefghijklmnopqrstuvwxyz";
+        let outputName = "";
+        for (let i = 0; i < 20; i++) {
+          outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
+        }
+        outputName += ".lua";
+        const allLines = cleaned.split("\n");
+        const previewLines = allLines.slice(0, 5);
+        let previewText = previewLines.join("\n");
+        if (allLines.length > 5) previewText += "\n...";
+        const resultEmbed = new EmbedBuilder()
+          .setColor(0x808080)
+          .setTitle("Rename File")
+          .setDescription(`\`\`\`lua\n${previewText}\n\`\`\``)
+          .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
+        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+
+        await msg.channel.send({
+          content: `<@${msg.author.id}> **Here is the file bro!**`,
+          files: [fixedFile],
+          embeds: [resultEmbed]
+        }).catch(() => {});
+      } catch (e) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+      }
+    }, delay);
     return;
   }
 
   // .get
-  if(/^\.get(?:\s|$)/i.test(txt)){
-    const perm=await checkDotCommandPermission(msg);
-    if(!perm.ok)return replyUser(msg,perm.reason).catch(()=>{});
-    const id=txt.split(/\s+/)[1];if(!id)return replyUser(msg,"❌ put id of file").catch(()=>{});
-    const file=getFile(id);if(!file)return replyUser(msg,"❌ wrong file id").catch(()=>{});
-    const url=await getFreshUrl(file);
-    replyUser(msg,{content:"**Here is the file twin!**",files:[{attachment:url||file.url,name:file.filename}]}).catch(()=>{});
+  if (/^\.get(?:\s|$)/i.test(txt)) {
+    const perm = await checkDotCommandPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+
+    const id = txt.split(/\s+/)[1];
+    if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
+    const file = getFile(id);
+    if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
+    const freshUrl = await getFreshUrl(file);
+    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
     return;
   }
 
   // .find
-  if(/^\.find(?:\s|$)/i.test(txt)){
-    const perm=await checkDotCommandPermission(msg);
-    if(!perm.ok)return replyUser(msg,perm.reason).catch(()=>{});
-    const q=txt.slice(5).trim();if(!q)return replyUser(msg,"❌ usage: `.find <name>`").catch(()=>{});
-    const r=findFiles(q);if(!r.length)return replyUser(msg,"❌ no matching file").catch(()=>{});
-    const pg=8,tp=Math.ceil(r.length/pg),items=r.slice(0,pg);
-    const time=new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Asia/Manila"});
-    const emb=new EmbedBuilder().setColor(0x808080).setTitle("Finder Search Results").setDescription(items.map(f=>`\`${f.filename}\` — ID: \`${f.id}\``).join("\n")).setFooter({text:`Pages 1/${tp} │ Today at ${time}`});
-    const row=new ActionRowBuilder().addComponents(
+  if (/^\.find(?:\s|$)/i.test(txt)) {
+    const perm = await checkDotCommandPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+
+    const query = txt.slice(5).trim();
+    if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
+    const results = findFiles(query);
+    if (!results.length) { replyUser(msg, "❌ no matching file name for that, dumbass.").catch(() => {}); return; }
+    const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
+    const pageItems = results.slice(0, perPage);
+    const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
+    const embed = new EmbedBuilder().setColor(0x808080).setTitle("Finder Search Results")
+      .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
+      .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeNow}` });
+    const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
-      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(tp<=1)
+      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
     );
-    const sent=await replyUser(msg,{embeds:[emb],components:[row]}).catch(()=>{});
-    if(sent)paginationMenus.set(msg.author.id,{results:r,page:1,totalPages:tp,messageId:sent.id,authorId:msg.author.id,createdAt:Date.now()});
-    return;
-  }
-
-  // ============================================================
-  // .extract = SEND ALL FILES | .et = CAROUSEL
-  // ============================================================
-  if(/^\.(extract|et)(?:\s|$)/i.test(txt)){
-    const perm=await checkDotCommandPermission(msg,true);
-    if(!perm.ok)return replyUser(msg,perm.reason).catch(()=>{});
-    const isCarousel=/^\.et/i.test(txt);
-
-    // Get attachment
-    let atts=[...msg.attachments.values()];
-    if(!atts.length&&msg.reference?.messageId)try{atts=[...(await msg.channel.messages.fetch(msg.reference.messageId)).attachments.values()];}catch{}
-    if(!atts.length)return replyUser(msg,"❌ reply to or upload a zip/html file").catch(()=>{});
-    const att=atts[0];
-
-    // Check file type
-    if(!isZipFile(att.name)&&!isHtmlFile(att.name))
-      return replyUser(msg,"❌ only .zip and .html supported").catch(()=>{});
-
-    // Check size limit (boost tier based)
-    const maxSize=getAllowedMaxBytes(msg.guild);
-    if(att.size>maxSize)
-      return replyUser(msg,`❌ max file is ${maxSize/(1048576)}MB, lol.`).catch(()=>{});
-
-    const proc=await replyUser(msg,"⏳ Processing...").catch(()=>{});
-
-    try {
-      const allFiles=await getZipOrHtmlFiles(att);
-      if(!allFiles.length)return proc?proc.edit("❌ no files found inside").catch(()=>{}):null;
-
-      if(isCarousel){
-        // .et = CAROUSEL MODE
-        const menuId=`et_${Date.now()}_${msg.author.id}`;
-        extractCarouselMenus.set(menuId,{files:allFiles,page:0,userId:msg.author.id});
-        const total=allFiles.length,cur=1;
-        const row=new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`extract_prev_${menuId}`).setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(true),
-          new ButtonBuilder().setLabel(`${cur}/${total}`).setStyle(ButtonStyle.Primary).setDisabled(true),
-          new ButtonBuilder().setCustomId(`extract_next_${menuId}`).setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(total<=1)
-        );
-        const firstFile=allFiles[0];
-        if(proc)await proc.edit({content:"",files:[new AttachmentBuilder(firstFile.buffer,{name:firstFile.name})],components:[row]}).catch(()=>{});
-      }else{
-        // .extract = SEND ALL FILES
-        if(proc)await proc.delete().catch(()=>{});
-        for(let i=0;i<allFiles.length;i+=10){
-          const batch=allFiles.slice(i,i+10).map(f=>new AttachmentBuilder(f.buffer,{name:f.name}));
-          await msg.channel.send({files:batch}).catch(()=>{});
-        }
-      }
-    }catch(e){
-      if(proc)await proc.edit({content:`❌ error: ${e.message.slice(0,2000)}`}).catch(()=>{});
-      else replyUser(msg,`❌ error: ${e.message.slice(0,2000)}`).catch(()=>{});
-    }
+    const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+    if (sent) paginationMenus.set(msg.author.id, { results, page: 1, totalPages, messageId: sent.id, authorId: msg.author.id, createdAt: Date.now() });
     return;
   }
 });
-
 // ============================================================
 // EXPRESS SERVER
 // ============================================================
-const app=express();
-app.get("/",(req,res)=>res.status(200).send(isReady?"✅ ONLINE":"⏳ Starting..."));
-app.get("/health",(req,res)=>res.status(200).json({process:"online",discord:isReady?"ready":"offline",bot:client.user?.tag,guild:GUILD_ID,files:library.files.length}));
-app.listen(PORT,"0.0.0.0",()=>console.log(`🌐 Port ${PORT}`));
-const keepAliveUrl=process.env.RENDER_EXTERNAL_URL||"";
-if(keepAliveUrl)setInterval(()=>{try{require("https").get(`${keepAliveUrl}/health`).on("error",()=>{});}catch{}},180000);
-
-process.on("unhandledRejection",e=>console.error("❌ Rejection:",e));
-process.on("uncaughtException",e=>console.error("❌ Exception:",e));
-
+const app = express();
+app.get("/", (req, res) => res.status(200).send(isReady ? "✅ ONLINE" : "⏳ Starting..."));
+app.get("/health", (req, res) => res.status(200).json({
+  process: "online", discord: isReady ? "ready" : "offline", bot: client.user?.tag, guild: GUILD_ID, files: library.files.length
+}));
+app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
+const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
+if (keepAliveUrl) {
+  setInterval(() => {
+    try { require("https").get(`${keepAliveUrl}/health`).on("error", () => {}); } catch(e) {}
+  }, 180000);
+}
+process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
+process.on("uncaughtException", e => console.error("❌ Exception:", e));
 console.log("🔑 Connecting...");
-client.login(TOKEN).catch(e=>{console.error("❌ Login fail:",e);process.exit(1);});
+client.login(TOKEN).catch(e => { console.error("❌ Login fail:", e); process.exit(1); });
