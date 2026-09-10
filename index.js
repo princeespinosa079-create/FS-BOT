@@ -550,7 +550,7 @@ client.on("interactionCreate", async interaction => {
     const pageLabel = `${menu.index + 1}/${menu.files.length}`;
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index <= 0),
-      new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Secondary).setDisabled(true),
+      new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
       new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index >= menu.files.length - 1)
     );
     await interaction.update({ content: null, files: [attachment], components: [row] }).catch(() => {});
@@ -747,8 +747,8 @@ client.on("messageCreate", async msg => {
   // Others → allowed channel + prince status
   // ─────────────────────────────────────────────
 
-  // .extract / .et — extract zip or html file with carousel pagination
-  if (/^\.(?:extract|et)(?:\s|$)/i.test(txt)) {
+  // .et — carousel mode (buttons + page counter)
+  if (/^\.et(?:\s|$)/i.test(txt)) {
     const perm = await checkDotCommandPermission(msg, true);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
 
@@ -765,9 +765,11 @@ client.on("messageCreate", async msg => {
     }
 
     const sourceFile = attachments[0];
-    const MAX_SIZE = 20 * 1024 * 1024; // 20MB
+    // Dynamic max size based on server boost level
+    const MAX_SIZE = (msg.guild.premiumTier >= 2) ? 50 * 1024 * 1024 : 20 * 1024 * 1024;
+    const sizeLabel = msg.guild.premiumTier >= 2 ? "50MB" : "20MB";
     if (sourceFile.size > MAX_SIZE) {
-      replyUser(msg, "❌ max file is 20MB, lol.").catch(() => {});
+      replyUser(msg, `❌ max file is ${sizeLabel}, lol.`).catch(() => {});
       return;
     }
     const sourceType = isZipFile(sourceFile.name, sourceFile.contentType) ? "zip" : "html";
@@ -785,37 +787,95 @@ client.on("messageCreate", async msg => {
           return;
         }
       } else {
-        // HTML: single file
-          files = [{ name: sourceFile.name, data: buf }];
-        }
-
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-
-        // Send first page of carousel — FILE + BUTTONS only
-        const firstFile = files[0];
-        const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
-        const pageLabel = `1/${files.length}`;
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
-          new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Secondary).setDisabled(true),
-          new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
-        );
-
-        const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
-        if (carouselMsg) {
-          extractCarouselMenus.set(msg.author.id, {
-            files,
-            index: 0,
-            sourceType,
-            messageId: carouselMsg.id,
-            authorId: msg.author.id,
-            createdAt: Date.now()
-          });
-        }
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+        files = [{ name: sourceFile.name, data: buf }];
       }
+
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+
+      // CAROUSEL MODE: FILE + BUTTONS only
+      const firstFile = files[0];
+      const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
+      const pageLabel = `1/${files.length}`;
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
+        new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
+        new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
+      );
+
+      const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
+      if (carouselMsg) {
+        extractCarouselMenus.set(msg.author.id, {
+          files,
+          index: 0,
+          sourceType,
+          messageId: carouselMsg.id,
+          authorId: msg.author.id,
+          createdAt: Date.now()
+        });
+      }
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  // .extract — dump all files at once to the channel
+  if (/^\.extract(?:\s|$)/i.test(txt)) {
+    const perm = await checkDotCommandPermission(msg, true);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+
+    let attachments = extractAttachmentsOf(msg);
+    if (!attachments.length && msg.reference?.messageId) {
+      try {
+        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
+        attachments = extractAttachmentsOf(refMsg);
+      } catch {}
+    }
+    if (!attachments.length) {
+      replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {});
+      return;
+    }
+
+    const sourceFile = attachments[0];
+    // Dynamic max size based on server boost level
+    const MAX_SIZE = (msg.guild.premiumTier >= 2) ? 50 * 1024 * 1024 : 20 * 1024 * 1024;
+    const sizeLabel = msg.guild.premiumTier >= 2 ? "50MB" : "20MB";
+    if (sourceFile.size > MAX_SIZE) {
+      replyUser(msg, `❌ max file is ${sizeLabel}, lol.`).catch(() => {});
+      return;
+    }
+    const sourceType = isZipFile(sourceFile.name, sourceFile.contentType) ? "zip" : "html";
+    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
+
+    try {
+      const buf = await downloadURL(sourceFile.url);
+      let files = [];
+
+      if (sourceType === "zip") {
+        files = extractFilesFromZip(buf);
+        if (!files.length) {
+          if (sentMsg) await sentMsg.delete().catch(() => {});
+          replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
+          return;
+        }
+      } else {
+        files = [{ name: sourceFile.name, data: buf }];
+      }
+
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+
+      // DUMP MODE: send all files in batches of 10
+      const maxPerBatch = 10;
+      for (let i = 0; i < files.length; i += maxPerBatch) {
+        const batch = files.slice(i, i + maxPerBatch);
+        const batchAttachments = batch.map(f => new AttachmentBuilder(f.data, { name: f.name }));
+        await msg.channel.send({ files: batchAttachments }).catch(() => {});
+      }
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+    }
     return;
   }
 
