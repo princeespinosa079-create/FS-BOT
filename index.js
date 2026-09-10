@@ -536,13 +536,9 @@ client.on("interactionCreate", async interaction => {
       return interaction.reply({ content: "❌ this is expired, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     const menu = extractCarouselMenus.get(uid);
-    if (Date.now() - menu.createdAt > EXPIRY_MS) {
-      extractCarouselMenus.delete(uid);
-      return interaction.reply({ content: "❌ this is expired, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
     if (interaction.message.id !== menu.messageId) return;
     if (interaction.user.id !== menu.authorId) {
-      return interaction.reply({ content: "❌ this is not yours, idiot.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     if (interaction.customId === "extract_prev") menu.index--;
     if (interaction.customId === "extract_next") menu.index++;
@@ -551,13 +547,11 @@ client.on("interactionCreate", async interaction => {
 
     const currentFile = menu.files[menu.index];
     const attachment = new AttachmentBuilder(currentFile.data, { name: currentFile.name });
-    const label = menu.sourceType === "zip" ? "zip!" : "html!";
-    const content = `<@${menu.authorId}> **Here is all file in your ${label}** — \`${currentFile.name}\`\n**${menu.index + 1}/${menu.files.length}**`;
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("extract_prev").setLabel("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index <= 0),
       new ButtonBuilder().setCustomId("extract_next").setLabel("➡️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index >= menu.files.length - 1)
     );
-    await interaction.update({ content, files: [attachment], components: [row] }).catch(() => {});
+    await interaction.update({ content: null, files: [attachment], components: [row] }).catch(() => {});
     extractCarouselMenus.set(uid, menu);
     return;
   }
@@ -770,13 +764,7 @@ client.on("messageCreate", async msg => {
 
     const sourceFile = attachments[0];
     const sourceType = isZipFile(sourceFile.name, sourceFile.contentType) ? "zip" : "html";
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-    const workingEmbed = new EmbedBuilder()
-      .setColor(0x808080)
-      .setTitle("Processing File")
-      .setDescription(`⏳ Processing \`${sourceFile.name}\`...`)
-      .setFooter({ text: timeFooter });
-    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
+    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
 
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     const delay = isOwnerOrAccess ? 0 : 10000;
@@ -800,17 +788,15 @@ client.on("messageCreate", async msg => {
 
         if (sentMsg) await sentMsg.delete().catch(() => {});
 
-        // Send first page of carousel
+        // Send first page of carousel — FILE + BUTTONS only
         const firstFile = files[0];
         const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
-        const label = sourceType === "zip" ? "zip!" : "html!";
-        const content = `<@${msg.author.id}> **Here is all file in your ${label}** — \`${firstFile.name}\`\n**1/${files.length}**`;
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId("extract_prev").setLabel("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
           new ButtonBuilder().setCustomId("extract_next").setLabel("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
         );
 
-        const carouselMsg = await msg.channel.send({ content, files: [attachment], components: [row] }).catch(() => {});
+        const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
         if (carouselMsg) {
           extractCarouselMenus.set(msg.author.id, {
             files,
