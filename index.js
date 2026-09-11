@@ -73,7 +73,8 @@ const client = new Client({
     GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.DirectMessages
-  ]
+  ],
+  partials: ["CHANNEL", "MESSAGE"]
 });
 const runningScans = new Set();
 const paginationMenus = new Map();
@@ -722,15 +723,20 @@ client.on("interactionCreate", async interaction => {
       const title = interaction.options.getString("title");
       const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
       await interaction.deleteReply().catch(() => {});
+      const targetChannel = interaction.channel || interaction.user.dmChannel || await interaction.user.createDM().catch(() => null);
+      if (!targetChannel) {
+        await interaction.followUp({ content: "❌ can't send message here.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        return;
+      }
       if (type === "none") {
-        await interaction.channel.send({ content: text });
+        await targetChannel.send({ content: text });
       } else {
         const embed = new EmbedBuilder()
           .setColor(0x808080)
           .setDescription(text)
           .setFooter({ text: timeFooter });
         if (title) embed.setTitle(title);
-        await interaction.channel.send({ embeds: [embed] });
+        await targetChannel.send({ embeds: [embed] });
       }
       return;
     }
@@ -967,7 +973,7 @@ client.on("messageCreate", async msg => {
   if (/^\.et(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, true);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
+    if (isDM && !perm.isBuyer) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
     let attachments = extractAttachmentsOf(msg);
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -1111,17 +1117,49 @@ client.on("messageCreate", async msg => {
     replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
     return;
   }
-  // .dl / .download — gives direct CDN URL
+  // .dl / .download — gives file from library ID OR downloads from Discord CDN link
   if (/^\.(?:dl|download)(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const id = txt.split(/\s+/)[1];
-    if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
-    const file = getFile(id);
+    const arg = txt.split(/\s+/)[1];
+    if (!arg) { replyUser(msg, "❌ put file link, idiot.").catch(() => {}); return; }
+    const isBuyerUser = perm.isBuyer;
+
+    // Check if input is a URL
+    if (/^https?:\/\//i.test(arg) || /cdn\.discordapp\.com/i.test(arg) || /media\.discordapp\.net/i.test(arg)) {
+      const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
+      try {
+        const buf = await downloadURL(arg);
+        // Extract filename from URL
+        let fileName = "file";
+        const urlMatch = arg.match(/\/([^/?#]+)(?:\?|#|$)/);
+        if (urlMatch) fileName = decodeURIComponent(urlMatch[1]);
+        const fileExt = ext(fileName);
+        if (!fileExt) fileName += ".txt";
+        const embed = new EmbedBuilder()
+          .setColor(getEmbedColor(isBuyerUser))
+          .setTitle(isBuyerUser ? "Premium Download" : "Download")
+          .setDescription(`**File:** \`${fileName}\`\n**Size:** \`${(buf.length / 1024).toFixed(1)} KB\``)
+          .setFooter({ text: `Requested by @${msg.author.username}` });
+        const attachment = new AttachmentBuilder(buf, { name: fileName });
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        await msg.channel.send({
+          content: `<@${msg.author.id}> **Here is the file bro!**`,
+          files: [attachment],
+          embeds: [embed]
+        }).catch(() => {});
+      } catch (e) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
+
+    // Otherwise treat as file ID from library
+    const file = getFile(arg);
     if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
     const freshUrl = await getFreshUrl(file);
     const fileUrl = freshUrl || file.url;
-    const isBuyerUser = perm.isBuyer;
     const embed = new EmbedBuilder()
       .setColor(getEmbedColor(isBuyerUser))
       .setTitle(isBuyerUser ? "Premium Download Link" : "Download Link")
