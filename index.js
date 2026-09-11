@@ -25,6 +25,7 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const OWNER_ID = "1302080645987569694";
 const ACCESS_ROLE_ID = "1539883004950876160";
+const PRINCE_ROLE_ID = "1547849774676316181";
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
@@ -67,7 +68,8 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildPresences
+    GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.GuildMembers
   ]
 });
 const runningScans = new Set();
@@ -116,6 +118,39 @@ async function hasPrinceStatus(userId) {
     return false;
   }
 }
+async function isInMainGuild(userId) {
+  try {
+    const mainGuild = await client.guilds.fetch(GUILD_ID);
+    await mainGuild.members.fetch(userId, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function syncPrinceRole(member) {
+  try {
+    if (!member || member.guild.id !== GUILD_ID) return;
+    const hasStatus = (() => {
+      if (!member?.presence?.activities) return false;
+      for (const act of member.presence.activities) {
+        if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
+          return true;
+        }
+      }
+      return false;
+    })();
+    const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
+    if (hasStatus && !hasRole) {
+      await member.roles.add(PRINCE_ROLE_ID).catch(() => {});
+      console.log(`👑 Gave prince role to ${member.user.tag}`);
+    } else if (!hasStatus && hasRole) {
+      await member.roles.remove(PRINCE_ROLE_ID).catch(() => {});
+      console.log(`👑 Removed prince role from ${member.user.tag}`);
+    }
+  } catch (e) {
+    console.warn(`⚠️ syncPrinceRole: ${e.message}`);
+  }
+}
 // ============================================================
 // STANDARD DOT COMMAND PERMISSION CHECK
 // ============================================================
@@ -123,15 +158,34 @@ async function checkDotCommandPermission(msg, needsFileReply = false) {
   const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
   if (isOwnerOrAccess) return { allowed: true };
 
-  if (!channelAllowed(msg)) {
-    return { allowed: false, reason: "❌ use this command in the allowed channel only, dumbass." };
+  // Cross-server check: must be in main guild
+  if (msg.guild.id !== GUILD_ID) {
+    const inMain = await isInMainGuild(msg.author.id);
+    if (!inMain) {
+      return { allowed: false, reason: "❌ join in main server first bro `.gg/TBBAUZu8cW`." };
+    }
   }
-  if (!await hasPrinceStatus(msg.author.id)) {
+
+  const hasStatus = await hasPrinceStatus(msg.author.id);
+
+  // If channel is restricted
+  if (!channelAllowed(msg)) {
+    if (hasStatus) {
+      return { allowed: false, reason: "❌ not here, dumbass." };
+    } else {
+      return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro." };
+    }
+  }
+
+  // Must have status
+  if (!hasStatus) {
     return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro." };
   }
+
   if (needsFileReply && !isReplyingToFile(msg)) {
     return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass." };
   }
+
   return { allowed: true };
 }
 function isReplyingToFile(msg) {
@@ -296,14 +350,21 @@ function zipAttachmentsOf(message) {
 function extractAttachmentsOf(message) {
   const result = [];
   for (const a of message.attachments?.values?.() || []) {
-    if (isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType)) result.push(a);
+    if (isZipFile(a.name, a.contentType)) result.push(a);
   }
   for (const s of message.messageSnapshots?.values?.() || []) {
     for (const a of s.attachments?.values?.() || []) {
-      if (isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType)) result.push(a);
+      if (isZipFile(a.name, a.contentType)) result.push(a);
     }
   }
   return result;
+}
+function getMaxFileSize(guild) {
+  const tier = guild?.premiumTier || 0;
+  if (tier >= 3) return { size: 500 * 1024 * 1024, label: "500MB" };
+  if (tier >= 2) return { size: 100 * 1024 * 1024, label: "100MB" };
+  if (tier >= 1) return { size: 50 * 1024 * 1024, label: "50MB" };
+  return { size: 25 * 1024 * 1024, label: "25MB" };
 }
 async function scanChannel(channel) {
   if (!channel?.isTextBased?.() || !channel.messages) throw new Error("Not a readable text channel.");
@@ -332,30 +393,8 @@ async function scanChannel(channel) {
           const isDupFull = existingFullNames.has(fullName);
           const isDupSize = fileSize > 0 && existingSizes.has(fileSize);
           if (isDupBase || isDupFull || isDupSize) {
-            const beforeCount = library.files.length;
-            library.files = library.files.filter(f => {
-              const fBase = normalizeBase(f.filename);
-              const fFull = normalize(f.filename);
-              const fSize = Number(f.size || 0);
-              if (isDupBase && fBase === baseName) return false;
-              if (isDupFull && fFull === fullName) return false;
-              if (isDupSize && fSize === fileSize) return false;
-              return true;
-            });
-            const removed = beforeCount - library.files.length;
-            if (removed > 0) replacedDup += removed;
-            existingBases.clear(); existingFullNames.clear(); existingSizes.clear();
-            for (const lf of library.files) {
-              existingBases.add(normalizeBase(lf.filename));
-              existingFullNames.add(normalize(lf.filename));
-              existingSizes.add(Number(lf.size || 0));
-            }
-            for (let i = found.length - 1; i >= 0; i--) {
-              const ff = found[i];
-              if (isDupBase && normalizeBase(ff.filename) === baseName) { found.splice(i, 1); continue; }
-              if (isDupFull && normalize(ff.filename) === fullName) { found.splice(i, 1); continue; }
-              if (isDupSize && Number(ff.size || 0) === fileSize) { found.splice(i, 1); continue; }
-            }
+            skippedDup++;
+            continue;
           }
           existingBases.add(baseName);
           existingFullNames.add(fullName);
@@ -506,7 +545,7 @@ async function registerCommands() {
 // ============================================================
 // READY
 // ============================================================
-client.once("ready", () => {
+client.once("ready", async () => {
   isReady = true; lastReady = Date.now();
   console.log("==========================================");
   console.log(`✅ ONLINE: ${client.user.tag}`);
@@ -520,7 +559,31 @@ client.on("shardReady", id => { isReady = true; lastReady = Date.now(); console.
 client.on("shardResume", id => { isReady = true; lastReady = Date.now(); console.log(`🟢 Shard ${id} resumed`); });
 client.on("shardReconnecting", id => { isReady = false; console.warn(`🟡 Shard ${id} reconnecting...`); });
 client.on("shardDisconnect", (e, id) => { isReady = false; console.warn(`🔴 Shard ${id} down: ${e?.code}`); });
-client.on("presenceUpdate", () => {});
+client.on("presenceUpdate", async (oldPresence, newPresence) => {
+  if (!newPresence || !newPresence.member) return;
+  if (newPresence.guild.id !== GUILD_ID) return;
+  await syncPrinceRole(newPresence.member);
+});
+client.on("guildMemberUpdate", async (oldMember, newMember) => {
+  if (newMember.guild.id !== GUILD_ID) return;
+  const hadRole = oldMember?.roles?.cache?.has(PRINCE_ROLE_ID);
+  const hasRole = newMember.roles.cache.has(PRINCE_ROLE_ID);
+  // If role was manually removed but user still has status, re-add it
+  if (hadRole && !hasRole) {
+    const hasStatus = (() => {
+      if (!newMember?.presence?.activities) return false;
+      for (const act of newMember.presence.activities) {
+        if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
+          return true;
+        }
+      }
+      return false;
+    })();
+    if (hasStatus) {
+      await newMember.roles.add(PRINCE_ROLE_ID).catch(() => {});
+    }
+  }
+});
 client.on("error", e => console.error("❌ Discord error:", e));
 client.on("warn", w => console.warn("⚠️ Discord warn:", w));
 // ============================================================
@@ -529,7 +592,6 @@ client.on("warn", w => console.warn("⚠️ Discord warn:", w));
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
   const uid = interaction.user.id;
-
   // ─── EXTRACT CAROUSEL BUTTONS ───
   if (interaction.customId === "extract_prev" || interaction.customId === "extract_next") {
     if (!extractCarouselMenus.has(uid)) {
@@ -544,7 +606,6 @@ client.on("interactionCreate", async interaction => {
     if (interaction.customId === "extract_next") menu.index++;
     if (menu.index < 0) menu.index = 0;
     if (menu.index >= menu.files.length) menu.index = menu.files.length - 1;
-
     const currentFile = menu.files[menu.index];
     const attachment = new AttachmentBuilder(currentFile.data, { name: currentFile.name });
     const pageLabel = `${menu.index + 1}/${menu.files.length}`;
@@ -557,7 +618,6 @@ client.on("interactionCreate", async interaction => {
     extractCarouselMenus.set(uid, menu);
     return;
   }
-
   // ─── FINDER PAGINATION BUTTONS ───
   if (!paginationMenus.has(uid)) {
     return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -610,13 +670,11 @@ client.on("interactionCreate", async interaction => {
   try {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const isOwnerUser = isOwner(interaction.user.id);
-
     // ALL SLASH COMMANDS: OWNER ONLY
     if (!isOwnerUser) {
       await interaction.editReply({ content: "❌ owner only, dumbass." });
       return;
     }
-
     if (interaction.commandName === "setchannel") {
       config.allowedChannelId = interaction.channelId; saveConfig();
       await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Owner only can use slash commands.` }); return;
@@ -684,7 +742,6 @@ client.on("interactionCreate", async interaction => {
 client.on("messageCreate", async msg => {
   if (msg.author.bot || !msg.guild) return;
   const txt = (msg.content || "").trim();
-
   // ─────────────────────────────────────────────
   // OWNER-ONLY DOT COMMANDS
   // ─────────────────────────────────────────────
@@ -740,18 +797,15 @@ client.on("messageCreate", async msg => {
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
-
   // ─────────────────────────────────────────────
   // STANDARD DOT COMMANDS (same requirements)
   // Owner / Access Role → bypass
   // Others → allowed channel + prince status
   // ─────────────────────────────────────────────
-
   // .et — carousel mode (buttons + page counter)
   if (/^\.et(?:\s|$)/i.test(txt)) {
     const perm = await checkDotCommandPermission(msg, true);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-
     let attachments = extractAttachmentsOf(msg);
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -760,38 +814,26 @@ client.on("messageCreate", async msg => {
       } catch {}
     }
     if (!attachments.length) {
-      replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {});
+      replyUser(msg, "❌ upload a .zip file or reply to one, dumbass.").catch(() => {});
       return;
     }
-
     const sourceFile = attachments[0];
     // Dynamic max size based on server boost level
-    const MAX_SIZE = (msg.guild.premiumTier >= 2) ? 50 * 1024 * 1024 : 20 * 1024 * 1024;
-    const sizeLabel = msg.guild.premiumTier >= 2 ? "50MB" : "20MB";
-    if (sourceFile.size > MAX_SIZE) {
-      replyUser(msg, `❌ max file is ${sizeLabel}, lol.`).catch(() => {});
+    const maxInfo = getMaxFileSize(msg.guild);
+    if (sourceFile.size > maxInfo.size) {
+      replyUser(msg, `❌ max file is ${maxInfo.label}, lol.`).catch(() => {});
       return;
     }
-    const sourceType = isZipFile(sourceFile.name, sourceFile.contentType) ? "zip" : "html";
     const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-
     try {
       const buf = await downloadURL(sourceFile.url);
-      let files = [];
-
-      if (sourceType === "zip") {
-        files = extractFilesFromZip(buf);
-        if (!files.length) {
-          if (sentMsg) await sentMsg.delete().catch(() => {});
-          replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
-          return;
-        }
-      } else {
-        files = [{ name: sourceFile.name, data: buf }];
+      let files = extractFilesFromZip(buf);
+      if (!files.length) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
+        return;
       }
-
       if (sentMsg) await sentMsg.delete().catch(() => {});
-
       // CAROUSEL MODE: FILE + BUTTONS only
       const firstFile = files[0];
       const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
@@ -801,13 +843,12 @@ client.on("messageCreate", async msg => {
         new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
         new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
       );
-
       const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
       if (carouselMsg) {
         extractCarouselMenus.set(msg.author.id, {
           files,
           index: 0,
-          sourceType,
+          sourceType: "zip",
           messageId: carouselMsg.id,
           authorId: msg.author.id,
           createdAt: Date.now()
@@ -819,12 +860,10 @@ client.on("messageCreate", async msg => {
     }
     return;
   }
-
   // .extract — dump all files at once to the channel
   if (/^\.extract(?:\s|$)/i.test(txt)) {
     const perm = await checkDotCommandPermission(msg, true);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-
     let attachments = extractAttachmentsOf(msg);
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -833,38 +872,26 @@ client.on("messageCreate", async msg => {
       } catch {}
     }
     if (!attachments.length) {
-      replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {});
+      replyUser(msg, "❌ upload a .zip file or reply to one, dumbass.").catch(() => {});
       return;
     }
-
     const sourceFile = attachments[0];
     // Dynamic max size based on server boost level
-    const MAX_SIZE = (msg.guild.premiumTier >= 2) ? 50 * 1024 * 1024 : 20 * 1024 * 1024;
-    const sizeLabel = msg.guild.premiumTier >= 2 ? "50MB" : "20MB";
-    if (sourceFile.size > MAX_SIZE) {
-      replyUser(msg, `❌ max file is ${sizeLabel}, lol.`).catch(() => {});
+    const maxInfo = getMaxFileSize(msg.guild);
+    if (sourceFile.size > maxInfo.size) {
+      replyUser(msg, `❌ max file is ${maxInfo.label}, lol.`).catch(() => {});
       return;
     }
-    const sourceType = isZipFile(sourceFile.name, sourceFile.contentType) ? "zip" : "html";
     const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-
     try {
       const buf = await downloadURL(sourceFile.url);
-      let files = [];
-
-      if (sourceType === "zip") {
-        files = extractFilesFromZip(buf);
-        if (!files.length) {
-          if (sentMsg) await sentMsg.delete().catch(() => {});
-          replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
-          return;
-        }
-      } else {
-        files = [{ name: sourceFile.name, data: buf }];
+      let files = extractFilesFromZip(buf);
+      if (!files.length) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
+        return;
       }
-
       if (sentMsg) await sentMsg.delete().catch(() => {});
-
       // DUMP MODE: send all files in batches of 10
       const maxPerBatch = 10;
       for (let i = 0; i < files.length; i += maxPerBatch) {
@@ -878,12 +905,10 @@ client.on("messageCreate", async msg => {
     }
     return;
   }
-
   // .scan
   if (/^\.scan(?:\s|$)/i.test(txt)) {
     const perm = await checkDotCommandPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-
     const args = txt.split(/\s+/).slice(1);
     let ch = null;
     const mentionMatch = txt.match(/<#(\d+)>/);
@@ -909,7 +934,6 @@ client.on("messageCreate", async msg => {
     });
     return;
   }
-
   // .rename / .rn
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const perm = await checkDotCommandPermission(msg, true);
@@ -930,7 +954,6 @@ client.on("messageCreate", async msg => {
       replyUser(msg, perm.reason).catch(() => {});
       return;
     }
-
     const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
     if (!isOwnerOrAccess) {
       const now = Date.now();
@@ -943,7 +966,6 @@ client.on("messageCreate", async msg => {
       }
       rnCooldown.set(msg.author.id, now);
     }
-
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -955,7 +977,6 @@ client.on("messageCreate", async msg => {
     const file = attachments[0];
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
-
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
     const workingEmbed = new EmbedBuilder()
       .setColor(0x808080)
@@ -963,14 +984,12 @@ client.on("messageCreate", async msg => {
       .setDescription("⏳ Processing...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-
     const delay = isOwnerOrAccess ? 0 : 10000;
     setTimeout(async () => {
       try {
         const res = await fetch(file.url);
         const text = await res.text();
         const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
-
         const randChars = "abcdefghijklmnopqrstuvwxyz";
         let outputName = "";
         for (let i = 0; i < 20; i++) {
@@ -988,7 +1007,6 @@ client.on("messageCreate", async msg => {
           .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
-
         await msg.channel.send({
           content: `<@${msg.author.id}> **Here is the file bro!**`,
           files: [fixedFile],
@@ -1001,12 +1019,10 @@ client.on("messageCreate", async msg => {
     }, delay);
     return;
   }
-
   // .get
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const perm = await checkDotCommandPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-
     const id = txt.split(/\s+/)[1];
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const file = getFile(id);
@@ -1015,12 +1031,10 @@ client.on("messageCreate", async msg => {
     replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
     return;
   }
-
   // .find
   if (/^\.find(?:\s|$)/i.test(txt)) {
     const perm = await checkDotCommandPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-
     const query = txt.slice(5).trim();
     if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
     const results = findFiles(query);
