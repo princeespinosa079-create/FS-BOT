@@ -127,28 +127,58 @@ async function isInMainGuild(userId) {
     return false;
   }
 }
+function memberHasPrinceStatus(member) {
+  if (!member?.presence?.activities) return false;
+  for (const act of member.presence.activities) {
+    if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function syncPrinceRole(member) {
   try {
     if (!member || member.guild.id !== GUILD_ID) return;
-    const hasStatus = (() => {
-      if (!member?.presence?.activities) return false;
-      for (const act of member.presence.activities) {
-        if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
-          return true;
-        }
-      }
-      return false;
-    })();
+    if (member.user.bot) return;
+    const hasStatus = memberHasPrinceStatus(member);
     const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
     if (hasStatus && !hasRole) {
-      await member.roles.add(PRINCE_ROLE_ID).catch(() => {});
-      console.log(`👑 Gave prince role to ${member.user.tag}`);
+      await member.roles.add(PRINCE_ROLE_ID, "Prince status detected").catch(() => {});
+      console.log(`👑 + Prince role: ${member.user.tag}`);
     } else if (!hasStatus && hasRole) {
-      await member.roles.remove(PRINCE_ROLE_ID).catch(() => {});
-      console.log(`👑 Removed prince role from ${member.user.tag}`);
+      await member.roles.remove(PRINCE_ROLE_ID, "Prince status removed").catch(() => {});
+      console.log(`👑 - Prince role: ${member.user.tag}`);
     }
   } catch (e) {
     console.warn(`⚠️ syncPrinceRole: ${e.message}`);
+  }
+}
+
+async function syncAllPrinceRoles() {
+  try {
+    const mainGuild = await client.guilds.fetch(GUILD_ID);
+    await mainGuild.members.fetch();
+    let added = 0, removed = 0, skipped = 0;
+    for (const member of mainGuild.members.cache.values()) {
+      if (member.user.bot) { skipped++; continue; }
+      try {
+        const hasStatus = memberHasPrinceStatus(member);
+        const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
+        if (hasStatus && !hasRole) {
+          await member.roles.add(PRINCE_ROLE_ID, "Startup sync: status detected").catch(() => {});
+          added++;
+        } else if (!hasStatus && hasRole) {
+          await member.roles.remove(PRINCE_ROLE_ID, "Startup sync: no status").catch(() => {});
+          removed++;
+        }
+      } catch (e) {
+        console.warn(`⚠️ syncAll member ${member.user?.tag}: ${e.message}`);
+      }
+    }
+    console.log(`👑 Startup role sync done: +${added} -${removed} ~${skipped} bots`);
+  } catch (e) {
+    console.warn(`⚠️ syncAllPrinceRoles: ${e.message}`);
   }
 }
 // ============================================================
@@ -361,10 +391,10 @@ function extractAttachmentsOf(message) {
 }
 function getMaxFileSize(guild) {
   const tier = guild?.premiumTier || 0;
-  if (tier >= 3) return { size: 500 * 1024 * 1024, label: "500MB" };
-  if (tier >= 2) return { size: 100 * 1024 * 1024, label: "100MB" };
-  if (tier >= 1) return { size: 50 * 1024 * 1024, label: "50MB" };
-  return { size: 25 * 1024 * 1024, label: "25MB" };
+  if (tier >= 3) return { size: 1000 * 1024 * 1024, label: "1000MB" };
+  if (tier >= 2) return { size: 750 * 1024 * 1024, label: "750MB" };
+  if (tier >= 1) return { size: 500 * 1024 * 1024, label: "500MB" };
+  return { size: 300 * 1024 * 1024, label: "300MB" };
 }
 async function scanChannel(channel) {
   if (!channel?.isTextBased?.() || !channel.messages) throw new Error("Not a readable text channel.");
@@ -471,6 +501,62 @@ function extractFilesFromZip(zipBuffer) {
   return extractedFiles;
 }
 // ============================================================
+// LUA SCRIPT CLEANER
+// ============================================================
+function cleanLuaScript(text) {
+  if (!text) return "";
+  let cleaned = text;
+  // Step 1: Remove multi-line comments --[[ ... ]]
+  cleaned = cleaned.replace(/--\[\[[\s\S]*?\]\]/g, "");
+  // Step 2: Remove single-line comments --... (but preserve --[[ in case already handled)
+  cleaned = cleaned.replace(/--[^\n]*/g, "");
+  // Step 3: Remove print statements (whole lines that are just print calls)
+  // Handles: print("..."), print('...'), print(...), print( [[...]] )
+  cleaned = cleaned.split("\n").map(line => {
+    const trimmed = line.trim();
+    if (/^print\s*\(/.test(trimmed) && /\)\s*[;]?$/.test(trimmed)) {
+      return "";
+    }
+    // Also remove lines that are only print with nothing else
+    if (/^\s*print\s*\(/.test(line) && /\)\s*;?\s*$/.test(line)) {
+      return "";
+    }
+    return line;
+  }).join("\n");
+  // Step 4: Remove URLs / links (http, https, www, discord.gg, etc.)
+  // Remove inline URLs from within lines
+  cleaned = cleaned.replace(/https?:\/\/[^\s"'()\]]+/g, "");
+  cleaned = cleaned.replace(/www\.[^\s"'()\]]+/g, "");
+  cleaned = cleaned.replace(/discord\.gg\/[^\s"'()\]]+/g, "");
+  // Step 5: Remove lines that are purely non-code text (descriptions, notes, etc.)
+  // A line is "code" if it contains code syntax markers OR is a standalone Lua keyword line
+  const LUA_STANDALONE = /^\s*(break|end|goto|return|true|false|nil)\s*[;]?\s*$/;
+  const LUA_CODE_MARKERS = /[=+\-*/%^#<>~{}()\[\];:,.]|["']|::|\.\.\.|\.\.|\b\d+\.?\d*\b/;
+  cleaned = cleaned.split("\n").filter(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return true; // keep empty lines for now, we'll collapse later
+    // Keep if line is just a standalone Lua keyword (end, return, break, etc.)
+    if (LUA_STANDALONE.test(trimmed)) return true;
+    // Keep if has code syntax markers (operators, brackets, quotes, numbers, etc.)
+    if (LUA_CODE_MARKERS.test(trimmed)) return true;
+    // Remove: pure text lines with no code structure
+    return false;
+  }).join("\n");
+  // Step 6: Collapse multiple consecutive empty lines into at most one
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+  // Step 7: Trim leading/trailing whitespace from each line but preserve indentation
+  cleaned = cleaned.split("\n").map(line => {
+    // Keep leading spaces/tabs (indentation), trim trailing
+    const m = line.match(/^(\s*)(.*?)\s*$/);
+    return m ? (m[1] + m[2]) : line.trimEnd();
+  }).join("\n");
+  // Step 8: Remove leading blank lines at start of file
+  cleaned = cleaned.replace(/^\s*\n+/, "");
+  // Step 9: Remove trailing blank lines at end of file
+  cleaned = cleaned.replace(/\n+\s*$/, "\n");
+  return cleaned;
+}
+// ============================================================
 // SLASH COMMANDS
 // ============================================================
 const commands = [
@@ -554,6 +640,8 @@ client.once("ready", async () => {
   console.log("⚡ Bot ready!");
   console.log("==========================================");
   registerCommands().catch(e => console.error("❌ Register:", e.message));
+  // Sync prince roles for all existing members
+  setTimeout(() => syncAllPrinceRoles(), 3000);
 });
 client.on("shardReady", id => { isReady = true; lastReady = Date.now(); console.log(`🟢 Shard ${id} ready`); });
 client.on("shardResume", id => { isReady = true; lastReady = Date.now(); console.log(`🟢 Shard ${id} resumed`); });
@@ -570,17 +658,9 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
   const hasRole = newMember.roles.cache.has(PRINCE_ROLE_ID);
   // If role was manually removed but user still has status, re-add it
   if (hadRole && !hasRole) {
-    const hasStatus = (() => {
-      if (!newMember?.presence?.activities) return false;
-      for (const act of newMember.presence.activities) {
-        if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
-          return true;
-        }
-      }
-      return false;
-    })();
-    if (hasStatus) {
-      await newMember.roles.add(PRINCE_ROLE_ID).catch(() => {});
+    if (memberHasPrinceStatus(newMember)) {
+      await newMember.roles.add(PRINCE_ROLE_ID, "Status still active — re-adding role").catch(() => {});
+      console.log(`👑 ↺ Re-added prince role: ${newMember.user.tag}`);
     }
   }
 });
@@ -989,7 +1069,7 @@ client.on("messageCreate", async msg => {
       try {
         const res = await fetch(file.url);
         const text = await res.text();
-        const cleaned = text.replace(/--.*$/gm, "").split("\n").filter(l => l.trim() !== "").join("\n");
+        const cleaned = cleanLuaScript(text);
         const randChars = "abcdefghijklmnopqrstuvwxyz";
         let outputName = "";
         for (let i = 0; i < 20; i++) {
