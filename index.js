@@ -24,8 +24,10 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const OWNER_ID = "1302080645987569694";
-const ACCESS_ROLE_ID = "1539883004950876160";
+const BUYER_ROLE_ID = "1545669026020069466";
 const PRINCE_ROLE_ID = "1547849774676316181";
+const BUYER_COLOR = 0x00fffc;
+const REGULAR_COLOR = 0x2B2D31;
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
@@ -69,7 +71,8 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildPresences,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.DirectMessages
   ]
 });
 const runningScans = new Set();
@@ -88,15 +91,15 @@ const saveConfig = () => writeJSON(CONFIG_FILE, config);
 function isOwner(userId) {
   return userId === OWNER_ID;
 }
-async function hasAccess(member, userId) {
+async function isBuyer(userId, member) {
   const uid = userId || member?.id;
   if (uid === OWNER_ID) return true;
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
     const mainMember = await mainGuild.members.fetch(uid);
-    return mainMember?.roles?.cache?.has(ACCESS_ROLE_ID);
+    return mainMember?.roles?.cache?.has(BUYER_ROLE_ID);
   } catch {
-    return member?.roles?.cache?.has(ACCESS_ROLE_ID) || false;
+    return member?.roles?.cache?.has(BUYER_ROLE_ID) || false;
   }
 }
 function channelAllowed(target) {
@@ -136,7 +139,6 @@ function memberHasPrinceStatus(member) {
   }
   return false;
 }
-
 async function syncPrinceRole(member) {
   try {
     if (!member || member.guild.id !== GUILD_ID) return;
@@ -154,7 +156,6 @@ async function syncPrinceRole(member) {
     console.warn(`⚠️ syncPrinceRole: ${e.message}`);
   }
 }
-
 async function syncAllPrinceRoles() {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
@@ -182,17 +183,28 @@ async function syncAllPrinceRoles() {
   }
 }
 // ============================================================
-// STANDARD DOT COMMAND PERMISSION CHECK
+// PERMISSION CHECK — REGULAR USER COMMANDS
+// Owner / Buyer → bypass all
+// Regular → status + channel + guild checks
 // ============================================================
-async function checkDotCommandPermission(msg, needsFileReply = false) {
-  const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-  if (isOwnerOrAccess) return { allowed: true };
+async function checkRegularPermission(msg, needsFileReply = false) {
+  // Owner or Buyer → full bypass
+  if (isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member)) {
+    return { allowed: true, isBuyer: true };
+  }
+
+  const isDM = !msg.guild;
+
+  // Regular users CANNOT use in DMs
+  if (isDM) {
+    return { allowed: false, reason: "❌ not here, dumbass.", isBuyer: false };
+  }
 
   // Cross-server check: must be in main guild
   if (msg.guild.id !== GUILD_ID) {
     const inMain = await isInMainGuild(msg.author.id);
     if (!inMain) {
-      return { allowed: false, reason: "❌ join in main server first bro `.gg/TBBAUZu8cW`." };
+      return { allowed: false, reason: "❌ join in main server first bro `.gg/TBBAUZu8cW`.", isBuyer: false };
     }
   }
 
@@ -201,22 +213,22 @@ async function checkDotCommandPermission(msg, needsFileReply = false) {
   // If channel is restricted
   if (!channelAllowed(msg)) {
     if (hasStatus) {
-      return { allowed: false, reason: "❌ not here, dumbass." };
+      return { allowed: false, reason: "❌ not here, dumbass.", isBuyer: false };
     } else {
-      return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro." };
+      return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro.", isBuyer: false };
     }
   }
 
   // Must have status
   if (!hasStatus) {
-    return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro." };
+    return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro.", isBuyer: false };
   }
 
   if (needsFileReply && !isReplyingToFile(msg)) {
-    return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass." };
+    return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass.", isBuyer: false };
   }
 
-  return { allowed: true };
+  return { allowed: true, isBuyer: false };
 }
 function isReplyingToFile(msg) {
   const ref = msg.reference?.messageId;
@@ -225,7 +237,7 @@ function isReplyingToFile(msg) {
   const repliedMsg = channel.messages.cache.get(ref);
   if (!repliedMsg) return false;
   if (repliedMsg.attachments.size > 0) return true;
-  for (const snap of repliedMsg.messageSnapshots.values()) {
+  for (const snap of repliedMsg.messageSnapshots?.values?.() || []) {
     if (snap.attachments.size > 0) return true;
   }
   return false;
@@ -234,6 +246,12 @@ function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
   return message.reply(body);
+}
+function getEmbedColor(isBuyerUser) {
+  return isBuyerUser ? BUYER_COLOR : REGULAR_COLOR;
+}
+function getFinderTitle(isBuyerUser) {
+  return isBuyerUser ? "Premium Finder Source Result" : "Finder Source Results";
 }
 // ============================================================
 // FILE HELPERS
@@ -444,9 +462,10 @@ async function scanChannel(channel) {
     library.files.push(...found);
     library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
     saveLibrary();
+    const libraryTotal = library.files.length;
     const channelTotal = library.files.filter(f => f.channelId === channel.id).length;
     console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | ${replacedDup} replaced | ${skippedDup} skipped | ${pages} pages`);
-    return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: library.files.length, channelTotal };
+    return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: libraryTotal, channelTotal };
   } finally { runningScans.delete(channel.id); }
 }
 async function downloadURL(url) {
@@ -506,72 +525,39 @@ function extractFilesFromZip(zipBuffer) {
 function cleanLuaScript(text) {
   if (!text) return "";
   let cleaned = text;
-  // Step 1: Remove multi-line comments --[[ ... ]]
   cleaned = cleaned.replace(/--\[\[[\s\S]*?\]\]/g, "");
-  // Step 2: Remove single-line comments --... (but preserve --[[ in case already handled)
   cleaned = cleaned.replace(/--[^\n]*/g, "");
-  // Step 3: Remove print statements (whole lines that are just print calls)
-  // Handles: print("..."), print('...'), print(...), print( [[...]] )
   cleaned = cleaned.split("\n").map(line => {
     const trimmed = line.trim();
-    if (/^print\s*\(/.test(trimmed) && /\)\s*[;]?$/.test(trimmed)) {
-      return "";
-    }
-    // Also remove lines that are only print with nothing else
-    if (/^\s*print\s*\(/.test(line) && /\)\s*;?\s*$/.test(line)) {
-      return "";
-    }
+    if (/^print\s*\(/.test(trimmed) && /\)\s*[;]?$/.test(trimmed)) return "";
+    if (/^\s*print\s*\(/.test(line) && /\)\s*;?\s*$/.test(line)) return "";
     return line;
   }).join("\n");
-  // Step 4: Remove URLs / links (http, https, www, discord.gg, etc.)
-  // Remove inline URLs from within lines
   cleaned = cleaned.replace(/https?:\/\/[^\s"'()\]]+/g, "");
   cleaned = cleaned.replace(/www\.[^\s"'()\]]+/g, "");
   cleaned = cleaned.replace(/discord\.gg\/[^\s"'()\]]+/g, "");
-  // Step 5: Remove lines that are purely non-code text (descriptions, notes, etc.)
-  // A line is "code" if it contains code syntax markers OR is a standalone Lua keyword line
   const LUA_STANDALONE = /^\s*(break|end|goto|return|true|false|nil)\s*[;]?\s*$/;
   const LUA_CODE_MARKERS = /[=+\-*/%^#<>~{}()\[\];:,.]|["']|::|\.\.\.|\.\.|\b\d+\.?\d*\b/;
   cleaned = cleaned.split("\n").filter(line => {
     const trimmed = line.trim();
-    if (!trimmed) return true; // keep empty lines for now, we'll collapse later
-    // Keep if line is just a standalone Lua keyword (end, return, break, etc.)
+    if (!trimmed) return true;
     if (LUA_STANDALONE.test(trimmed)) return true;
-    // Keep if has code syntax markers (operators, brackets, quotes, numbers, etc.)
     if (LUA_CODE_MARKERS.test(trimmed)) return true;
-    // Remove: pure text lines with no code structure
     return false;
   }).join("\n");
-  // Step 6: Collapse multiple consecutive empty lines into at most one
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
-  // Step 7: Trim leading/trailing whitespace from each line but preserve indentation
   cleaned = cleaned.split("\n").map(line => {
-    // Keep leading spaces/tabs (indentation), trim trailing
     const m = line.match(/^(\s*)(.*?)\s*$/);
     return m ? (m[1] + m[2]) : line.trimEnd();
   }).join("\n");
-  // Step 8: Remove leading blank lines at start of file
   cleaned = cleaned.replace(/^\s*\n+/, "");
-  // Step 9: Remove trailing blank lines at end of file
   cleaned = cleaned.replace(/\n+\s*$/, "\n");
   return cleaned;
 }
 // ============================================================
-// SLASH COMMANDS
+// SLASH COMMANDS — only /say (global, DM support)
 // ============================================================
 const commands = [
-  new SlashCommandBuilder()
-    .setName("scanchannel")
-    .setDescription("Scan channel — Owner Only.")
-    .addChannelOption(o => o
-      .setName("channel")
-      .setDescription("Channel to scan.")
-      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-      .setRequired(false))
-    .addStringOption(o => o
-      .setName("channel_id")
-      .setDescription("Or paste raw channel ID.")
-      .setRequired(false)),
   new SlashCommandBuilder()
     .setName("say")
     .setDescription("Send message — Owner Only.")
@@ -590,42 +576,20 @@ const commands = [
     .addStringOption(o => o
       .setName("title")
       .setDescription("Optional embed title.")
-      .setRequired(false)),
-  new SlashCommandBuilder()
-    .setName("forwardall")
-    .setDescription("Forward files — Owner Only.")
-    .addChannelOption(o => o
-      .setName("source")
-      .setDescription("Source channel.")
-      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
       .setRequired(false))
-    .addStringOption(o => o
-      .setName("source_id")
-      .setDescription("Or raw source ID.")
-      .setRequired(false))
-    .addChannelOption(o => o
-      .setName("destination")
-      .setDescription("Destination channel.")
-      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-      .setRequired(false))
-    .addStringOption(o => o
-      .setName("destination_id")
-      .setDescription("Or raw destination ID.")
-      .setRequired(false)),
-  new SlashCommandBuilder()
-    .setName("setchannel")
-    .setDescription("Set allowed channel — Owner Only.")
 ].map(c => c.toJSON());
 async function registerCommands() {
   if (registering) return;
   registering = true;
   const rest = new REST({ version: "10", timeout: 15000 }).setToken(TOKEN);
   try {
-    console.log("🧹 Clearing old commands...");
+    console.log("🧹 Clearing old guild commands...");
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] });
+    console.log("🧹 Clearing old global commands...");
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
-    console.log("🧩 Registering guild commands...");
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log("✅ Commands registered.");
+    console.log("🧩 Registering global /say command...");
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log("✅ Commands registered (global).");
   } catch (e) { registering = false; console.error("❌ Register fail:", e.message); }
 }
 // ============================================================
@@ -640,7 +604,6 @@ client.once("ready", async () => {
   console.log("⚡ Bot ready!");
   console.log("==========================================");
   registerCommands().catch(e => console.error("❌ Register:", e.message));
-  // Sync prince roles for all existing members
   setTimeout(() => syncAllPrinceRoles(), 3000);
 });
 client.on("shardReady", id => { isReady = true; lastReady = Date.now(); console.log(`🟢 Shard ${id} ready`); });
@@ -656,7 +619,6 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
   if (newMember.guild.id !== GUILD_ID) return;
   const hadRole = oldMember?.roles?.cache?.has(PRINCE_ROLE_ID);
   const hasRole = newMember.roles.cache.has(PRINCE_ROLE_ID);
-  // If role was manually removed but user still has status, re-add it
   if (hadRole && !hasRole) {
     if (memberHasPrinceStatus(newMember)) {
       await newMember.roles.add(PRINCE_ROLE_ID, "Status still active — re-adding role").catch(() => {});
@@ -719,8 +681,8 @@ client.on("interactionCreate", async interaction => {
   const pageItems = menu.results.slice(start, start + 8);
   const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
   const embed = new EmbedBuilder()
-    .setColor(0x808080)
-    .setTitle("Finder Search Results")
+    .setColor(menu.isBuyer ? BUYER_COLOR : REGULAR_COLOR)
+    .setTitle(menu.isBuyer ? "Premium Finder Source Result" : "Finder Source Results")
     .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
     .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
   const row = new ActionRowBuilder().addComponents(
@@ -742,7 +704,7 @@ setInterval(async () => {
   finally { reconnecting = false; }
 }, 30000).unref?.();
 // ============================================================
-// SLASH COMMAND HANDLER — ALL OWNER ONLY
+// SLASH COMMAND HANDLER — only /say
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -750,14 +712,9 @@ client.on("interactionCreate", async interaction => {
   try {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const isOwnerUser = isOwner(interaction.user.id);
-    // ALL SLASH COMMANDS: OWNER ONLY
     if (!isOwnerUser) {
       await interaction.editReply({ content: "❌ owner only, dumbass." });
       return;
-    }
-    if (interaction.commandName === "setchannel") {
-      config.allowedChannelId = interaction.channelId; saveConfig();
-      await interaction.editReply({ content: `✅ Allowed channel set to <#${interaction.channelId}>.\n\n👑 Owner only can use slash commands.` }); return;
     }
     if (interaction.commandName === "say") {
       const text = interaction.options.getString("text");
@@ -777,39 +734,6 @@ client.on("interactionCreate", async interaction => {
       }
       return;
     }
-    if (interaction.commandName === "scanchannel") {
-      let ch = interaction.options.getChannel("channel");
-      const chId = interaction.options.getString("channel_id");
-      if (!ch && chId) {
-        try { ch = await client.channels.fetch(chId.trim()); }
-        catch { await interaction.editReply({ content: "❌ Invalid channel ID." }); return; }
-      }
-      if (!ch) {
-        await interaction.editReply({ content: "❌ Provide a channel mention or channel_id." }); return;
-      }
-      if (!ch?.isTextBased?.()) { await interaction.editReply({ content: "❌ Not a readable text channel." }); return; }
-      if (runningScans.has(ch.id)) { await interaction.editReply({ content: "⚠️ Already scanning." }); return; }
-      await interaction.editReply({ content: `⚡ **Scan started** for <#${ch.id}>.` });
-      scanChannel(ch).then(r => interaction.editReply({
-        content: `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📁 Channel Files: \`${r.channelTotal}\`\n📚 Library Total: \`${r.total}\``
-      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\`` }).catch(() => {}));
-      return;
-    }
-    if (interaction.commandName === "forwardall") {
-      let src = interaction.options.getChannel("source");
-      let dst = interaction.options.getChannel("destination");
-      const srcId = interaction.options.getString("source_id");
-      const dstId = interaction.options.getString("destination_id");
-      if (!src && srcId) try { src = await client.channels.fetch(srcId.trim()); } catch { await interaction.editReply({ content: "❌ Invalid source ID." }); return; }
-      if (!dst && dstId) try { dst = await client.channels.fetch(dstId.trim()); } catch { await interaction.editReply({ content: "❌ Invalid destination ID." }); return; }
-      if (!src || !dst) { await interaction.editReply({ content: "❌ Provide source + destination." }); return; }
-      if (!src?.isTextBased?.() || !dst?.isTextBased?.()) { await interaction.editReply({ content: "❌ Invalid channel type." }); return; }
-      await interaction.editReply({ content: `⚡ Forwarding from <#${src.id}> → <#${dst.id}>...` });
-      forwardTxt(src, dst).then(r => interaction.editReply({
-        content: `✅ **Forward started!**\n📂 <#${src.id}> → <#${dst.id}>\n📄 Found: \`${r.sent}\` files sending...\n⚡ Forward runs in background, use other commands freely.`
-      }).catch(() => {})).catch(e => interaction.editReply({ content: `❌ Failed: \`${e.message.slice(0,1500)}\`` }).catch(() => {}));
-      return;
-    }
   } catch (e) {
     console.error("❌ Interaction:", e);
     const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
@@ -820,8 +744,10 @@ client.on("interactionCreate", async interaction => {
 // PREFIX COMMANDS
 // ============================================================
 client.on("messageCreate", async msg => {
-  if (msg.author.bot || !msg.guild) return;
+  if (msg.author.bot) return;
   const txt = (msg.content || "").trim();
+  const isDM = !msg.guild;
+
   // ─────────────────────────────────────────────
   // OWNER-ONLY DOT COMMANDS
   // ─────────────────────────────────────────────
@@ -856,6 +782,7 @@ client.on("messageCreate", async msg => {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1); const target = args[0];
     if (!target) {
+      if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
       if (msg.guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
       try { await msg.guild.leave(); replyUser(msg, `✅ left **${msg.guild.name}**, bro.`).catch(() => {}); }
       catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
@@ -878,72 +805,89 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
-  // STANDARD DOT COMMANDS (same requirements)
-  // Owner / Access Role → bypass
-  // Others → allowed channel + prince status
+  // .scanchannel — Owner Only
   // ─────────────────────────────────────────────
-  // .et — carousel mode (buttons + page counter)
-  if (/^\.et(?:\s|$)/i.test(txt)) {
-    const perm = await checkDotCommandPermission(msg, true);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    let attachments = extractAttachmentsOf(msg);
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        attachments = extractAttachmentsOf(refMsg);
-      } catch {}
+  if (/^\.scanchannel(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
+    const args = txt.split(/\s+/).slice(1);
+    let ch = null;
+    const mentionMatch = txt.match(/<#(\d+)>/);
+    if (mentionMatch) {
+      try { ch = await client.channels.fetch(mentionMatch[1]); } catch {}
     }
-    if (!attachments.length) {
-      replyUser(msg, "❌ upload a .zip file or reply to one, dumbass.").catch(() => {});
-      return;
+    if (!ch && args[0]) {
+      try { ch = await client.channels.fetch(args[0].trim()); } catch {}
     }
-    const sourceFile = attachments[0];
-    // Dynamic max size based on server boost level
-    const maxInfo = getMaxFileSize(msg.guild);
-    if (sourceFile.size > maxInfo.size) {
-      replyUser(msg, `❌ max file is ${maxInfo.label}, lol.`).catch(() => {});
-      return;
-    }
-    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-    try {
-      const buf = await downloadURL(sourceFile.url);
-      let files = extractFilesFromZip(buf);
-      if (!files.length) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
-        return;
-      }
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      // CAROUSEL MODE: FILE + BUTTONS only
-      const firstFile = files[0];
-      const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
-      const pageLabel = `1/${files.length}`;
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
-        new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
-        new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
-      );
-      const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
-      if (carouselMsg) {
-        extractCarouselMenus.set(msg.author.id, {
-          files,
-          index: 0,
-          sourceType: "zip",
-          messageId: carouselMsg.id,
-          authorId: msg.author.id,
-          createdAt: Date.now()
-        });
-      }
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
-    }
+    if (!ch) { replyUser(msg, "❌ provide a channel: `.scanchannel #channel` or `.scanchannel channel_id`, dumbass.").catch(() => {}); return; }
+    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
+    if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning that channel, bro.").catch(() => {}); return; }
+    const startMsg = await replyUser(msg, `⚡ **Scan started** for <#${ch.id}>...`).catch(() => {});
+    scanChannel(ch).then(r => {
+      const content = `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📁 Channel Files: \`${r.channelTotal}\`\n📚 Library Total: \`${r.total}\``;
+      if (startMsg) startMsg.edit(content).catch(() => {});
+      else replyUser(msg, content).catch(() => {});
+    }).catch(e => {
+      const content = `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\``;
+      if (startMsg) startMsg.edit(content).catch(() => {});
+      else replyUser(msg, content).catch(() => {});
+    });
     return;
   }
-  // .extract — dump all files at once to the channel
+  // ─────────────────────────────────────────────
+  // .forwardall — Owner Only
+  // ─────────────────────────────────────────────
+  if (/^\.forwardall(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
+    const args = txt.split(/\s+/).slice(1);
+    let src = null, dst = null;
+    const mentions = [...txt.matchAll(/<#(\d+)>/g)];
+    if (mentions.length >= 1) try { src = await client.channels.fetch(mentions[0][1]); } catch {}
+    if (mentions.length >= 2) try { dst = await client.channels.fetch(mentions[1][1]); } catch {}
+    if (!src && args[0]) try { src = await client.channels.fetch(args[0].trim()); } catch {}
+    if (!dst && args[1]) try { dst = await client.channels.fetch(args[1].trim()); } catch {}
+    if (!src || !dst) { replyUser(msg, "❌ provide source + destination: `.forwardall #source #dest` or IDs, dumbass.").catch(() => {}); return; }
+    if (!src?.isTextBased?.() || !dst?.isTextBased?.()) { replyUser(msg, "❌ invalid channel type.").catch(() => {}); return; }
+    const startMsg = await replyUser(msg, `⚡ Forwarding from <#${src.id}> → <#${dst.id}>...`).catch(() => {});
+    forwardTxt(src, dst).then(r => {
+      const content = `✅ **Forward started!**\n📂 <#${src.id}> → <#${dst.id}>\n📄 Found: \`${r.sent}\` files sending...\n⚡ Forward runs in background, use other commands freely.`;
+      if (startMsg) startMsg.edit(content).catch(() => {});
+      else replyUser(msg, content).catch(() => {});
+    }).catch(e => {
+      const content = `❌ Failed: \`${e.message.slice(0,1500)}\``;
+      if (startMsg) startMsg.edit(content).catch(() => {});
+      else replyUser(msg, content).catch(() => {});
+    });
+    return;
+  }
+  // ─────────────────────────────────────────────
+  // .setchannel — Owner Only
+  // ─────────────────────────────────────────────
+  if (/^\.setchannel(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
+    const args = txt.split(/\s+/).slice(1);
+    let ch = null;
+    const mentionMatch = txt.match(/<#(\d+)>/);
+    if (mentionMatch) {
+      try { ch = await client.channels.fetch(mentionMatch[1]); } catch {}
+    }
+    if (!ch && args[0] && args[0] !== ".") {
+      try { ch = await client.channels.fetch(args[0].trim()); } catch {}
+    }
+    if (!ch) { ch = msg.channel; }
+    config.allowedChannelId = ch.id;
+    saveConfig();
+    replyUser(msg, `✅ Allowed channel set to <#${ch.id}>.`).catch(() => {});
+    return;
+  }
+  // ─────────────────────────────────────────────
+  // .extract — Owner Only (regular users CANNOT use)
+  // ─────────────────────────────────────────────
   if (/^\.extract(?:\s|$)/i.test(txt)) {
-    const perm = await checkDotCommandPermission(msg, true);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
     let attachments = extractAttachmentsOf(msg);
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -956,7 +900,6 @@ client.on("messageCreate", async msg => {
       return;
     }
     const sourceFile = attachments[0];
-    // Dynamic max size based on server boost level
     const maxInfo = getMaxFileSize(msg.guild);
     if (sourceFile.size > maxInfo.size) {
       replyUser(msg, `❌ max file is ${maxInfo.label}, lol.`).catch(() => {});
@@ -972,7 +915,6 @@ client.on("messageCreate", async msg => {
         return;
       }
       if (sentMsg) await sentMsg.delete().catch(() => {});
-      // DUMP MODE: send all files in batches of 10
       const maxPerBatch = 10;
       for (let i = 0; i < files.length; i += maxPerBatch) {
         const batch = files.slice(i, i + maxPerBatch);
@@ -985,10 +927,12 @@ client.on("messageCreate", async msg => {
     }
     return;
   }
-  // .scan
+  // ─────────────────────────────────────────────
+  // .scan — Owner Only
+  // ─────────────────────────────────────────────
   if (/^\.scan(?:\s|$)/i.test(txt)) {
-    const perm = await checkDotCommandPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1);
     let ch = null;
     const mentionMatch = txt.match(/<#(\d+)>/);
@@ -1014,13 +958,69 @@ client.on("messageCreate", async msg => {
     });
     return;
   }
+  // ─────────────────────────────────────────────
+  // REGULAR USER COMMANDS
+  // .find, .get, .rename/.rn, .et, .dl/.download
+  // ─────────────────────────────────────────────
+
+  // .et — carousel mode
+  if (/^\.et(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, true);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (isDM) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
+    let attachments = extractAttachmentsOf(msg);
+    if (!attachments.length && msg.reference?.messageId) {
+      try {
+        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
+        attachments = extractAttachmentsOf(refMsg);
+      } catch {}
+    }
+    if (!attachments.length) {
+      replyUser(msg, "❌ upload a .zip file or reply to one, dumbass.").catch(() => {});
+      return;
+    }
+    const sourceFile = attachments[0];
+    const maxInfo = getMaxFileSize(msg.guild);
+    if (sourceFile.size > maxInfo.size) {
+      replyUser(msg, `❌ max file is ${maxInfo.label}, lol.`).catch(() => {});
+      return;
+    }
+    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
+    try {
+      const buf = await downloadURL(sourceFile.url);
+      let files = extractFilesFromZip(buf);
+      if (!files.length) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
+        return;
+      }
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      const firstFile = files[0];
+      const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
+      const pageLabel = `1/${files.length}`;
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
+        new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
+        new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
+      );
+      const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
+      if (carouselMsg) {
+        extractCarouselMenus.set(msg.author.id, {
+          files, index: 0, sourceType: "zip",
+          messageId: carouselMsg.id, authorId: msg.author.id, createdAt: Date.now()
+        });
+      }
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
   // .rename / .rn
   if (/^\.(?:rename|rn)$/i.test(txt)) {
-    const perm = await checkDotCommandPermission(msg, true);
+    const perm = await checkRegularPermission(msg, true);
     if (!perm.allowed) {
-      // Cooldown only applies to non-privileged users
-      const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-      if (!isOwnerOrAccess) {
+      if (!perm.isBuyer) {
         const now = Date.now();
         if (rnCooldown.has(msg.author.id)) {
           const remaining = Math.ceil((rnCooldown.get(msg.author.id) + RN_COOLDOWN_SEC * 1000 - now) / 1000);
@@ -1034,8 +1034,8 @@ client.on("messageCreate", async msg => {
       replyUser(msg, perm.reason).catch(() => {});
       return;
     }
-    const isOwnerOrAccess = isOwner(msg.author.id) || await hasAccess(msg.member, msg.author.id);
-    if (!isOwnerOrAccess) {
+    const isBuyerUser = perm.isBuyer;
+    if (!isBuyerUser) {
       const now = Date.now();
       if (rnCooldown.has(msg.author.id)) {
         const remaining = Math.ceil((rnCooldown.get(msg.author.id) + RN_COOLDOWN_SEC * 1000 - now) / 1000);
@@ -1059,12 +1059,12 @@ client.on("messageCreate", async msg => {
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
     const workingEmbed = new EmbedBuilder()
-      .setColor(0x808080)
+      .setColor(getEmbedColor(isBuyerUser))
       .setTitle("Renaming your File")
       .setDescription("⏳ Processing...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-    const delay = isOwnerOrAccess ? 0 : 10000;
+    const delay = isBuyerUser ? 0 : 10000;
     setTimeout(async () => {
       try {
         const res = await fetch(file.url);
@@ -1081,10 +1081,10 @@ client.on("messageCreate", async msg => {
         let previewText = previewLines.join("\n");
         if (allLines.length > 5) previewText += "\n...";
         const resultEmbed = new EmbedBuilder()
-          .setColor(0x808080)
-          .setTitle("Rename File")
+          .setColor(getEmbedColor(isBuyerUser))
+          .setTitle(isBuyerUser ? "Premium Rename File" : "Rename File")
           .setDescription(`\`\`\`lua\n${previewText}\n\`\`\``)
-          .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
+          .setFooter({ text: `Requested by @${msg.author.username} │ ${isBuyerUser ? "Premium" : "Prince"} Rename` });
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
@@ -1101,7 +1101,7 @@ client.on("messageCreate", async msg => {
   }
   // .get
   if (/^\.get(?:\s|$)/i.test(txt)) {
-    const perm = await checkDotCommandPermission(msg);
+    const perm = await checkRegularPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
     const id = txt.split(/\s+/)[1];
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
@@ -1111,18 +1111,40 @@ client.on("messageCreate", async msg => {
     replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
     return;
   }
+  // .dl / .download — gives direct CDN URL
+  if (/^\.(?:dl|download)(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    const id = txt.split(/\s+/)[1];
+    if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
+    const file = getFile(id);
+    if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
+    const freshUrl = await getFreshUrl(file);
+    const fileUrl = freshUrl || file.url;
+    const isBuyerUser = perm.isBuyer;
+    const embed = new EmbedBuilder()
+      .setColor(getEmbedColor(isBuyerUser))
+      .setTitle(isBuyerUser ? "Premium Download Link" : "Download Link")
+      .setDescription(`**File:** \`${file.filename}\`\n**ID:** \`${file.id}\`\n\n🔗 **Direct Link:**\n${fileUrl}`)
+      .setFooter({ text: `Requested by @${msg.author.username}` });
+    replyUser(msg, { embeds: [embed] }).catch(() => {});
+    return;
+  }
   // .find
   if (/^\.find(?:\s|$)/i.test(txt)) {
-    const perm = await checkDotCommandPermission(msg);
+    const perm = await checkRegularPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
     const query = txt.slice(5).trim();
     if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
     const results = findFiles(query);
     if (!results.length) { replyUser(msg, "❌ no matching file name for that, dumbass.").catch(() => {}); return; }
+    const isBuyerUser = perm.isBuyer;
     const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
     const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
-    const embed = new EmbedBuilder().setColor(0x808080).setTitle("Finder Search Results")
+    const embed = new EmbedBuilder()
+      .setColor(getEmbedColor(isBuyerUser))
+      .setTitle(getFinderTitle(isBuyerUser))
       .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
       .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeNow}` });
     const row = new ActionRowBuilder().addComponents(
@@ -1130,7 +1152,10 @@ client.on("messageCreate", async msg => {
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
     );
     const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
-    if (sent) paginationMenus.set(msg.author.id, { results, page: 1, totalPages, messageId: sent.id, authorId: msg.author.id, createdAt: Date.now() });
+    if (sent) paginationMenus.set(msg.author.id, {
+      results, page: 1, totalPages, messageId: sent.id,
+      authorId: msg.author.id, createdAt: Date.now(), isBuyer: isBuyerUser
+    });
     return;
   }
 });
