@@ -26,7 +26,7 @@ const GUILD_ID = process.env.GUILD_ID;
 const OWNER_ID = "1302080645987569694";
 const BUYER_ROLE_ID = "1545669026020069466";
 const PRINCE_ROLE_ID = "1547849774676316181";
-const BUYER_COLOR = 0x00fffc;
+const BUYER_COLOR = 0xFFFFFF;
 const REGULAR_COLOR = 0x2B2D31;
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
@@ -97,10 +97,17 @@ async function isBuyer(userId, member) {
   if (uid === OWNER_ID) return true;
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
-    const mainMember = await mainGuild.members.fetch(uid);
-    return mainMember?.roles?.cache?.has(BUYER_ROLE_ID);
-  } catch {
-    return member?.roles?.cache?.has(BUYER_ROLE_ID) || false;
+    const mainMember = await mainGuild.members.fetch({ user: uid, force: true });
+    if (!mainMember) return false;
+    // Ensure roles are loaded
+    if (mainMember.roles.cache.size === 0) {
+      try { await mainMember.roles.fetch(); } catch {}
+    }
+    return mainMember.roles.cache.has(BUYER_ROLE_ID);
+  } catch (e) {
+    // Fallback: check local member if available
+    if (member?.roles?.cache?.has(BUYER_ROLE_ID)) return true;
+    return false;
   }
 }
 function channelAllowed(target) {
@@ -252,7 +259,7 @@ function getEmbedColor(isBuyerUser) {
   return isBuyerUser ? BUYER_COLOR : REGULAR_COLOR;
 }
 function getFinderTitle(isBuyerUser) {
-  return isBuyerUser ? "Premium Finder Source Result" : "Finder Source Results";
+  return isBuyerUser ? "Premium Finder Source Results" : "Finder Source Results";
 }
 // ============================================================
 // FILE HELPERS
@@ -683,7 +690,7 @@ client.on("interactionCreate", async interaction => {
   const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
   const embed = new EmbedBuilder()
     .setColor(menu.isBuyer ? BUYER_COLOR : REGULAR_COLOR)
-    .setTitle(menu.isBuyer ? "Premium Finder Source Result" : "Finder Source Results")
+    .setTitle(getFinderTitle(menu.isBuyer))
     .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
     .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
   const row = new ActionRowBuilder().addComponents(
@@ -1088,9 +1095,9 @@ client.on("messageCreate", async msg => {
         if (allLines.length > 5) previewText += "\n...";
         const resultEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
-          .setTitle(isBuyerUser ? "Premium Rename File" : "Rename File")
+          .setTitle("Rename File")
           .setDescription(`\`\`\`lua\n${previewText}\n\`\`\``)
-          .setFooter({ text: `Requested by @${msg.author.username} │ ${isBuyerUser ? "Premium" : "Prince"} Rename` });
+          .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
@@ -1136,17 +1143,11 @@ client.on("messageCreate", async msg => {
         if (urlMatch) fileName = decodeURIComponent(urlMatch[1]);
         const fileExt = ext(fileName);
         if (!fileExt) fileName += ".txt";
-        const embed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle(isBuyerUser ? "Premium Download" : "Download")
-          .setDescription(`**File:** \`${fileName}\`\n**Size:** \`${(buf.length / 1024).toFixed(1)} KB\``)
-          .setFooter({ text: `Requested by @${msg.author.username}` });
         const attachment = new AttachmentBuilder(buf, { name: fileName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
           content: `<@${msg.author.id}> **Here is the file bro!**`,
-          files: [attachment],
-          embeds: [embed]
+          files: [attachment]
         }).catch(() => {});
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
@@ -1162,7 +1163,7 @@ client.on("messageCreate", async msg => {
     const fileUrl = freshUrl || file.url;
     const embed = new EmbedBuilder()
       .setColor(getEmbedColor(isBuyerUser))
-      .setTitle(isBuyerUser ? "Premium Download Link" : "Download Link")
+      .setTitle("Download Link")
       .setDescription(`**File:** \`${file.filename}\`\n**ID:** \`${file.id}\`\n\n🔗 **Direct Link:**\n${fileUrl}`)
       .setFooter({ text: `Requested by @${msg.author.username}` });
     replyUser(msg, { embeds: [embed] }).catch(() => {});
