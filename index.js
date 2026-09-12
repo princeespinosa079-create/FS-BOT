@@ -931,17 +931,20 @@ client.on("messageCreate", async msg => {
       const headers = { "Content-Type": "application/json" };
       const apiKey = process.env.PASTEFY_API_KEY;
       if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-      const pastefyRes = await fetch("https://pastefy.app/api/v2/pastes", {
+      const pastefyRes = await fetch("https://pastefy.app/api/v2/paste", {
         method: "POST",
         headers,
         body: JSON.stringify({
           title: file.name || "script.lua",
           content: content,
-          type: "PUBLIC",
+          visibility: "unlisted",
           syntax: "lua"
         })
       });
-      if (!pastefyRes.ok) throw new Error(`Pastefy HTTP ${pastefyRes.status}`);
+      if (!pastefyRes.ok) {
+  const errText = await pastefyRes.text();
+  throw new Error(`Pastefy HTTP ${pastefyRes.status}: ${errText.slice(0,150)}`);
+}
       const pasteData = await pastefyRes.json();
       const pasteId = pasteData.id || pasteData._id;
       if (!pasteId) throw new Error("No paste ID returned");
