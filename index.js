@@ -769,9 +769,8 @@ client.on("interactionCreate", async interaction => {
   try {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const isOwnerUser = isOwner(interaction.user.id);
-    const isBuyerUser = await isBuyer(interaction.user.id, interaction.member || null);
-    if (!isOwnerUser && !isBuyerUser) {
-      await interaction.editReply({ content: "❌ buyer or owner only, dumbass." });
+    if (!isOwnerUser) {
+      await interaction.editReply({ content: "❌ owner only, dumbass." });
       return;
     }
     if (interaction.commandName === "say") {
@@ -865,6 +864,94 @@ client.on("messageCreate", async msg => {
       if (guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
       await guild.leave(); replyUser(msg, `✅ left **${guild.name}**, bro.`).catch(() => {});
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
+    return;
+  }
+  // ─────────────────────────────────────────────
+  // .dm — Owner Only (send DM to any user)
+  // ─────────────────────────────────────────────
+  if (/^\.dm(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const args = txt.split(/\s+/).slice(1);
+    let targetUser = null;
+    let messageText = "";
+    // Check for user mention
+    const mentionMatch = txt.match(/<@!?(\d+)>/);
+    if (mentionMatch) {
+      try { targetUser = await client.users.fetch(mentionMatch[1]); } catch {}
+      // Message is everything after the mention
+      const mentionEnd = txt.indexOf(mentionMatch[0]) + mentionMatch[0].length;
+      messageText = txt.slice(mentionEnd).trim();
+    } else if (args[0] && /^\d+$/.test(args[0])) {
+      // Raw user ID
+      try { targetUser = await client.users.fetch(args[0].trim()); } catch {}
+      messageText = args.slice(1).join(" ").trim();
+    }
+    if (!targetUser) { replyUser(msg, "❌ mention a user or paste user ID, dumbass.").catch(() => {}); return; }
+    if (!messageText) { replyUser(msg, "❌ put a message to send, idiot.").catch(() => {}); return; }
+    try {
+      const dmChannel = await targetUser.createDM();
+      await dmChannel.send(messageText);
+      replyUser(msg, `✅ DM sent to **${targetUser.tag}**!\n\n📨 Message:\n> ${messageText.slice(0, 1500)}`).catch(() => {});
+    } catch (e) {
+      replyUser(msg, `❌ can't DM **${targetUser.tag}** — they have DMs closed or blocked the bot.`).catch(() => {});
+    }
+    return;
+  }
+  // ─────────────────────────────────────────────
+  // .upload — Owner Only (file → Pastefy loadstring)
+  // ─────────────────────────────────────────────
+  if (/^\.upload(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    let attachments = [...(msg.attachments?.values() || [])].filter(a => {
+      const e = ext(a.name);
+      return e === "txt" || e === "lua";
+    });
+    if (!attachments.length && msg.reference?.messageId) {
+      try {
+        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
+        for (const a of refMsg.attachments?.values?.() || []) {
+          const e = ext(a.name);
+          if (e === "txt" || e === "lua") attachments.push(a);
+        }
+        for (const s of refMsg.messageSnapshots?.values?.() || []) {
+          for (const a of s.attachments?.values?.() || []) {
+            const e = ext(a.name);
+            if (e === "txt" || e === "lua") attachments.push(a);
+          }
+        }
+      } catch {}
+    }
+    if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
+    const file = attachments[0];
+    const sentMsg = await replyUser(msg, "⏳ Uploading...").catch(() => {});
+    try {
+      const res = await fetch(file.url);
+      const content = await res.text();
+      // Upload to Pastefy
+      const pastefyRes = await fetch("https://pastefy.app/api/v2/pastes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: file.name || "script.lua",
+          content: content,
+          type: "PUBLIC",
+          syntax: "lua"
+        })
+      });
+      if (!pastefyRes.ok) throw new Error(`Pastefy HTTP ${pastefyRes.status}`);
+      const pasteData = await pastefyRes.json();
+      const pasteId = pasteData.id || pasteData._id;
+      if (!pasteId) throw new Error("No paste ID returned");
+      const rawUrl = `https://pastefy.app/${pasteId}/raw`;
+      const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      await msg.channel.send({
+        content: `<@${msg.author.id}> Here is the script bro!\n\`\`\`lua\n${loadstring}\n\`\`\``
+      }).catch(() => {});
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ upload failed: ${e.message}`).catch(() => {});
+    }
     return;
   }
   // ─────────────────────────────────────────────
