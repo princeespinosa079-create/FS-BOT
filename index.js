@@ -94,19 +94,29 @@ function isOwner(userId) {
 }
 async function isBuyer(userId, member) {
   const uid = userId || member?.id;
+  if (!uid) return false;
   if (uid === OWNER_ID) return true;
+  // Try local member first (when in guild context)
+  if (member?.roles?.cache?.has(BUYER_ROLE_ID)) return true;
+  // Fetch from main guild — reliable for DM context
   try {
-    const mainGuild = await client.guilds.fetch(GUILD_ID);
-    const mainMember = await mainGuild.members.fetch({ user: uid, force: true });
+    let mainGuild = client.guilds.cache.get(GUILD_ID);
+    if (!mainGuild) mainGuild = await client.guilds.fetch(GUILD_ID);
+    if (!mainGuild) return false;
+    const mainMember = await mainGuild.members.fetch({ user: uid, force: true }).catch(() => null);
     if (!mainMember) return false;
-    // Ensure roles are loaded
-    if (mainMember.roles.cache.size === 0) {
-      try { await mainMember.roles.fetch(); } catch {}
+    // Check roles cache
+    if (mainMember.roles.cache.has(BUYER_ROLE_ID)) return true;
+    // Force-fetch roles if cache is empty
+    if (mainMember.roles.cache.size <= 1) {
+      try {
+        await mainMember.roles.fetch();
+        if (mainMember.roles.cache.has(BUYER_ROLE_ID)) return true;
+      } catch {}
     }
-    return mainMember.roles.cache.has(BUYER_ROLE_ID);
+    return false;
   } catch (e) {
-    // Fallback: check local member if available
-    if (member?.roles?.cache?.has(BUYER_ROLE_ID)) return true;
+    console.warn(`⚠️ isBuyer failed for ${uid}: ${e.message}`);
     return false;
   }
 }
