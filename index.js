@@ -935,10 +935,8 @@ client.on("messageCreate", async msg => {
         method: "POST",
         headers,
         body: JSON.stringify({
-  content: content,
-  title: file.name || "script.lua",
-})
-
+          content: content,
+          title: file.name || "script.lua",
           visibility: "unlisted",
           syntax: "lua"
         })
