@@ -928,9 +928,12 @@ client.on("messageCreate", async msg => {
       const res = await fetch(file.url);
       const content = await res.text();
       // Upload to Pastefy
+      const headers = { "Content-Type": "application/json" };
+      const apiKey = process.env.PASTEFY_API_KEY;
+      if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
       const pastefyRes = await fetch("https://pastefy.app/api/v2/pastes", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           title: file.name || "script.lua",
           content: content,
