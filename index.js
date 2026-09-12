@@ -867,34 +867,48 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
-  // .dm — Owner Only (send DM to any user)
+  // .ghostdm — Owner Only (DM all members with a role)
   // ─────────────────────────────────────────────
-  if (/^\.dm(?:\s|$)/i.test(txt)) {
+  if (/^\.ghostdm(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const args = txt.split(/\s+/).slice(1);
-    let targetUser = null;
-    let messageText = "";
-    // Check for user mention
-    const mentionMatch = txt.match(/<@!?(\d+)>/);
-    if (mentionMatch) {
-      try { targetUser = await client.users.fetch(mentionMatch[1]); } catch {}
-      // Message is everything after the mention
-      const mentionEnd = txt.indexOf(mentionMatch[0]) + mentionMatch[0].length;
-      messageText = txt.slice(mentionEnd).trim();
-    } else if (args[0] && /^\d+$/.test(args[0])) {
-      // Raw user ID
-      try { targetUser = await client.users.fetch(args[0].trim()); } catch {}
-      messageText = args.slice(1).join(" ").trim();
+    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
+    // Parse role mention or ID
+    const roleMention = txt.match(/<@&(\d+)>/);
+    let roleId = null;
+    let messageStart = 0;
+    if (roleMention) {
+      roleId = roleMention[1];
+      messageStart = txt.indexOf(roleMention[0]) + roleMention[0].length;
+    } else {
+      const args = txt.split(/\s+/).slice(1);
+      if (args[0] && /^\d+$/.test(args[0])) {
+        roleId = args[0].trim();
+        messageStart = txt.indexOf(args[0]) + args[0].length;
+      }
     }
-    if (!targetUser) { replyUser(msg, "❌ mention a user or paste user ID, dumbass.").catch(() => {}); return; }
+    if (!roleId) { replyUser(msg, "❌ mention a role or paste role ID, dumbass.").catch(() => {}); return; }
+    const messageText = txt.slice(messageStart).trim();
     if (!messageText) { replyUser(msg, "❌ put a message to send, idiot.").catch(() => {}); return; }
-    try {
-      const dmChannel = await targetUser.createDM();
-      await dmChannel.send(messageText);
-      replyUser(msg, `✅ DM sent to **${targetUser.tag}**!\n\n📨 Message:\n> ${messageText.slice(0, 1500)}`).catch(() => {});
-    } catch (e) {
-      replyUser(msg, `❌ can't DM **${targetUser.tag}** — they have DMs closed or blocked the bot.`).catch(() => {});
+    // Fetch role and members
+    let role = null;
+    try { role = await msg.guild.roles.fetch(roleId); } catch {}
+    if (!role) { replyUser(msg, "❌ invalid role, dumbass.").catch(() => {}); return; }
+    const startMsg = await replyUser(msg, `⏳ Sending DMs to **${role.members?.size || "?"}** members with role **${role.name}**...`).catch(() => {});
+    let sent = 0, failed = 0;
+    // Fetch all members of the guild to ensure cache is populated
+    try { await msg.guild.members.fetch(); } catch {}
+    const membersWithRole = msg.guild.members.cache.filter(m => m.roles.cache.has(roleId) && !m.user.bot);
+    for (const member of membersWithRole.values()) {
+      try {
+        await member.send(messageText);
+        sent++;
+      } catch {
+        failed++;
+      }
     }
+    const result = `✅ **GhostDM complete!**\n\n👥 Role: **${role.name}**\n✅ Sent: \`${sent}\`\n❌ Failed: \`${failed}\`\n📨 Message:\n> ${messageText.slice(0, 1000)}`;
+    if (startMsg) startMsg.edit(result).catch(() => {});
+    else replyUser(msg, result).catch(() => {});
     return;
   }
   // ─────────────────────────────────────────────
@@ -927,18 +941,51 @@ client.on("messageCreate", async msg => {
     try {
       const res = await fetch(file.url);
       const content = await res.text();
-      // Upload to Catbox (no API key needed)
-      const formData = new FormData();
-      formData.append("reqtype", "fileupload");
-      formData.append("fileToUpload", new Blob([content], { type: "text/plain" }), file.name || "script.lua");
-      const catboxRes = await fetch("https://catbox.moe/user/api.php", {
+      const apiKey = process.env.PASTEFY_API_KEY;
+      if (!apiKey) throw new Error("PASTEFY_API_KEY not set in env vars");
+      // Try Pastefy API v2 with minimal fields
+      const headers = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      };
+      const body = {
+        title: file.name || "script.lua",
+        content: content
+      };
+      let pastefyRes = await fetch("https://pastefy.app/api/v2/paste", {
         method: "POST",
-        body: formData
+        headers,
+        body: JSON.stringify(body)
       });
-      if (!catboxRes.ok) throw new Error(`Catbox HTTP ${catboxRes.status}`);
-      const fileUrl = (await catboxRes.text()).trim();
-      if (!fileUrl.startsWith("http")) throw new Error("Invalid response from Catbox");
-      const loadstring = `loadstring(game:HttpGet("${fileUrl}"))()`;
+      let rawUrl = null;
+      if (pastefyRes.ok) {
+        try {
+          const data = await pastefyRes.json();
+          const pid = data?.id || data?._id || data?.paste?.id;
+          if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
+        } catch {}
+      }
+      // Fallback: try v1 endpoint
+      if (!rawUrl) {
+        const v1Res = await fetch("https://pastefy.app/api/v1/paste", {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body)
+        });
+        if (v1Res.ok) {
+          try {
+            const data = await v1Res.json();
+            const pid = data?.id || data?._id || data?.paste?.id;
+            if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
+          } catch {}
+        } else {
+          // Show v2 error if both failed
+          const errText = await pastefyRes.text();
+          throw new Error(`Pastefy v2 HTTP ${pastefyRes.status}: ${errText.slice(0, 150)}`);
+        }
+      }
+      if (!rawUrl) throw new Error("Could not get paste URL from Pastefy response");
+      const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
       if (sentMsg) await sentMsg.delete().catch(() => {});
       await msg.channel.send({
         content: `<@${msg.author.id}> Here is the script bro!\n\`\`\`lua\n${loadstring}\n\`\`\``
