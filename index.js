@@ -769,8 +769,9 @@ client.on("interactionCreate", async interaction => {
   try {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const isOwnerUser = isOwner(interaction.user.id);
-    if (!isOwnerUser) {
-      await interaction.editReply({ content: "❌ owner only, dumbass." });
+    const isBuyerUser = await isBuyer(interaction.user.id, interaction.member || null);
+    if (!isOwnerUser && !isBuyerUser) {
+      await interaction.editReply({ content: "❌ buyer or owner only, dumbass." });
       return;
     }
     if (interaction.commandName === "say") {
