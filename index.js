@@ -912,10 +912,12 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
-  // .upload — Owner Only (file → Pastefy loadstring)
+  // .upload — file → Pastefy loadstring (regular + buyer)
   // ─────────────────────────────────────────────
   if (/^\.upload(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const perm = await checkRegularPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    const isBuyerUser = perm.isBuyer;
     let attachments = [...(msg.attachments?.values() || [])].filter(a => {
       const e = ext(a.name);
       return e === "txt" || e === "lua";
@@ -987,8 +989,14 @@ client.on("messageCreate", async msg => {
       if (!rawUrl) throw new Error("Could not get paste URL from Pastefy response");
       const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
       if (sentMsg) await sentMsg.delete().catch(() => {});
+      const embed = new EmbedBuilder()
+        .setColor(getEmbedColor(isBuyerUser))
+        .setTitle("Script Copy")
+        .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
+        .setFooter({ text: `Request by @${msg.author.username}│File Turn Into Script` });
       await msg.channel.send({
-        content: `<@${msg.author.id}> Here is the script bro!\n\`\`\`lua\n${loadstring}\n\`\`\``
+        content: `<@${msg.author.id}> Here is the script bro!`,
+        embeds: [embed]
       }).catch(() => {});
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
