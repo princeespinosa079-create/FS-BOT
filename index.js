@@ -927,29 +927,18 @@ client.on("messageCreate", async msg => {
     try {
       const res = await fetch(file.url);
       const content = await res.text();
-      // Upload to Pastefy
-      const headers = { "Content-Type": "application/json" };
-      const apiKey = process.env.PASTEFY_API_KEY;
-      if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-      const pastefyRes = await fetch("https://pastefy.app/api/v2/paste", {
+      // Upload to Catbox (no API key needed)
+      const formData = new FormData();
+      formData.append("reqtype", "fileupload");
+      formData.append("fileToUpload", new Blob([content], { type: "text/plain" }), file.name || "script.lua");
+      const catboxRes = await fetch("https://catbox.moe/user/api.php", {
         method: "POST",
-        headers,
-        body: JSON.stringify({
-          content: content,
-          title: file.name || "script.lua",
-          visibility: "unlisted",
-          syntax: "lua"
-        })
+        body: formData
       });
-      if (!pastefyRes.ok) {
-  const errText = await pastefyRes.text();
-  throw new Error(`Pastefy HTTP ${pastefyRes.status}: ${errText.slice(0,150)}`);
-}
-      const pasteData = await pastefyRes.json();
-      const pasteId = pasteData.id || pasteData._id;
-      if (!pasteId) throw new Error("No paste ID returned");
-      const rawUrl = `https://pastefy.app/${pasteId}/raw`;
-      const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
+      if (!catboxRes.ok) throw new Error(`Catbox HTTP ${catboxRes.status}`);
+      const fileUrl = (await catboxRes.text()).trim();
+      if (!fileUrl.startsWith("http")) throw new Error("Invalid response from Catbox");
+      const loadstring = `loadstring(game:HttpGet("${fileUrl}"))()`;
       if (sentMsg) await sentMsg.delete().catch(() => {});
       await msg.channel.send({
         content: `<@${msg.author.id}> Here is the script bro!\n\`\`\`lua\n${loadstring}\n\`\`\``
