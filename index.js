@@ -68,7 +68,7 @@ const COOLDOWNS = {
   upload: 10 * 60,      // 10 minutes
   find: 10,             // 10 seconds
   get: 10,              // 10 seconds
-  rename: 30 * 60,      // 30 minutes
+  rename: 5 * 60,        // 5 minutes
   dl: 60,               // 1 minute
   et: 5 * 60,           // 5 minutes
   obf: 10 * 60,         // 10 minutes
@@ -1234,58 +1234,144 @@ client.on("messageCreate", async msg => {
         let foundTime = "Unknown";
 
         // ============================================================
-        // STRATEGY 1: Platorelay-specific API attempt
+        // STRATEGY 1: Puppeteer headless browser (renders JavaScript)
         // ============================================================
-        if (url.includes("platorelay.com") || url.includes("delta")) {
+        try {
+          let puppeteer;
           try {
-            const dMatch = url.match(/[?&]d=([^&]+)/);
-            if (dMatch) {
-              const dParam = dMatch[1];
-              const apiUrl = `https://auth.platorelay.com/api/key?d=${dParam}`;
-              // Try multiple token strategies
-              const crypto = require("crypto");
-              const tokens = [
-                dParam,
-                dParam.slice(0, 32),
-                dParam.slice(-32),
-                crypto.createHash("md5").update(dParam).digest("hex"),
-                crypto.createHash("sha1").update(dParam).digest("hex"),
-                crypto.createHash("sha256").update(dParam).digest("hex").slice(0, 32),
-                Buffer.from(dParam, "base64").toString("hex"),
-                Buffer.from(dParam, "base64").toString("hex").slice(0, 64),
-                "platoboost", "delta", "public", "guest", "free",
-                "3bfcb75d", "index-3bfcb75d"
-              ];
-              for (const tok of tokens) {
-                try {
-                  const apiRes = await fetch(apiUrl, {
-                    headers: {
-                      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                      "authorization": `Bearer ${tok}`,
-                      "Origin": "https://auth.platorelay.com",
-                      "Referer": url
-                    }
-                  });
-                  const data = await apiRes.json();
-                  if (data && data.success && data.key) {
-                    foundKey = data.key;
-                    if (data.expires || data.time || data.expiresIn) {
-                      foundTime = data.expires || data.time || data.expiresIn;
-                    }
-                    break;
-                  }
-                  if (data && data.key) {
-                    foundKey = data.key;
-                    break;
-                  }
-                } catch {}
-              }
+            puppeteer = require("puppeteer");
+          } catch {
+            try { puppeteer = require("puppeteer-core"); } catch { puppeteer = null; }
+          }
+
+          if (puppeteer) {
+            const launchOpts = {
+              headless: "new",
+              args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
+            };
+            // Try to find Chrome executable for puppeteer-core
+            if (puppeteer.name === "puppeteer-core" || !puppeteer.executablePath) {
+              const { execSync } = require("child_process");
+              try {
+                const chromePath = execSync("which chromium-browser || which chromium || which google-chrome || which chrome", { encoding: "utf8" }).trim();
+                if (chromePath) launchOpts.executablePath = chromePath;
+              } catch {}
             }
-          } catch {}
+            const browser = await puppeteer.launch(launchOpts);
+            try {
+              const page = await browser.newPage();
+              await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+              await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+              await page.waitForTimeout(3000);
+
+              // Extract key from rendered page — try multiple methods
+              const extracted = await page.evaluate(() => {
+                const fullText = document.body.innerText || document.body.textContent || "";
+                const fullHtml = document.body.innerHTML || "";
+                let key = null;
+                let time = null;
+
+                // Method 1: Search all text for key patterns
+                const keyPatterns = [
+                  /FREE_[a-fA-F0-9]{16,}/i,
+                  /KEY_[a-zA-Z0-9_]{16,}/i,
+                  /LICENSE_[a-zA-Z0-9_]{16,}/i,
+                  /[A-F0-9]{32,}/,
+                  /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i,
+                  /\b[a-zA-Z0-9]{25,}\b/
+                ];
+                for (const p of keyPatterns) {
+                  const m = fullText.match(p) || fullHtml.match(p);
+                  if (m) {
+                    const candidate = m[0];
+                    if (candidate.length >= 16 && !/^(https?|script|style|div|span|class|html|body|button|input)$/i.test(candidate)) {
+                      key = candidate;
+                      break;
+                    }
+                  }
+                }
+
+                // Method 2: Check input fields, buttons, data attributes
+                if (!key) {
+                  const inputs = document.querySelectorAll("input[type='text'], input[type='hidden'], input:not([type]), textarea");
+                  for (const el of inputs) {
+                    const v = el.value || el.getAttribute("data-key") || el.getAttribute("data-license") || "";
+                    if (v.length >= 16 && /[A-Z0-9_]{10,}/i.test(v)) { key = v; break; }
+                  }
+                }
+                if (!key) {
+                  const els = document.querySelectorAll("[data-key], [data-license], [data-code], [data-token]");
+                  for (const el of els) {
+                    const v = el.getAttribute("data-key") || el.getAttribute("data-license") || el.getAttribute("data-code") || el.getAttribute("data-token") || el.textContent || "";
+                    if (v.length >= 16) { key = v.trim(); break; }
+                  }
+                }
+
+                // Method 3: Try to find and click copy button, then read clipboard-like elements
+                if (!key) {
+                  const btns = document.querySelectorAll("button");
+                  for (const btn of btns) {
+                    const txt = (btn.textContent || "").toLowerCase();
+                    if (txt.includes("copy") || txt.includes("key") || txt.includes("license")) {
+                      const prev = btn.previousElementSibling;
+                      const parent = btn.parentElement;
+                      for (const src of [prev, parent, btn.nextElementSibling]) {
+                        if (src) {
+                          const t = src.textContent || src.value || "";
+                          if (t.length >= 16 && /[A-Z0-9_]{10,}/i.test(t)) { key = t.trim(); break; }
+                        }
+                      }
+                      if (key) break;
+                    }
+                  }
+                }
+
+                // Extract time remaining
+                const timePatterns = [
+                  /(\d+)\s*hours?\s*and\s*(\d+)\s*minutes?/i,
+                  /(\d+)\s*hours?\s*(\d+)\s*minutes?/i,
+                  /(\d+)\s*hours?/i,
+                  /(\d+)\s*minutes?/i,
+                  /(\d+)\s*:\s*(\d+)\s*:\s*(\d+)/
+                ];
+                for (const p of timePatterns) {
+                  const m = fullText.match(p);
+                  if (m) {
+                    if (m[1] && m[2] && /hour/i.test(m[0]) && /minute/i.test(m[0])) {
+                      time = `${m[1]} hour ${m[2]} minutes`;
+                    } else if (m[1] && /hour/i.test(m[0])) {
+                      time = `${m[1]} hour`;
+                    } else if (m[1] && /minute/i.test(m[0])) {
+                      time = `${m[1]} minutes`;
+                    } else if (m[1] && m[2] && m[3]) {
+                      time = `${m[1]} hour ${m[2]} minutes`;
+                    }
+                    if (time) break;
+                  }
+                }
+                // Also look for "left" or "remaining" context
+                if (!time) {
+                  const ctx = fullText.match(/([^.\n]{0,80}(?:left|remaining|expires)[^.\n]{0,80})/i);
+                  if (ctx) time = ctx[1].trim().slice(0, 60);
+                }
+
+                return { key, time };
+              });
+
+              if (extracted.key) {
+                foundKey = extracted.key;
+                if (extracted.time) foundTime = extracted.time;
+              }
+            } finally {
+              await browser.close();
+            }
+          }
+        } catch (pErr) {
+          console.warn("⚠️ Puppeteer bypass failed, falling back:", pErr.message);
         }
 
         // ============================================================
-        // STRATEGY 2: Universal HTML scraping (works for ANY site)
+        // STRATEGY 2: Fallback — universal HTML scraping
         // ============================================================
         if (!foundKey) {
           try {
@@ -1293,69 +1379,39 @@ client.on("messageCreate", async msg => {
               headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
             });
             const html = await res.text();
-
-            // Comprehensive key extraction patterns
             const keyPatterns = [
-              /FREE_[a-fA-F0-9]{16,}/i,                    // Delta/Platorelay FREE_xxxx
-              /KEY_[a-zA-Z0-9_]{16,}/i,                     // KEY_xxxx
-              /LICENSE_[a-zA-Z0-9_]{16,}/i,                 // LICENSE_xxxx
-              /[A-F0-9]{32,}/,                              // 32+ hex chars (MD5/SHA style)
-              /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i, // UUID/GUID
-              /value="([A-Za-z0-9_\-]{20,})"/i,             // HTML input value
-              /data-key="([A-Za-z0-9_\-]{20,})"/i,          // data-key attribute
-              /data-license="([A-Za-z0-9_\-]{20,})"/i,      // data-license attribute
-              /"key"\s*:\s*"([A-Za-z0-9_\-]{16,})"/i,       // JSON "key": "xxxx"
-              /"license"\s*:\s*"([A-Za-z0-9_\-]{16,})"/i,   // JSON "license": "xxxx"
-              /"code"\s*:\s*"([A-Za-z0-9_\-]{16,})"/i,      // JSON "code": "xxxx"
-              /"token"\s*:\s*"([A-Za-z0-9_\-\.]{20,})"/i,   // JSON "token": "xxxx"
-              /[A-Z]{2,}_[A-Z0-9]{16,}/,                    // PREFIX_XXXX style
-              /\b[a-zA-Z0-9]{25,}\b/                         // Long random-looking strings
+              /FREE_[a-fA-F0-9]{16,}/i,
+              /KEY_[a-zA-Z0-9_]{16,}/i,
+              /LICENSE_[a-zA-Z0-9_]{16,}/i,
+              /[A-F0-9]{32,}/,
+              /"key"\s*:\s*"([A-Za-z0-9_\-]{16,})"/i,
+              /"license"\s*:\s*"([A-Za-z0-9_\-]{16,})"/i,
+              /value="([A-Za-z0-9_\-]{20,})"/i,
+              /\b[a-zA-Z0-9]{25,}\b/
             ];
-
             for (const pattern of keyPatterns) {
               const m = html.match(pattern);
               if (m) {
-                foundKey = m[1] || m[0];
-                // Filter out obvious non-keys
-                if (foundKey.length < 16) { foundKey = null; continue; }
-                if (/^(https?|script|style|div|span|class|html|body)$/i.test(foundKey)) { foundKey = null; continue; }
-                break;
+                const k = m[1] || m[0];
+                if (k.length >= 16 && !/^(https?|script|style|div|span|class|html|body)$/i.test(k)) {
+                  foundKey = k;
+                  break;
+                }
               }
             }
-
-            // Extract time remaining from HTML
+            // Extract time
             const timePatterns = [
               /(\d+)\s*hours?\s*and\s*(\d+)\s*minutes?/i,
               /(\d+)\s*hours?/i,
-              /(\d+)\s*minutes?/i,
-              /expires?\s*(?:in)?\s*:?\s*([^<\n]+)/i,
-              /time\s*(?:remaining|left)?\s*:?\s*([^<\n]+)/i
+              /(\d+)\s*minutes?/i
             ];
-            for (const pattern of timePatterns) {
-              const m = html.match(pattern);
+            for (const p of timePatterns) {
+              const m = html.match(p);
               if (m) {
-                if (m[1] && m[2]) {
-                  foundTime = `${m[1]} hour ${m[2]} minutes`;
-                } else if (m[1]) {
-                  foundTime = m[0].includes("hour") ? `${m[1]} hour` : `${m[1]} minutes`;
-                } else {
-                  foundTime = m[0].replace(/<[^>]+>/g, "").trim();
-                }
-                if (foundTime.length > 50) foundTime = foundTime.slice(0, 50);
+                if (m[1] && m[2]) foundTime = `${m[1]} hour ${m[2]} minutes`;
+                else if (m[0].includes("hour")) foundTime = `${m[1]} hour`;
+                else foundTime = `${m[1]} minutes`;
                 break;
-              }
-            }
-
-            // Also try stripped plain text for key patterns
-            if (!foundKey) {
-              const plain = html.replace(/<[^>]+>/g, " ");
-              for (const pattern of keyPatterns) {
-                const m = plain.match(pattern);
-                if (m) {
-                  foundKey = m[1] || m[0];
-                  if (foundKey.length < 16) { foundKey = null; continue; }
-                  break;
-                }
               }
             }
           } catch {}
