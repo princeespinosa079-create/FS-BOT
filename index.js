@@ -656,58 +656,42 @@ function cleanLuaScript(text) {
   return cleaned;
 }
 // ============================================================
-// LUA OBFUSCATOR (Luraph-style)
+// LUA OBFUSCATOR (Prince Obfuscator)
 // ============================================================
 function obfuscateLua(source) {
   if (!source) source = "";
-  const header = "-- This file was generated using Prince Obfuscator";
-  // Generate random variable names
-  const randName = () => {
-    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let s = chars[Math.floor(Math.random() * 52)];
-    for (let i = 0; i < 6 + Math.floor(Math.random() * 4); i++) {
-      s += chars[Math.floor(Math.random() * 52)];
-    }
-    return s;
-  };
-  // Encode source to base64-like string using Lua's string.char
+  const header = "-- This file was generated using Prince Obfuscator\n";
+  // Generate random XOR key (1-255, never 0)
+  const xorKey = Math.floor(Math.random() * 254) + 1;
+  // Encode every byte safely with XOR + force 0-255 range
   const bytes = [];
   for (let i = 0; i < source.length; i++) {
-    bytes.push(source.charCodeAt(i) & 0xFF);
+    const b = source.charCodeAt(i) & 0xFF;
+    bytes.push((b ^ xorKey) & 0xFF);
   }
-  // Generate XOR key
-  const xorKey = Math.floor(Math.random() * 200) + 30;
-  // Encrypt bytes with XOR
-  const encrypted = bytes.map(b => b ^ xorKey);
-  // Convert to Lua table string (chunked for performance)
+  // Split into chunks for readability
   const chunks = [];
-  for (let i = 0; i < encrypted.length; i += 80) {
-    chunks.push(encrypted.slice(i, i + 80).join(","));
+  for (let i = 0; i < bytes.length; i += 100) {
+    chunks.push(bytes.slice(i, i + 100).join(","));
   }
   const tableStr = chunks.join(",");
   // Random variable names
-  const v_table = randName();
+  const randName = () => {
+    const c = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let s = c[Math.floor(Math.random() * 52)];
+    for (let i = 0; i < 5 + Math.floor(Math.random() * 5); i++) {
+      s += c[Math.floor(Math.random() * 52)];
+    }
+    return s;
+  };
+  const v_data = randName();
   const v_key = randName();
-  const v_result = randName();
+  const v_out = randName();
   const v_i = randName();
-  const v_decoded = randName();
+  const v_fn = randName();
   const v_load = randName();
-  // Build obfuscated script
-  const obfuscated = `${header}
-local ${v_table} = {${tableStr}}
-local ${v_key} = ${xorKey}
-local ${v_result} = {}
-for ${v_i} = 1, #${v_table} do
-  ${v_result}[${v_i}] = string.char(${v_table}[${v_i}] ^ ${v_key})
-end
-local ${v_decoded} = table.concat(${v_result})
-local ${v_load} = loadstring(${v_decoded})
-if ${v_load} then
-  ${v_load}()
-else
-  error("Failed to load obfuscated script")
-end
-`;
+  // Build obfuscated script — SAFE decoding with % 256
+  const obfuscated = `${header}local ${v_data}={${tableStr}};local ${v_key}=${xorKey};local ${v_out}={};for ${v_i}=1,#${v_data} do ${v_out}[${v_i}]=string.char((${v_data}[${v_i}]~${v_key})%256) end;local ${v_fn}=table.concat(${v_out});local ${v_load}=loadstring(${v_fn});if ${v_load} then ${v_load}() else error("Failed to load") end`;
   return obfuscated;
 }
 // ============================================================
