@@ -1212,7 +1212,7 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
-  // .bypass — Delta key bypass (regular + buyer)
+  // .bypass — Universal key bypass (regular + buyer)
   // ─────────────────────────────────────────────
   if (/^\.bypass(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
@@ -1222,7 +1222,7 @@ client.on("messageCreate", async msg => {
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     const url = txt.replace(/^\.bypass\s*/i, "").trim();
     if (!url || !url.startsWith("http")) {
-      replyUser(msg, "❌ pls, put delta url so i can bypass it.").catch(() => {});
+      replyUser(msg, "❌ pls, put url so i can bypass it.").catch(() => {});
       return;
     }
     const workingMsg = await replyUser(msg, "⏳ Bypassing...").catch(() => {});
@@ -1230,36 +1230,150 @@ client.on("messageCreate", async msg => {
     const bypassDelay = isBuyerUser ? 0 : 10000;
     setTimeout(async () => {
       try {
-        const res = await fetch(url, {
-          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
-        });
-        const html = await res.text();
-        // Extract key — FREE_ + 32 hex chars
-        const keyMatch = html.match(/FREE_[a-f0-9]{32,}/i) || html.match(/[A-Z0-9_]{20,}/);
-        // Extract time remaining
-        const timeMatch = html.match(/(\d+)\s+hours?\s+and\s+(\d+)\s+minutes?/i) ||
-                          html.match(/(\d+)\s+hours?/i) ||
-                          html.match(/(\d+)\s+minutes?/i);
-        if (!keyMatch) {
+        let foundKey = null;
+        let foundTime = "Unknown";
+
+        // ============================================================
+        // STRATEGY 1: Platorelay-specific API attempt
+        // ============================================================
+        if (url.includes("platorelay.com") || url.includes("delta")) {
+          try {
+            const dMatch = url.match(/[?&]d=([^&]+)/);
+            if (dMatch) {
+              const dParam = dMatch[1];
+              const apiUrl = `https://auth.platorelay.com/api/key?d=${dParam}`;
+              // Try multiple token strategies
+              const crypto = require("crypto");
+              const tokens = [
+                dParam,
+                dParam.slice(0, 32),
+                dParam.slice(-32),
+                crypto.createHash("md5").update(dParam).digest("hex"),
+                crypto.createHash("sha1").update(dParam).digest("hex"),
+                crypto.createHash("sha256").update(dParam).digest("hex").slice(0, 32),
+                Buffer.from(dParam, "base64").toString("hex"),
+                Buffer.from(dParam, "base64").toString("hex").slice(0, 64),
+                "platoboost", "delta", "public", "guest", "free",
+                "3bfcb75d", "index-3bfcb75d"
+              ];
+              for (const tok of tokens) {
+                try {
+                  const apiRes = await fetch(apiUrl, {
+                    headers: {
+                      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                      "authorization": `Bearer ${tok}`,
+                      "Origin": "https://auth.platorelay.com",
+                      "Referer": url
+                    }
+                  });
+                  const data = await apiRes.json();
+                  if (data && data.success && data.key) {
+                    foundKey = data.key;
+                    if (data.expires || data.time || data.expiresIn) {
+                      foundTime = data.expires || data.time || data.expiresIn;
+                    }
+                    break;
+                  }
+                  if (data && data.key) {
+                    foundKey = data.key;
+                    break;
+                  }
+                } catch {}
+              }
+            }
+          } catch {}
+        }
+
+        // ============================================================
+        // STRATEGY 2: Universal HTML scraping (works for ANY site)
+        // ============================================================
+        if (!foundKey) {
+          try {
+            const res = await fetch(url, {
+              headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+            });
+            const html = await res.text();
+
+            // Comprehensive key extraction patterns
+            const keyPatterns = [
+              /FREE_[a-fA-F0-9]{16,}/i,                    // Delta/Platorelay FREE_xxxx
+              /KEY_[a-zA-Z0-9_]{16,}/i,                     // KEY_xxxx
+              /LICENSE_[a-zA-Z0-9_]{16,}/i,                 // LICENSE_xxxx
+              /[A-F0-9]{32,}/,                              // 32+ hex chars (MD5/SHA style)
+              /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i, // UUID/GUID
+              /value="([A-Za-z0-9_\-]{20,})"/i,             // HTML input value
+              /data-key="([A-Za-z0-9_\-]{20,})"/i,          // data-key attribute
+              /data-license="([A-Za-z0-9_\-]{20,})"/i,      // data-license attribute
+              /"key"\s*:\s*"([A-Za-z0-9_\-]{16,})"/i,       // JSON "key": "xxxx"
+              /"license"\s*:\s*"([A-Za-z0-9_\-]{16,})"/i,   // JSON "license": "xxxx"
+              /"code"\s*:\s*"([A-Za-z0-9_\-]{16,})"/i,      // JSON "code": "xxxx"
+              /"token"\s*:\s*"([A-Za-z0-9_\-\.]{20,})"/i,   // JSON "token": "xxxx"
+              /[A-Z]{2,}_[A-Z0-9]{16,}/,                    // PREFIX_XXXX style
+              /\b[a-zA-Z0-9]{25,}\b/                         // Long random-looking strings
+            ];
+
+            for (const pattern of keyPatterns) {
+              const m = html.match(pattern);
+              if (m) {
+                foundKey = m[1] || m[0];
+                // Filter out obvious non-keys
+                if (foundKey.length < 16) { foundKey = null; continue; }
+                if (/^(https?|script|style|div|span|class|html|body)$/i.test(foundKey)) { foundKey = null; continue; }
+                break;
+              }
+            }
+
+            // Extract time remaining from HTML
+            const timePatterns = [
+              /(\d+)\s*hours?\s*and\s*(\d+)\s*minutes?/i,
+              /(\d+)\s*hours?/i,
+              /(\d+)\s*minutes?/i,
+              /expires?\s*(?:in)?\s*:?\s*([^<\n]+)/i,
+              /time\s*(?:remaining|left)?\s*:?\s*([^<\n]+)/i
+            ];
+            for (const pattern of timePatterns) {
+              const m = html.match(pattern);
+              if (m) {
+                if (m[1] && m[2]) {
+                  foundTime = `${m[1]} hour ${m[2]} minutes`;
+                } else if (m[1]) {
+                  foundTime = m[0].includes("hour") ? `${m[1]} hour` : `${m[1]} minutes`;
+                } else {
+                  foundTime = m[0].replace(/<[^>]+>/g, "").trim();
+                }
+                if (foundTime.length > 50) foundTime = foundTime.slice(0, 50);
+                break;
+              }
+            }
+
+            // Also try stripped plain text for key patterns
+            if (!foundKey) {
+              const plain = html.replace(/<[^>]+>/g, " ");
+              for (const pattern of keyPatterns) {
+                const m = plain.match(pattern);
+                if (m) {
+                  foundKey = m[1] || m[0];
+                  if (foundKey.length < 16) { foundKey = null; continue; }
+                  break;
+                }
+              }
+            }
+          } catch {}
+        }
+
+        // ============================================================
+        // Output result
+        // ============================================================
+        if (!foundKey) {
           if (workingMsg) await workingMsg.delete().catch(() => {});
           replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
           return;
         }
-        const key = keyMatch[0];
-        let timeLeft = "Unknown";
-        if (timeMatch) {
-          if (timeMatch[1] && timeMatch[2]) {
-            timeLeft = `${timeMatch[1]} hour ${timeMatch[2]} minutes`;
-          } else if (timeMatch[0].includes("hour")) {
-            timeLeft = `${timeMatch[1]} hour`;
-          } else {
-            timeLeft = `${timeMatch[1]} minutes`;
-          }
-        }
+
         const bypassEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
           .setTitle("Key Bypass!")
-          .setDescription(`Key:\n\`${key}\`\n\nIt will Expires In:\n${timeLeft}`)
+          .setDescription(`Key:\n\`${foundKey}\`\n\nIt will Expires In:\n${foundTime}`)
           .setFooter({ text: `Request by @${msg.author.username}│Prince Bypass` });
         if (workingMsg) await workingMsg.delete().catch(() => {});
         await msg.channel.send({
@@ -1501,7 +1615,7 @@ client.on("messageCreate", async msg => {
       if (allLines.length > 5) previewText += "\n...";
       const resultEmbed = new EmbedBuilder()
         .setColor(getEmbedColor(isBuyerUser))
-        .setTitle("Rename File")
+        .setTitle("Output Preview")
         .setDescription(`\`\`\`lua\n${previewText}\n\`\`\``)
         .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
       const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
