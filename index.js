@@ -848,16 +848,12 @@ client.on("interactionCreate", async interaction => {
   const start = (menu.page - 1) * 8;
   const pageItems = menu.results.slice(start, start + 8);
   const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
-  const embed = new EmbedBuilder()
-    .setColor(menu.isBuyer ? BUYER_COLOR : REGULAR_COLOR)
-    .setTitle(getFinderTitle(menu.isBuyer))
-    .setDescription(`────────────────────\n${pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n")}`)
-    .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
+  const pageText = `**${getFinderTitle(menu.isBuyer)}**\n────────────────────\n${pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n")}\n────────────────────\nPages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}`;
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
     new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
   );
-  await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
+  await interaction.update({ content: pageText, components: [row] }).catch(() => {});
   paginationMenus.set(uid, menu);
 });
 // ============================================================
@@ -931,9 +927,8 @@ client.on("messageCreate", async msg => {
     for (const g of guilds.values()) {
       lines.push(`**${num}.** \`${g.name}\`\n   🆔 \`${g.id}\`\n   👥 Members: \`${g.memberCount}\``); num++;
     }
-    replyUser(msg, { embeds: [new EmbedBuilder().setColor(0x808080).setTitle(`🌐 Server List — ${guilds.size} total`).setDescription(`────────────────────\n${lines.join("\n\n")}`)
-      .setFooter({ text: `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}` })
-    ] }).catch(() => {});
+    const slText = `**🌐 Server List — ${guilds.size} total**\n────────────────────\n${lines.join("\n\n")}\n────────────────────\nToday at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+    replyUser(msg, { content: slText }).catch(() => {});
     return;
   }
   if (/^\.getinv(?:\s|$)/i.test(txt)) {
@@ -1102,12 +1097,8 @@ client.on("messageCreate", async msg => {
       if (!rawUrl) throw new Error("Could not get paste URL from Pastefy response");
       const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
       if (sentMsg) await sentMsg.delete().catch(() => {});
-      const embed = new EmbedBuilder()
-        .setColor(getEmbedColor(isBuyerUser))
-        .setTitle("Script Copy")
-        .setDescription(`────────────────────\n\`\`\`lua\n${loadstring}\n\`\`\``)
-        .setFooter({ text: `Requested by @${msg.author.username} │ File Turn Into Script` });
-      await msg.channel.send({ embeds: [embed] }).catch(() => {});
+      const uploadText = `**Script Copy**\n────────────────────\n\`\`\`lua\n${loadstring}\n\`\`\`\n────────────────────\nRequested by @${msg.author.username} │ File Turn Into Script`;
+      await msg.channel.send({ content: uploadText }).catch(() => {});
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
       replyUser(msg, `❌ upload failed: ${e.message}`).catch(() => {});
@@ -1197,12 +1188,8 @@ client.on("messageCreate", async msg => {
       const obfFileName = "obfuscated.lua";
       const obfAttachment = new AttachmentBuilder(Buffer.from(obfuscated, "utf-8"), { name: obfFileName });
       if (sentMsg) await sentMsg.delete().catch(() => {});
-      const obfEmbed = new EmbedBuilder()
-        .setColor(getEmbedColor(isBuyerUser))
-        .setTitle("Prince Obfuscator")
-        .setDescription(`────────────────────\n\`\`\`lua\n${loadstring}\n\`\`\``)
-        .setFooter({ text: `Requested by @${msg.author.username} │ File secured` });
-      await msg.channel.send({ embeds: [obfEmbed], files: [obfAttachment] }).catch(() => {});
+      const obfText = `**Prince Obfuscator**\n────────────────────\n\`\`\`lua\n${loadstring}\n\`\`\`\n────────────────────\nRequested by @${msg.author.username} │ File secured`;
+      await msg.channel.send({ content: obfText, files: [obfAttachment] }).catch(() => {});
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
       replyUser(msg, `❌ obfuscate failed: ${e.message}`).catch(() => {});
@@ -1415,12 +1402,8 @@ client.on("messageCreate", async msg => {
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-    const workingEmbed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Prince Rename")
-      .setDescription("────────────────────\n⏳ Processing...")
-      .setFooter({ text: timeFooter });
-    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
+    const workingText = `**Prince Rename**\n────────────────────\n⏳ Processing...\n────────────────────\n${timeFooter}`;
+    const sentMsg = await replyUser(msg, { content: workingText }).catch(() => {});
     const delay = isBuyerUser ? 0 : 10000;
     setTimeout(async () => {
       try {
@@ -1437,16 +1420,12 @@ client.on("messageCreate", async msg => {
         const previewLines = allLines.slice(0, 5);
         let previewText = previewLines.join("\n");
         if (allLines.length > 5) previewText += "\n...";
-        const resultEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("Rename Complete")
-          .setDescription(`────────────────────\n**File:** \`${outputName}\`\n\n**Preview:**\n\`\`\`lua\n${previewText}\n\`\`\``)
-          .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
+        const resultText = `**Rename Complete**\n────────────────────\n**File:** \`${outputName}\`\n\n**Preview:**\n\`\`\`lua\n${previewText}\n\`\`\`\n────────────────────\nRequested by @${msg.author.username} │ Prince Rename`;
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
-          files: [fixedFile],
-          embeds: [resultEmbed]
+          content: resultText,
+          files: [fixedFile]
         }).catch(() => {});
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
@@ -1466,12 +1445,8 @@ client.on("messageCreate", async msg => {
     const file = getFile(id);
     if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
     const freshUrl = await getFreshUrl(file);
-    const getEmbed = new EmbedBuilder()
-      .setColor(getEmbedColor(perm.isBuyer))
-      .setTitle("File Retrieved")
-      .setDescription(`────────────────────\n**File:** \`${file.filename}\`\n**ID:** \`${file.id}\``)
-      .setFooter({ text: `Requested by @${msg.author.username}` });
-    replyUser(msg, { embeds: [getEmbed], files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
+    const getText = `**File Retrieved**\n────────────────────\n**File:** \`${file.filename}\`\n**ID:** \`${file.id}\`\n────────────────────\nRequested by @${msg.author.username}`;
+    replyUser(msg, { content: getText, files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
     return;
   }
   // .dl / .download — gives file from library ID OR downloads from Discord CDN link
@@ -1496,14 +1471,10 @@ client.on("messageCreate", async msg => {
         const fileExt = ext(fileName);
         if (!fileExt) fileName += ".txt";
         const attachment = new AttachmentBuilder(buf, { name: fileName });
-        const dlEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("Download Complete")
-          .setDescription(`────────────────────\n**File:** \`${fileName}\`\n**Size:** \`${(buf.length / 1024).toFixed(1)} KB\``)
-          .setFooter({ text: `Requested by @${msg.author.username}` });
+        const dlText = `**Download Complete**\n────────────────────\n**File:** \`${fileName}\`\n**Size:** \`${(buf.length / 1024).toFixed(1)} KB\`\n────────────────────\nRequested by @${msg.author.username}`;
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
-          embeds: [dlEmbed],
+          content: dlText,
           files: [attachment]
         }).catch(() => {});
       } catch (e) {
@@ -1518,12 +1489,8 @@ client.on("messageCreate", async msg => {
     if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
     const freshUrl = await getFreshUrl(file);
     const fileUrl = freshUrl || file.url;
-    const embed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Download Link")
-      .setDescription(`────────────────────\n**File:** \`${file.filename}\`\n**ID:** \`${file.id}\`\n\n🔗 **Direct Link:**\n${fileUrl}`)
-      .setFooter({ text: `Requested by @${msg.author.username}` });
-    replyUser(msg, { embeds: [embed] }).catch(() => {});
+    const dlText = `**Download Link**\n────────────────────\n**File:** \`${file.filename}\`\n**ID:** \`${file.id}\`\n\n🔗 **Direct Link:**\n${fileUrl}\n────────────────────\nRequested by @${msg.author.username}`;
+    replyUser(msg, { content: dlText }).catch(() => {});
     return;
   }
   // .find
@@ -1540,16 +1507,12 @@ client.on("messageCreate", async msg => {
     const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
     const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
-    const embed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle(getFinderTitle(isBuyerUser))
-      .setDescription(`────────────────────\n${pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n")}`)
-      .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeNow}` });
+    const findText = `**${getFinderTitle(isBuyerUser)}**\n────────────────────\n${pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n")}\n────────────────────\nPages 1/${totalPages} │ Today at ${timeNow}`;
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
     );
-    const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+    const sent = await replyUser(msg, { content: findText, components: [row] }).catch(() => {});
     if (sent) paginationMenus.set(msg.author.id, {
       results, page: 1, totalPages, messageId: sent.id,
       authorId: msg.author.id, createdAt: Date.now(), isBuyer: isBuyerUser
