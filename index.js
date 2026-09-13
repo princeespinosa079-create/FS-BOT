@@ -1212,6 +1212,68 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
+  // .bypass — Delta key bypass (regular + buyer)
+  // ─────────────────────────────────────────────
+  if (/^\.bypass(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    const isBuyerUser = perm.isBuyer;
+    const cd = checkCommandCooldown(msg.author.id, "bypass", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
+    const url = txt.replace(/^\.bypass\s*/i, "").trim();
+    if (!url || !url.startsWith("http")) {
+      replyUser(msg, "❌ pls, put delta url so i can bypass it.").catch(() => {});
+      return;
+    }
+    const workingMsg = await replyUser(msg, "⏳ Bypassing...").catch(() => {});
+    // 10s delay for regular users only
+    const bypassDelay = isBuyerUser ? 0 : 10000;
+    setTimeout(async () => {
+      try {
+        const res = await fetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+        });
+        const html = await res.text();
+        // Extract key — FREE_ + 32 hex chars
+        const keyMatch = html.match(/FREE_[a-f0-9]{32,}/i) || html.match(/[A-Z0-9_]{20,}/);
+        // Extract time remaining
+        const timeMatch = html.match(/(\d+)\s+hours?\s+and\s+(\d+)\s+minutes?/i) ||
+                          html.match(/(\d+)\s+hours?/i) ||
+                          html.match(/(\d+)\s+minutes?/i);
+        if (!keyMatch) {
+          if (workingMsg) await workingMsg.delete().catch(() => {});
+          replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
+          return;
+        }
+        const key = keyMatch[0];
+        let timeLeft = "Unknown";
+        if (timeMatch) {
+          if (timeMatch[1] && timeMatch[2]) {
+            timeLeft = `${timeMatch[1]} hour ${timeMatch[2]} minutes`;
+          } else if (timeMatch[0].includes("hour")) {
+            timeLeft = `${timeMatch[1]} hour`;
+          } else {
+            timeLeft = `${timeMatch[1]} minutes`;
+          }
+        }
+        const bypassEmbed = new EmbedBuilder()
+          .setColor(getEmbedColor(isBuyerUser))
+          .setTitle("Key Bypass!")
+          .setDescription(`Key:\n\`${key}\`\n\nIt will Expires In:\n${timeLeft}`)
+          .setFooter({ text: `Request by @${msg.author.username}│Prince Bypass` });
+        if (workingMsg) await workingMsg.delete().catch(() => {});
+        await msg.channel.send({
+          content: `<@${msg.author.id}> Here is your delta key bro!`,
+          embeds: [bypassEmbed]
+        }).catch(() => {});
+      } catch (e) {
+        if (workingMsg) await workingMsg.delete().catch(() => {});
+        replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
+      }
+    }, bypassDelay);
+    return;
+  }
+  // ─────────────────────────────────────────────
   // .scanchannel — Owner Only
   // ─────────────────────────────────────────────
   if (/^\.scanchannel(?:\s|$)/i.test(txt)) {
@@ -1423,98 +1485,36 @@ client.on("messageCreate", async msg => {
       .setDescription("⏳ Processing...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-    const delay = isBuyerUser ? 0 : 10000;
-    setTimeout(async () => {
-      try {
-        const res = await fetch(file.url);
-        const text = await res.text();
-        const cleaned = cleanLuaScript(text);
-        const randChars = "abcdefghijklmnopqrstuvwxyz";
-        let outputName = "";
-        for (let i = 0; i < 20; i++) {
-          outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
-        }
-        outputName += ".lua";
-        const allLines = cleaned.split("\n");
-        const previewLines = allLines.slice(0, 5);
-        let previewText = previewLines.join("\n");
-        if (allLines.length > 5) previewText += "\n...";
-        const resultEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("Output Preview")
-          .setDescription(`\`\`\`lua\n${previewText}\n\`\`\``)
-          .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
-        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Here is the file bro!**`,
-          files: [fixedFile],
-          embeds: [resultEmbed]
-        }).catch(() => {});
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+    try {
+      const res = await fetch(file.url);
+      const text = await res.text();
+      const cleaned = cleanLuaScript(text);
+      const randChars = "abcdefghijklmnopqrstuvwxyz";
+      let outputName = "";
+      for (let i = 0; i < 20; i++) {
+        outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
       }
-    }, delay);
-    return;
-  }
-  // .bypass — Delta Key Bypass
-  if (/^\.bypass(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "bypass", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    const args = txt.slice(7).trim();
-    const url = args.split(/\s+/)[0];
-    if (!url) { replyUser(msg, "❌ pls, put delta url so i can bypass it.").catch(() => {}); return; }
-    const workingMsg = await replyUser(msg, "⏳ Bypassing...").catch(() => {});
-    const delay = isBuyerUser ? 0 : 10000;
-    setTimeout(async () => {
-      try {
-        const res = await fetch(url, {
-          headers: { "User-Agent": "Mozilla/5.0" }
-        });
-        if (!res.ok) {
-          if (workingMsg) await workingMsg.delete().catch(() => {});
-          replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
-          return;
-        }
-        const html = await res.text();
-        // Extract the key
-        const keyMatch = html.match(/[A-Z0-9_]{16,}/);
-        const key = keyMatch ? keyMatch[0] : "Not Found";
-        // Extract time remaining
-        const timeMatch = html.match(/(\d+)\s+hours?\s+and\s+(\d+)\s+minutes?/i);
-        let timeLeft = "Not Found";
-        if (timeMatch) {
-          const h = timeMatch[1];
-          const m = timeMatch[2];
-          if (h === "1" && m === "1") timeLeft = `${h} hour ${m} minute`;
-          else if (h === "1") timeLeft = `${h} hour ${m} minutes`;
-          else if (m === "1") timeLeft = `${h} hours ${m} minute`;
-          else timeLeft = `${h} hours ${m} minutes`;
-        }
-        if (key === "Not Found") {
-          if (workingMsg) await workingMsg.delete().catch(() => {});
-          replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
-          return;
-        }
-        const resultEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("Key Bypass!")
-          .setDescription(`Key:\n\n\`${key}\`\n\nIt will Expires In:\n\n${timeLeft}`)
-          .setFooter({ text: `Request by @${msg.author.username}│Prince Bypass` });
-        if (workingMsg) await workingMsg.delete().catch(() => {});
-        await msg.channel.send({
-          content: `<@${msg.author.id}> Here is your delta key bro!`,
-          embeds: [resultEmbed]
-        }).catch(() => {});
-      } catch (e) {
-        if (workingMsg) await workingMsg.delete().catch(() => {});
-        replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
-      }
-    }, delay);
+      outputName += ".lua";
+      const allLines = cleaned.split("\n");
+      const previewLines = allLines.slice(0, 5);
+      let previewText = previewLines.join("\n");
+      if (allLines.length > 5) previewText += "\n...";
+      const resultEmbed = new EmbedBuilder()
+        .setColor(getEmbedColor(isBuyerUser))
+        .setTitle("Rename File")
+        .setDescription(`\`\`\`lua\n${previewText}\n\`\`\``)
+        .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
+      const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      await msg.channel.send({
+        content: `<@${msg.author.id}> **Here is the file bro!**`,
+        files: [fixedFile],
+        embeds: [resultEmbed]
+      }).catch(() => {});
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+    }
     return;
   }
   // .get
