@@ -70,7 +70,8 @@ const COOLDOWNS = {
   get: 30,              // 30 seconds
   rename: 60,           // 1 minute
   dl: 60,               // 1 minute
-  et: 10 * 60           // 10 minutes
+  et: 10 * 60,          // 10 minutes
+  obf: 60 * 60          // 1 hour
 };
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
@@ -655,6 +656,61 @@ function cleanLuaScript(text) {
   return cleaned;
 }
 // ============================================================
+// LUA OBFUSCATOR (Luraph-style)
+// ============================================================
+function obfuscateLua(source) {
+  if (!source) source = "";
+  const header = "-- This file was generated using Prince Obfuscator";
+  // Generate random variable names
+  const randName = () => {
+    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let s = chars[Math.floor(Math.random() * 52)];
+    for (let i = 0; i < 6 + Math.floor(Math.random() * 4); i++) {
+      s += chars[Math.floor(Math.random() * 52)];
+    }
+    return s;
+  };
+  // Encode source to base64-like string using Lua's string.char
+  const bytes = [];
+  for (let i = 0; i < source.length; i++) {
+    bytes.push(source.charCodeAt(i) & 0xFF);
+  }
+  // Generate XOR key
+  const xorKey = Math.floor(Math.random() * 200) + 30;
+  // Encrypt bytes with XOR
+  const encrypted = bytes.map(b => b ^ xorKey);
+  // Convert to Lua table string (chunked for performance)
+  const chunks = [];
+  for (let i = 0; i < encrypted.length; i += 80) {
+    chunks.push(encrypted.slice(i, i + 80).join(","));
+  }
+  const tableStr = chunks.join(",");
+  // Random variable names
+  const v_table = randName();
+  const v_key = randName();
+  const v_result = randName();
+  const v_i = randName();
+  const v_decoded = randName();
+  const v_load = randName();
+  // Build obfuscated script
+  const obfuscated = `${header}
+local ${v_table} = {${tableStr}}
+local ${v_key} = ${xorKey}
+local ${v_result} = {}
+for ${v_i} = 1, #${v_table} do
+  ${v_result}[${v_i}] = string.char(${v_table}[${v_i}] ^ ${v_key})
+end
+local ${v_decoded} = table.concat(${v_result})
+local ${v_load} = loadstring(${v_decoded})
+if ${v_load} then
+  ${v_load}()
+else
+  error("Failed to load obfuscated script")
+end
+`;
+  return obfuscated;
+}
+// ============================================================
 // SLASH COMMANDS — only /say (global, DM support)
 // ============================================================
 const commands = [
@@ -1050,89 +1106,95 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
-  // .zipall — Owner Only (pack all txt/lua files in channel into ZIP)
+  // .obf — Prince Obfuscator (regular + buyer)
   // ─────────────────────────────────────────────
-  if (/^\.zipall(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    const args = txt.split(/\s+/).slice(1);
-    let ch = null;
-    const mentionMatch = txt.match(/<#(\d+)>/);
-    if (mentionMatch) {
-      try { ch = await client.channels.fetch(mentionMatch[1]); } catch {}
-    } else if (args[0]) {
-      try { ch = await client.channels.fetch(args[0].trim()); } catch {}
-    } else {
-      ch = msg.channel;
-    }
-    if (!ch) { replyUser(msg, "❌ invalid channel, dumbass.").catch(() => {}); return; }
-    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
-    const startMsg = await replyUser(msg, `⏳ Scanning <#${ch.id}> for files...`).catch(() => {});
-    try {
-      const zip = new AdmZip();
-      let before = null, fileCount = 0, msgCount = 0;
-      const usedNames = new Map(); // track name collisions
-      while (true) {
-        const batch = await fetchMessages(ch, before);
-        if (!batch.size) break;
-        for (const m of batch.values()) {
-          msgCount++;
-          for (const item of attachmentsOf(m)) {
-            const a = item.attachment;
-            const filename = a.name || "unknown_file";
-            const e = ext(filename);
-            if (e !== "txt" && e !== "lua") continue;
-            try {
-              const buf = await downloadURL(a.url || a.proxyURL);
-              // Handle duplicate filenames
-              let zipName = filename;
-              if (usedNames.has(filename.toLowerCase())) {
-                const n = usedNames.get(filename.toLowerCase()) + 1;
-                usedNames.set(filename.toLowerCase(), n);
-                const base = filename.slice(0, filename.length - e.length - 1);
-                zipName = `${base}_${n}.${e}`;
-              } else {
-                usedNames.set(filename.toLowerCase(), 1);
-              }
-              zip.addFile(zipName, buf);
-              fileCount++;
-            } catch (err) {
-              console.warn(`⚠️ zipall skip ${filename}: ${err.message}`);
-            }
+  if (/^\.obf(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    const isBuyerUser = perm.isBuyer;
+    const cd = checkCommandCooldown(msg.author.id, "obf", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
+    let attachments = [...(msg.attachments?.values() || [])].filter(a => {
+      const e = ext(a.name);
+      return e === "txt" || e === "lua";
+    });
+    if (!attachments.length && msg.reference?.messageId) {
+      try {
+        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
+        for (const a of refMsg.attachments?.values?.() || []) {
+          const e = ext(a.name);
+          if (e === "txt" || e === "lua") attachments.push(a);
+        }
+        for (const s of refMsg.messageSnapshots?.values?.() || []) {
+          for (const a of s.attachments?.values?.() || []) {
+            const e = ext(a.name);
+            if (e === "txt" || e === "lua") attachments.push(a);
           }
         }
-        const oldest = batch.last();
-        if (!oldest || batch.size < 100) break;
-        before = oldest.id;
+      } catch {}
+    }
+    if (!attachments.length) { replyUser(msg, "❌ upload a file so i can make it obfuscate file.").catch(() => {}); return; }
+    const file = attachments[0];
+    const sentMsg = await replyUser(msg, "🔒 Obfuscating...").catch(() => {});
+    try {
+      const res = await fetch(file.url);
+      const source = await res.text();
+      // Obfuscate the script
+      const obfuscated = obfuscateLua(source);
+      // Upload obfuscated to Pastefy
+      const apiKey = process.env.PASTEFY_API_KEY;
+      if (!apiKey) throw new Error("PASTEFY_API_KEY not set in env vars");
+      const headers = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      };
+      const body = {
+        title: "obfuscated.lua",
+        content: obfuscated
+      };
+      let pastefyRes = await fetch("https://pastefy.app/api/v2/paste", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body)
+      });
+      let rawUrl = null;
+      if (pastefyRes.ok) {
+        try {
+          const data = await pastefyRes.json();
+          const pid = data?.id || data?._id || data?.paste?.id;
+          if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
+        } catch {}
       }
-      if (fileCount === 0) {
-        if (startMsg) startMsg.edit("❌ no txt/lua files found in that channel.").catch(() => {});
-        else replyUser(msg, "❌ no txt/lua files found in that channel.").catch(() => {});
-        return;
+      if (!rawUrl) {
+        const v1Res = await fetch("https://pastefy.app/api/v1/paste", {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body)
+        });
+        if (v1Res.ok) {
+          try {
+            const data = await v1Res.json();
+            const pid = data?.id || data?._id || data?.paste?.id;
+            if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
+          } catch {}
+        } else {
+          const errText = await pastefyRes.text();
+          throw new Error(`Pastefy HTTP ${pastefyRes.status}: ${errText.slice(0, 150)}`);
+        }
       }
-      if (startMsg) startMsg.edit(`📦 Packing ${fileCount} files into ZIP...`).catch(() => {});
-      const zipBuffer = zip.toBuffer();
-      const chName = (ch.name || "channel").replace(/[^a-z0-9_-]/gi, "_");
-      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      const zipFilename = `${chName}_${ts}.zip`;
-      // Check max file size
-      const maxSize = getMaxFileSize(msg.guild);
-      if (zipBuffer.length > maxSize) {
-        const label = maxSize >= 1000000000 ? `${(maxSize/1000000000).toFixed(0)}GB` : `${(maxSize/1000000).toFixed(0)}MB`;
-        if (startMsg) startMsg.edit(`❌ ZIP is ${(zipBuffer.length/1000000).toFixed(1)}MB — max file is ${label}, lol.`).catch(() => {});
-        else replyUser(msg, `❌ ZIP is ${(zipBuffer.length/1000000).toFixed(1)}MB — max file is ${label}, lol.`).catch(() => {});
-        return;
-      }
-      const attachment = new AttachmentBuilder(zipBuffer, { name: zipFilename });
-      if (startMsg) await startMsg.delete().catch(() => {});
+      if (!rawUrl) throw new Error("Could not get paste URL from Pastefy response");
+      const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
+      // Create obfuscated file attachment
+      const obfFileName = "obfuscated.lua";
+      const obfAttachment = new AttachmentBuilder(Buffer.from(obfuscated, "utf-8"), { name: obfFileName });
+      if (sentMsg) await sentMsg.delete().catch(() => {});
       await msg.channel.send({
-        content: `<@${msg.author.id}> 📦 **ZIP complete!**\n📁 Channel: <#${ch.id}>\n📄 Files: \`${fileCount}\`\n💬 Messages scanned: \`${msgCount}\`\n📦 Size: \`${(zipBuffer.length / 1024 / 1024).toFixed(2)} MB\``,
-        files: [attachment]
+        content: `<@${msg.author.id}>\n\`\`\`lua\n${loadstring}\n\`\`\``,
+        files: [obfAttachment]
       }).catch(() => {});
     } catch (e) {
-      const err = `❌ zipall failed: ${e.message}`;
-      if (startMsg) startMsg.edit(err).catch(() => {});
-      else replyUser(msg, err).catch(() => {});
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ obfuscate failed: ${e.message}`).catch(() => {});
     }
     return;
   }
@@ -1161,33 +1223,6 @@ client.on("messageCreate", async msg => {
       else replyUser(msg, content).catch(() => {});
     }).catch(e => {
       const content = `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\``;
-      if (startMsg) startMsg.edit(content).catch(() => {});
-      else replyUser(msg, content).catch(() => {});
-    });
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .forwardall — Owner Only
-  // ─────────────────────────────────────────────
-  if (/^\.forwardall(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    const args = txt.split(/\s+/).slice(1);
-    let src = null, dst = null;
-    const mentions = [...txt.matchAll(/<#(\d+)>/g)];
-    if (mentions.length >= 1) try { src = await client.channels.fetch(mentions[0][1]); } catch {}
-    if (mentions.length >= 2) try { dst = await client.channels.fetch(mentions[1][1]); } catch {}
-    if (!src && args[0]) try { src = await client.channels.fetch(args[0].trim()); } catch {}
-    if (!dst && args[1]) try { dst = await client.channels.fetch(args[1].trim()); } catch {}
-    if (!src || !dst) { replyUser(msg, "❌ provide source + destination: `.forwardall #source #dest` or IDs, dumbass.").catch(() => {}); return; }
-    if (!src?.isTextBased?.() || !dst?.isTextBased?.()) { replyUser(msg, "❌ invalid channel type.").catch(() => {}); return; }
-    const startMsg = await replyUser(msg, `⚡ Forwarding from <#${src.id}> → <#${dst.id}>...`).catch(() => {});
-    forwardTxt(src, dst).then(r => {
-      const content = `✅ **Forward started!**\n📂 <#${src.id}> → <#${dst.id}>\n📄 Found: \`${r.sent}\` files sending...\n⚡ Forward runs in background, use other commands freely.`;
-      if (startMsg) startMsg.edit(content).catch(() => {});
-      else replyUser(msg, content).catch(() => {});
-    }).catch(e => {
-      const content = `❌ Failed: \`${e.message.slice(0,1500)}\``;
       if (startMsg) startMsg.edit(content).catch(() => {});
       else replyUser(msg, content).catch(() => {});
     });
