@@ -62,6 +62,37 @@ if (!Array.isArray(library.files)) library.files = [];
 // ============================================================
 const rnCooldown = new Map();
 const RN_COOLDOWN_SEC = 10;
+// Unified command cooldowns (regular users only, buyers bypass)
+const commandCooldowns = new Map(); // key: "cmd:userId" → expiry timestamp
+const COOLDOWNS = {
+  upload: 20 * 60,      // 20 minutes
+  find: 30,             // 30 seconds
+  get: 30,              // 30 seconds
+  rename: 60,           // 1 minute
+  dl: 60,               // 1 minute
+  et: 10 * 60           // 10 minutes
+};
+function formatCooldown(remainingSec) {
+  const m = Math.floor(remainingSec / 60);
+  const s = remainingSec % 60;
+  if (m > 0 && s > 0) return `${m}m ${s}s`;
+  if (m > 0) return `${m}m`;
+  return `${s}s`;
+}
+function checkCommandCooldown(userId, cmd, isBuyerUser) {
+  if (isBuyerUser) return { onCooldown: false };
+  const cdSec = COOLDOWNS[cmd];
+  if (!cdSec) return { onCooldown: false };
+  const key = `${cmd}:${userId}`;
+  const now = Date.now();
+  const expiry = commandCooldowns.get(key);
+  if (expiry && now < expiry) {
+    const remaining = Math.ceil((expiry - now) / 1000);
+    return { onCooldown: true, message: `you're on ${formatCooldown(remaining)} cooldown.` };
+  }
+  commandCooldowns.set(key, now + cdSec * 1000);
+  return { onCooldown: false };
+}
 // ============================================================
 // DISCORD CLIENT
 // ============================================================
@@ -478,7 +509,6 @@ async function scanChannel(channel) {
   try {
     const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
     const existingFullNames = new Set(library.files.map(f => normalize(f.filename)));
-    const existingSizes = new Set(library.files.map(f => Number(f.size || 0)));
     const found = [];
     let before = null, messages = 0, pages = 0, skippedDup = 0, replacedDup = 0;
     while (true) {
@@ -496,14 +526,12 @@ async function scanChannel(channel) {
           if (!baseName || !url) continue;
           const isDupBase = existingBases.has(baseName);
           const isDupFull = existingFullNames.has(fullName);
-          const isDupSize = fileSize > 0 && existingSizes.has(fileSize);
-          if (isDupBase || isDupFull || isDupSize) {
+          if (isDupBase || isDupFull) {
             skippedDup++;
             continue;
           }
           existingBases.add(baseName);
           existingFullNames.add(fullName);
-          existingSizes.add(fileSize);
           found.push({
             id: idForFile(), filename, url, size: fileSize,
             contentType: a.contentType || null, channelId: msg.channelId,
@@ -582,32 +610,47 @@ function extractFilesFromZip(zipBuffer) {
 function cleanLuaScript(text) {
   if (!text) return "";
   let cleaned = text;
+  // Step 1: Remove multi-line comments --[[ ... ]]
   cleaned = cleaned.replace(/--\[\[[\s\S]*?\]\]/g, "");
+  // Step 2: Remove single-line comments --... (but keep the line structure)
   cleaned = cleaned.replace(/--[^\n]*/g, "");
+  // Step 3: Remove print statements (whole lines)
   cleaned = cleaned.split("\n").map(line => {
     const trimmed = line.trim();
     if (/^print\s*\(/.test(trimmed) && /\)\s*[;]?$/.test(trimmed)) return "";
     if (/^\s*print\s*\(/.test(line) && /\)\s*;?\s*$/.test(line)) return "";
     return line;
   }).join("\n");
+  // Step 4: Remove URLs / links
   cleaned = cleaned.replace(/https?:\/\/[^\s"'()\]]+/g, "");
   cleaned = cleaned.replace(/www\.[^\s"'()\]]+/g, "");
   cleaned = cleaned.replace(/discord\.gg\/[^\s"'()\]]+/g, "");
-  const LUA_STANDALONE = /^\s*(break|end|goto|return|true|false|nil)\s*[;]?\s*$/;
+  // Step 5: Filter — keep lines that look like Lua code
+  // Lines starting with Lua keywords (after indentation)
+  const LUA_KEYWORD_START = /^\s*(local|function|if|elseif|else|for|while|repeat|until|return|break|do|end|goto|in|then)\b/;
+  // Lines that are standalone keywords
+  const LUA_STANDALONE = /^\s*(break|end|goto|return|true|false|nil|else|then|do|repeat|until)\s*[;]?\s*$/;
+  // Lines with code syntax markers
   const LUA_CODE_MARKERS = /[=+\-*/%^#<>~{}()\[\];:,.]|["']|::|\.\.\.|\.\.|\b\d+\.?\d*\b/;
   cleaned = cleaned.split("\n").filter(line => {
     const trimmed = line.trim();
-    if (!trimmed) return true;
+    if (!trimmed) return true; // keep blank lines for readability
     if (LUA_STANDALONE.test(trimmed)) return true;
+    if (LUA_KEYWORD_START.test(line)) return true;
     if (LUA_CODE_MARKERS.test(trimmed)) return true;
+    // Remove: pure text lines with no code structure
     return false;
   }).join("\n");
+  // Step 6: Collapse excessive blank lines (max 2 consecutive)
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+  // Step 7: Trim trailing whitespace per line, preserve indentation
   cleaned = cleaned.split("\n").map(line => {
     const m = line.match(/^(\s*)(.*?)\s*$/);
     return m ? (m[1] + m[2]) : line.trimEnd();
   }).join("\n");
+  // Step 8: Remove leading blank lines at start
   cleaned = cleaned.replace(/^\s*\n+/, "");
+  // Step 9: Ensure single trailing newline
   cleaned = cleaned.replace(/\n+\s*$/, "\n");
   return cleaned;
 }
@@ -918,6 +961,8 @@ client.on("messageCreate", async msg => {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
+    const cd = checkCommandCooldown(msg.author.id, "upload", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     let attachments = [...(msg.attachments?.values() || [])].filter(a => {
       const e = ext(a.name);
       return e === "txt" || e === "lua";
@@ -1168,6 +1213,8 @@ client.on("messageCreate", async msg => {
     const perm = await checkRegularPermission(msg, true);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
     if (isDM && !perm.isBuyer) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
+    const cd = checkCommandCooldown(msg.author.id, "et", perm.isBuyer);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     let attachments = extractAttachmentsOf(msg);
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -1219,33 +1266,10 @@ client.on("messageCreate", async msg => {
   // .rename / .rn
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const perm = await checkRegularPermission(msg, true);
-    if (!perm.allowed) {
-      if (!perm.isBuyer) {
-        const now = Date.now();
-        if (rnCooldown.has(msg.author.id)) {
-          const remaining = Math.ceil((rnCooldown.get(msg.author.id) + RN_COOLDOWN_SEC * 1000 - now) / 1000);
-          if (remaining > 0) {
-            replyUser(msg, `❌ wait ${remaining}s before using .rn again, bro.`).catch(() => {});
-            return;
-          }
-        }
-        rnCooldown.set(msg.author.id, now);
-      }
-      replyUser(msg, perm.reason).catch(() => {});
-      return;
-    }
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
-    if (!isBuyerUser) {
-      const now = Date.now();
-      if (rnCooldown.has(msg.author.id)) {
-        const remaining = Math.ceil((rnCooldown.get(msg.author.id) + RN_COOLDOWN_SEC * 1000 - now) / 1000);
-        if (remaining > 0) {
-          replyUser(msg, `❌ wait ${remaining}s before using .rn again, bro.`).catch(() => {});
-          return;
-        }
-      }
-      rnCooldown.set(msg.author.id, now);
-    }
+    const cd = checkCommandCooldown(msg.author.id, "rename", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -1303,6 +1327,8 @@ client.on("messageCreate", async msg => {
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    const cd = checkCommandCooldown(msg.author.id, "get", perm.isBuyer);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     const id = txt.split(/\s+/)[1];
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const file = getFile(id);
@@ -1318,6 +1344,8 @@ client.on("messageCreate", async msg => {
     const arg = txt.split(/\s+/)[1];
     if (!arg) { replyUser(msg, "❌ put file link, idiot.").catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
+    const cd = checkCommandCooldown(msg.author.id, "dl", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
 
     // Check if input is a URL
     if (/^https?:\/\//i.test(arg) || /cdn\.discordapp\.com/i.test(arg) || /media\.discordapp\.net/i.test(arg)) {
@@ -1365,6 +1393,8 @@ client.on("messageCreate", async msg => {
     const results = findFiles(query);
     if (!results.length) { replyUser(msg, "❌ no matching file name for that, dumbass.").catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
+    const cd = checkCommandCooldown(msg.author.id, "find", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
     const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
