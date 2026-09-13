@@ -1050,6 +1050,93 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
+  // .zipall — Owner Only (pack all txt/lua files in channel into ZIP)
+  // ─────────────────────────────────────────────
+  if (/^\.zipall(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
+    const args = txt.split(/\s+/).slice(1);
+    let ch = null;
+    const mentionMatch = txt.match(/<#(\d+)>/);
+    if (mentionMatch) {
+      try { ch = await client.channels.fetch(mentionMatch[1]); } catch {}
+    } else if (args[0]) {
+      try { ch = await client.channels.fetch(args[0].trim()); } catch {}
+    } else {
+      ch = msg.channel;
+    }
+    if (!ch) { replyUser(msg, "❌ invalid channel, dumbass.").catch(() => {}); return; }
+    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
+    const startMsg = await replyUser(msg, `⏳ Scanning <#${ch.id}> for files...`).catch(() => {});
+    try {
+      const zip = new AdmZip();
+      let before = null, fileCount = 0, msgCount = 0;
+      const usedNames = new Map(); // track name collisions
+      while (true) {
+        const batch = await fetchMessages(ch, before);
+        if (!batch.size) break;
+        for (const m of batch.values()) {
+          msgCount++;
+          for (const item of attachmentsOf(m)) {
+            const a = item.attachment;
+            const filename = a.name || "unknown_file";
+            const e = ext(filename);
+            if (e !== "txt" && e !== "lua") continue;
+            try {
+              const buf = await downloadURL(a.url || a.proxyURL);
+              // Handle duplicate filenames
+              let zipName = filename;
+              if (usedNames.has(filename.toLowerCase())) {
+                const n = usedNames.get(filename.toLowerCase()) + 1;
+                usedNames.set(filename.toLowerCase(), n);
+                const base = filename.slice(0, filename.length - e.length - 1);
+                zipName = `${base}_${n}.${e}`;
+              } else {
+                usedNames.set(filename.toLowerCase(), 1);
+              }
+              zip.addFile(zipName, buf);
+              fileCount++;
+            } catch (err) {
+              console.warn(`⚠️ zipall skip ${filename}: ${err.message}`);
+            }
+          }
+        }
+        const oldest = batch.last();
+        if (!oldest || batch.size < 100) break;
+        before = oldest.id;
+      }
+      if (fileCount === 0) {
+        if (startMsg) startMsg.edit("❌ no txt/lua files found in that channel.").catch(() => {});
+        else replyUser(msg, "❌ no txt/lua files found in that channel.").catch(() => {});
+        return;
+      }
+      if (startMsg) startMsg.edit(`📦 Packing ${fileCount} files into ZIP...`).catch(() => {});
+      const zipBuffer = zip.toBuffer();
+      const chName = (ch.name || "channel").replace(/[^a-z0-9_-]/gi, "_");
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const zipFilename = `${chName}_${ts}.zip`;
+      // Check max file size
+      const maxSize = getMaxFileSize(msg.guild);
+      if (zipBuffer.length > maxSize) {
+        const label = maxSize >= 1000000000 ? `${(maxSize/1000000000).toFixed(0)}GB` : `${(maxSize/1000000).toFixed(0)}MB`;
+        if (startMsg) startMsg.edit(`❌ ZIP is ${(zipBuffer.length/1000000).toFixed(1)}MB — max file is ${label}, lol.`).catch(() => {});
+        else replyUser(msg, `❌ ZIP is ${(zipBuffer.length/1000000).toFixed(1)}MB — max file is ${label}, lol.`).catch(() => {});
+        return;
+      }
+      const attachment = new AttachmentBuilder(zipBuffer, { name: zipFilename });
+      if (startMsg) await startMsg.delete().catch(() => {});
+      await msg.channel.send({
+        content: `<@${msg.author.id}> 📦 **ZIP complete!**\n📁 Channel: <#${ch.id}>\n📄 Files: \`${fileCount}\`\n💬 Messages scanned: \`${msgCount}\`\n📦 Size: \`${(zipBuffer.length / 1024 / 1024).toFixed(2)} MB\``,
+        files: [attachment]
+      }).catch(() => {});
+    } catch (e) {
+      const err = `❌ zipall failed: ${e.message}`;
+      if (startMsg) startMsg.edit(err).catch(() => {});
+      else replyUser(msg, err).catch(() => {});
+    }
+    return;
+  }
+  // ─────────────────────────────────────────────
   // .scanchannel — Owner Only
   // ─────────────────────────────────────────────
   if (/^\.scanchannel(?:\s|$)/i.test(txt)) {
