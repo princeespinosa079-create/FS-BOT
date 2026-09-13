@@ -65,14 +65,13 @@ const RN_COOLDOWN_SEC = 10;
 // Unified command cooldowns (regular users only, buyers bypass)
 const commandCooldowns = new Map(); // key: "cmd:userId" → expiry timestamp
 const COOLDOWNS = {
-  upload: 10 * 60,      // 10 minutes
-  find: 10,             // 10 seconds
-  get: 10,              // 10 seconds
-  rename: 5 * 60,        // 5 minutes
-  dl: 60,               // 1 minute
-  et: 5 * 60,           // 5 minutes
-  obf: 10 * 60,         // 10 minutes
-  bypass: 60 * 60       // 1 hour
+  upload: 60 * 60,      // 1 hour
+  find: 15,             // 15 seconds
+  get: 15,              // 15 seconds
+  rename: 5 * 60,       // 5 minutes
+  dl: 10 * 60,          // 10 minutes
+  et: 60 * 60,          // 1 hour
+  obf: 60 * 60          // 1 hour
 };
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
@@ -1212,238 +1211,6 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
-  // .bypass — Universal key bypass (regular + buyer)
-  // ─────────────────────────────────────────────
-  if (/^\.bypass(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "bypass", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    const url = txt.replace(/^\.bypass\s*/i, "").trim();
-    if (!url || !url.startsWith("http")) {
-      replyUser(msg, "❌ pls, put url so i can bypass it.").catch(() => {});
-      return;
-    }
-    const workingMsg = await replyUser(msg, "⏳ Bypassing...").catch(() => {});
-    // 10s delay for regular users only
-    const bypassDelay = isBuyerUser ? 0 : 10000;
-    setTimeout(async () => {
-      try {
-        let foundKey = null;
-        let foundTime = "Unknown";
-
-        // ============================================================
-        // STRATEGY 1: Puppeteer headless browser (renders JavaScript)
-        // ============================================================
-        try {
-          let puppeteer;
-          try {
-            puppeteer = require("puppeteer");
-          } catch {
-            try { puppeteer = require("puppeteer-core"); } catch { puppeteer = null; }
-          }
-
-          if (puppeteer) {
-            const launchOpts = {
-              headless: "new",
-              args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
-            };
-            // Try to find Chrome executable for puppeteer-core
-            if (puppeteer.name === "puppeteer-core" || !puppeteer.executablePath) {
-              const { execSync } = require("child_process");
-              try {
-                const chromePath = execSync("which chromium-browser || which chromium || which google-chrome || which chrome", { encoding: "utf8" }).trim();
-                if (chromePath) launchOpts.executablePath = chromePath;
-              } catch {}
-            }
-            const browser = await puppeteer.launch(launchOpts);
-            try {
-              const page = await browser.newPage();
-              await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-              await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
-              await page.waitForTimeout(3000);
-
-              // Extract key from rendered page — try multiple methods
-              const extracted = await page.evaluate(() => {
-                const fullText = document.body.innerText || document.body.textContent || "";
-                const fullHtml = document.body.innerHTML || "";
-                let key = null;
-                let time = null;
-
-                // Method 1: Search all text for key patterns
-                const keyPatterns = [
-                  /FREE_[a-fA-F0-9]{16,}/i,
-                  /KEY_[a-zA-Z0-9_]{16,}/i,
-                  /LICENSE_[a-zA-Z0-9_]{16,}/i,
-                  /[A-F0-9]{32,}/,
-                  /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i,
-                  /\b[a-zA-Z0-9]{25,}\b/
-                ];
-                for (const p of keyPatterns) {
-                  const m = fullText.match(p) || fullHtml.match(p);
-                  if (m) {
-                    const candidate = m[0];
-                    if (candidate.length >= 16 && !/^(https?|script|style|div|span|class|html|body|button|input)$/i.test(candidate)) {
-                      key = candidate;
-                      break;
-                    }
-                  }
-                }
-
-                // Method 2: Check input fields, buttons, data attributes
-                if (!key) {
-                  const inputs = document.querySelectorAll("input[type='text'], input[type='hidden'], input:not([type]), textarea");
-                  for (const el of inputs) {
-                    const v = el.value || el.getAttribute("data-key") || el.getAttribute("data-license") || "";
-                    if (v.length >= 16 && /[A-Z0-9_]{10,}/i.test(v)) { key = v; break; }
-                  }
-                }
-                if (!key) {
-                  const els = document.querySelectorAll("[data-key], [data-license], [data-code], [data-token]");
-                  for (const el of els) {
-                    const v = el.getAttribute("data-key") || el.getAttribute("data-license") || el.getAttribute("data-code") || el.getAttribute("data-token") || el.textContent || "";
-                    if (v.length >= 16) { key = v.trim(); break; }
-                  }
-                }
-
-                // Method 3: Try to find and click copy button, then read clipboard-like elements
-                if (!key) {
-                  const btns = document.querySelectorAll("button");
-                  for (const btn of btns) {
-                    const txt = (btn.textContent || "").toLowerCase();
-                    if (txt.includes("copy") || txt.includes("key") || txt.includes("license")) {
-                      const prev = btn.previousElementSibling;
-                      const parent = btn.parentElement;
-                      for (const src of [prev, parent, btn.nextElementSibling]) {
-                        if (src) {
-                          const t = src.textContent || src.value || "";
-                          if (t.length >= 16 && /[A-Z0-9_]{10,}/i.test(t)) { key = t.trim(); break; }
-                        }
-                      }
-                      if (key) break;
-                    }
-                  }
-                }
-
-                // Extract time remaining
-                const timePatterns = [
-                  /(\d+)\s*hours?\s*and\s*(\d+)\s*minutes?/i,
-                  /(\d+)\s*hours?\s*(\d+)\s*minutes?/i,
-                  /(\d+)\s*hours?/i,
-                  /(\d+)\s*minutes?/i,
-                  /(\d+)\s*:\s*(\d+)\s*:\s*(\d+)/
-                ];
-                for (const p of timePatterns) {
-                  const m = fullText.match(p);
-                  if (m) {
-                    if (m[1] && m[2] && /hour/i.test(m[0]) && /minute/i.test(m[0])) {
-                      time = `${m[1]} hour ${m[2]} minutes`;
-                    } else if (m[1] && /hour/i.test(m[0])) {
-                      time = `${m[1]} hour`;
-                    } else if (m[1] && /minute/i.test(m[0])) {
-                      time = `${m[1]} minutes`;
-                    } else if (m[1] && m[2] && m[3]) {
-                      time = `${m[1]} hour ${m[2]} minutes`;
-                    }
-                    if (time) break;
-                  }
-                }
-                // Also look for "left" or "remaining" context
-                if (!time) {
-                  const ctx = fullText.match(/([^.\n]{0,80}(?:left|remaining|expires)[^.\n]{0,80})/i);
-                  if (ctx) time = ctx[1].trim().slice(0, 60);
-                }
-
-                return { key, time };
-              });
-
-              if (extracted.key) {
-                foundKey = extracted.key;
-                if (extracted.time) foundTime = extracted.time;
-              }
-            } finally {
-              await browser.close();
-            }
-          }
-        } catch (pErr) {
-          console.warn("⚠️ Puppeteer bypass failed, falling back:", pErr.message);
-        }
-
-        // ============================================================
-        // STRATEGY 2: Fallback — universal HTML scraping
-        // ============================================================
-        if (!foundKey) {
-          try {
-            const res = await fetch(url, {
-              headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
-            });
-            const html = await res.text();
-            const keyPatterns = [
-              /FREE_[a-fA-F0-9]{16,}/i,
-              /KEY_[a-zA-Z0-9_]{16,}/i,
-              /LICENSE_[a-zA-Z0-9_]{16,}/i,
-              /[A-F0-9]{32,}/,
-              /"key"\s*:\s*"([A-Za-z0-9_\-]{16,})"/i,
-              /"license"\s*:\s*"([A-Za-z0-9_\-]{16,})"/i,
-              /value="([A-Za-z0-9_\-]{20,})"/i,
-              /\b[a-zA-Z0-9]{25,}\b/
-            ];
-            for (const pattern of keyPatterns) {
-              const m = html.match(pattern);
-              if (m) {
-                const k = m[1] || m[0];
-                if (k.length >= 16 && !/^(https?|script|style|div|span|class|html|body)$/i.test(k)) {
-                  foundKey = k;
-                  break;
-                }
-              }
-            }
-            // Extract time
-            const timePatterns = [
-              /(\d+)\s*hours?\s*and\s*(\d+)\s*minutes?/i,
-              /(\d+)\s*hours?/i,
-              /(\d+)\s*minutes?/i
-            ];
-            for (const p of timePatterns) {
-              const m = html.match(p);
-              if (m) {
-                if (m[1] && m[2]) foundTime = `${m[1]} hour ${m[2]} minutes`;
-                else if (m[0].includes("hour")) foundTime = `${m[1]} hour`;
-                else foundTime = `${m[1]} minutes`;
-                break;
-              }
-            }
-          } catch {}
-        }
-
-        // ============================================================
-        // Output result
-        // ============================================================
-        if (!foundKey) {
-          if (workingMsg) await workingMsg.delete().catch(() => {});
-          replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
-          return;
-        }
-
-        const bypassEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("Key Bypass!")
-          .setDescription(`Key:\n\`${foundKey}\`\n\nIt will Expires In:\n${foundTime}`)
-          .setFooter({ text: `Request by @${msg.author.username}│Prince Bypass` });
-        if (workingMsg) await workingMsg.delete().catch(() => {});
-        await msg.channel.send({
-          content: `<@${msg.author.id}> Here is your delta key bro!`,
-          embeds: [bypassEmbed]
-        }).catch(() => {});
-      } catch (e) {
-        if (workingMsg) await workingMsg.delete().catch(() => {});
-        replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
-      }
-    }, bypassDelay);
-    return;
-  }
-  // ─────────────────────────────────────────────
   // .scanchannel — Owner Only
   // ─────────────────────────────────────────────
   if (/^\.scanchannel(?:\s|$)/i.test(txt)) {
@@ -1651,40 +1418,52 @@ client.on("messageCreate", async msg => {
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
     const workingEmbed = new EmbedBuilder()
       .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Renaming your File")
+      .setTitle("Processing File")
       .setDescription("⏳ Processing...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-    try {
-      const res = await fetch(file.url);
-      const text = await res.text();
-      const cleaned = cleanLuaScript(text);
-      const randChars = "abcdefghijklmnopqrstuvwxyz";
-      let outputName = "";
-      for (let i = 0; i < 20; i++) {
-        outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
+    const delay = isBuyerUser ? 0 : 10000;
+    setTimeout(async () => {
+      try {
+        const res = await fetch(file.url);
+        const text = await res.text();
+        // Extract URLs from original file content
+        const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
+        const foundUrls = text.match(urlRegex) || [];
+        const cleaned = cleanLuaScript(text);
+        const randChars = "abcdefghijklmnopqrstuvwxyz";
+        let outputName = "";
+        for (let i = 0; i < 20; i++) {
+          outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
+        }
+        outputName += ".lua";
+        const allLines = cleaned.split("\n");
+        const previewLines = allLines.slice(0, 5);
+        let previewText = previewLines.join("\n");
+        if (allLines.length > 5) previewText += "\n...";
+        // Build description with URL section if links found
+        let description = `\`\`\`lua\n${previewText}\n\`\`\``;
+        if (foundUrls.length > 0) {
+          const uniqueUrls = [...new Set(foundUrls)];
+          description += `\n\n**URL Found:**\n${uniqueUrls.map(u => `- ${u}`).join("\n")}`;
+        }
+        const resultEmbed = new EmbedBuilder()
+          .setColor(getEmbedColor(isBuyerUser))
+          .setTitle("File Preview")
+          .setDescription(description)
+          .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
+        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        await msg.channel.send({
+          content: `<@${msg.author.id}> **Here is the file bro!**`,
+          files: [fixedFile],
+          embeds: [resultEmbed]
+        }).catch(() => {});
+      } catch (e) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
       }
-      outputName += ".lua";
-      const allLines = cleaned.split("\n");
-      const previewLines = allLines.slice(0, 5);
-      let previewText = previewLines.join("\n");
-      if (allLines.length > 5) previewText += "\n...";
-      const resultEmbed = new EmbedBuilder()
-        .setColor(getEmbedColor(isBuyerUser))
-        .setTitle("Output Preview")
-        .setDescription(`\`\`\`lua\n${previewText}\n\`\`\``)
-        .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
-      const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      await msg.channel.send({
-        content: `<@${msg.author.id}> **Here is the file bro!**`,
-        files: [fixedFile],
-        embeds: [resultEmbed]
-      }).catch(() => {});
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
-    }
+    }, delay);
     return;
   }
   // .get
