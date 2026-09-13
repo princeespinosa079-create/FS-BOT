@@ -656,43 +656,71 @@ function cleanLuaScript(text) {
   return cleaned;
 }
 // ============================================================
-// LUA OBFUSCATOR (Prince Obfuscator)
+// LUA OBFUSCATOR (Prince Obfuscator — Luarmor/Luraph style)
 // ============================================================
 function obfuscateLua(source) {
   if (!source) source = "";
   const header = "-- This file was generated using Prince Obfuscator\n";
-  // Generate random XOR key (1-255, never 0)
+  // ============================================================
+  // Layer 1: Encode source to custom base64-like alphabet
+  // ============================================================
+  const ALPHABET = "K9xLpRmTnVoQ2WsXeYcZa3DbF4HgJi6KlMnOpQrStUvWwXyYz01578ABCDEFGHIJNPVZ";
+  const toCustomB64 = (str) => {
+    let bytes = [];
+    for (let i = 0; i < str.length; i++) bytes.push(str.charCodeAt(i) & 0xFF);
+    let result = "";
+    for (let i = 0; i < bytes.length; i += 3) {
+      const b1 = bytes[i], b2 = bytes[i+1] || 0, b3 = bytes[i+2] || 0;
+      result += ALPHABET[b1 >> 2];
+      result += ALPHABET[((b1 & 3) << 4) | (b2 >> 4)];
+      result += (i+1 < bytes.length) ? ALPHABET[((b2 & 15) << 2) | (b3 >> 6)] : "=";
+      result += (i+2 < bytes.length) ? ALPHABET[b3 & 63] : "=";
+    }
+    return result;
+  };
+  const encoded = toCustomB64(source);
+  // ============================================================
+  // Layer 2: XOR encrypt the encoded string with random key
+  // ============================================================
   const xorKey = Math.floor(Math.random() * 254) + 1;
-  // Encode every byte safely with XOR + force 0-255 range
-  const bytes = [];
-  for (let i = 0; i < source.length; i++) {
-    const b = source.charCodeAt(i) & 0xFF;
-    bytes.push((b ^ xorKey) & 0xFF);
+  const encBytes = [];
+  for (let i = 0; i < encoded.length; i++) {
+    encBytes.push((encoded.charCodeAt(i) ^ (xorKey + i % 7)) & 0xFF);
   }
-  // Split into chunks for readability
+  // ============================================================
+  // Layer 3: Split into chunks and generate random var names
+  // ============================================================
   const chunks = [];
-  for (let i = 0; i < bytes.length; i += 100) {
-    chunks.push(bytes.slice(i, i + 100).join(","));
+  for (let i = 0; i < encBytes.length; i += 120) {
+    chunks.push(encBytes.slice(i, i + 120).join(","));
   }
-  const tableStr = chunks.join(",");
-  // Random variable names
-  const randName = () => {
+  const dataStr = chunks.join(",");
+  const randName = (len) => {
     const c = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let s = c[Math.floor(Math.random() * 52)];
-    for (let i = 0; i < 5 + Math.floor(Math.random() * 5); i++) {
+    for (let i = 0; i < (len || 6) + Math.floor(Math.random() * 4); i++) {
       s += c[Math.floor(Math.random() * 52)];
     }
     return s;
   };
+  // Random variable names
   const v_data = randName();
   const v_key = randName();
+  const v_idx = randName();
   const v_out = randName();
   const v_i = randName();
-  const v_fn = randName();
+  const v_c = randName();
+  const v_b64 = randName();
+  const v_dec = randName();
+  const v_junk1 = randName();
+  const v_junk2 = randName();
   const v_load = randName();
-  // Build obfuscated script — SAFE decoding with % 256
-  const obfuscated = `${header}local ${v_data}={${tableStr}};local ${v_key}=${xorKey};local ${v_out}={};for ${v_i}=1,#${v_data} do ${v_out}[${v_i}]=string.char((${v_data}[${v_i}]~${v_key})%256) end;local ${v_fn}=table.concat(${v_out});local ${v_load}=loadstring(${v_fn});if ${v_load} then ${v_load}() else error("Failed to load") end`;
-  return obfuscated;
+  const v_check = randName();
+  // ============================================================
+  // Build the obfuscated Lua script (VM-style decoder)
+  // ============================================================
+  const lua = `${header}local ${v_data}={${dataStr}};local ${v_key}=${xorKey};local ${v_idx}=0;local ${v_out}={};local ${v_junk1}=function() return ${Math.floor(Math.random()*100)} end;local ${v_junk2}=${v_junk1}();for ${v_i}=1,#${v_data} do local ${v_c}=${v_data}[${v_i}];${v_idx}=${v_idx}+1;${v_out}[${v_i}]=string.char((${v_c}~(${v_key}+${v_idx}%7))%256) end;local ${v_b64}=table.concat(${v_out});local ${v_dec}=(function() local A="${ALPHABET}";local B={};for i=1,#A do B[A:sub(i,i)]=i-1 end;return function(S) local R={};local C=0;for i=1,#S do local ch=S:sub(i,i);if ch~="=" then local v=B[ch];if v then C=C*64+v;if(i%4==0)then R[#R+1]=string.char(math.floor(C/65536)%256);R[#R+1]=string.char(math.floor(C/256)%256);R[#R+1]=string.char(C%256);C=0 end end end;return table.concat(R) end end)();local ${v_check}=${v_dec}(${v_b64});local ${v_load}=loadstring(${v_check});if ${v_load} then ${v_load}() else error("Prince Obfuscator: Load failed") end`;
+  return lua;
 }
 // ============================================================
 // SLASH COMMANDS — only /say (global, DM support)
