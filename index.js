@@ -65,13 +65,14 @@ const RN_COOLDOWN_SEC = 10;
 // Unified command cooldowns (regular users only, buyers bypass)
 const commandCooldowns = new Map(); // key: "cmd:userId" → expiry timestamp
 const COOLDOWNS = {
-  upload: 20 * 60,      // 20 minutes
-  find: 30,             // 30 seconds
-  get: 30,              // 30 seconds
-  rename: 60,           // 1 minute
+  upload: 10 * 60,      // 10 minutes
+  find: 10,             // 10 seconds
+  get: 10,              // 10 seconds
+  rename: 30 * 60,      // 30 minutes
   dl: 60,               // 1 minute
-  et: 10 * 60,          // 10 minutes
-  obf: 60 * 60          // 1 hour
+  et: 5 * 60,           // 5 minutes
+  obf: 10 * 60,         // 10 minutes
+  bypass: 60 * 60       // 1 hour
 };
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
@@ -1440,7 +1441,7 @@ client.on("messageCreate", async msg => {
         if (allLines.length > 5) previewText += "\n...";
         const resultEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("Rename File")
+          .setTitle("Output Preview")
           .setDescription(`\`\`\`lua\n${previewText}\n\`\`\``)
           .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
         const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
@@ -1453,6 +1454,65 @@ client.on("messageCreate", async msg => {
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+      }
+    }, delay);
+    return;
+  }
+  // .bypass — Delta Key Bypass
+  if (/^\.bypass(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    const isBuyerUser = perm.isBuyer;
+    const cd = checkCommandCooldown(msg.author.id, "bypass", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
+    const args = txt.slice(7).trim();
+    const url = args.split(/\s+/)[0];
+    if (!url) { replyUser(msg, "❌ pls, put delta url so i can bypass it.").catch(() => {}); return; }
+    const workingMsg = await replyUser(msg, "⏳ Bypassing...").catch(() => {});
+    const delay = isBuyerUser ? 0 : 10000;
+    setTimeout(async () => {
+      try {
+        const res = await fetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0" }
+        });
+        if (!res.ok) {
+          if (workingMsg) await workingMsg.delete().catch(() => {});
+          replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
+          return;
+        }
+        const html = await res.text();
+        // Extract the key
+        const keyMatch = html.match(/[A-Z0-9_]{16,}/);
+        const key = keyMatch ? keyMatch[0] : "Not Found";
+        // Extract time remaining
+        const timeMatch = html.match(/(\d+)\s+hours?\s+and\s+(\d+)\s+minutes?/i);
+        let timeLeft = "Not Found";
+        if (timeMatch) {
+          const h = timeMatch[1];
+          const m = timeMatch[2];
+          if (h === "1" && m === "1") timeLeft = `${h} hour ${m} minute`;
+          else if (h === "1") timeLeft = `${h} hour ${m} minutes`;
+          else if (m === "1") timeLeft = `${h} hours ${m} minute`;
+          else timeLeft = `${h} hours ${m} minutes`;
+        }
+        if (key === "Not Found") {
+          if (workingMsg) await workingMsg.delete().catch(() => {});
+          replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
+          return;
+        }
+        const resultEmbed = new EmbedBuilder()
+          .setColor(getEmbedColor(isBuyerUser))
+          .setTitle("Key Bypass!")
+          .setDescription(`Key:\n\n\`${key}\`\n\nIt will Expires In:\n\n${timeLeft}`)
+          .setFooter({ text: `Request by @${msg.author.username}│Prince Bypass` });
+        if (workingMsg) await workingMsg.delete().catch(() => {});
+        await msg.channel.send({
+          content: `<@${msg.author.id}> Here is your delta key bro!`,
+          embeds: [resultEmbed]
+        }).catch(() => {});
+      } catch (e) {
+        if (workingMsg) await workingMsg.delete().catch(() => {});
+        replyUser(msg, "❌ not found, this URL might be expired or deleted.").catch(() => {});
       }
     }, delay);
     return;
