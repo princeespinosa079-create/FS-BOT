@@ -851,7 +851,7 @@ client.on("interactionCreate", async interaction => {
   const pageItems = menu.results.slice(start, start + 8);
   const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
   const embed = new EmbedBuilder()
-    .setColor(menu.isBuyer ? BUYER_COLOR : REGULAR_COLOR)
+    .setColor(REGULAR_COLOR)
     .setTitle(getFinderTitle(menu.isBuyer))
     .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
     .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
@@ -984,7 +984,21 @@ client.on("messageCreate", async msg => {
     const loadingMsg = await replyUser(msg, "🔍 Scanning server for suspicious accounts...").catch(() => {});
     
     try {
-      await msg.guild.members.fetch();
+      // Fetch members with rate limit retry
+      try {
+        await msg.guild.members.fetch().catch(async (e) => {
+          // If rate limited, wait and retry once
+          const retryMatch = e?.message?.match(/Retry after ([\d.]+) seconds?/);
+          const waitSec = retryMatch ? parseFloat(retryMatch[1]) + 1 : 12;
+          console.log(`⚠️ Altlist rate limited, waiting ${waitSec}s...`);
+          await new Promise(r => setTimeout(r, waitSec * 1000));
+          try { await msg.guild.members.fetch(); } catch {}
+        });
+      } catch {}
+      // If cache is still empty, try fetch with limit
+      if (msg.guild.members.cache.size < 5) {
+        try { await msg.guild.members.fetch({ limit: 1000 }); } catch {}
+      }
       const now = Date.now();
       const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
       const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
@@ -1080,7 +1094,10 @@ client.on("messageCreate", async msg => {
       
     } catch (e) {
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      replyUser(msg, `❌ scan failed: ${e.message.slice(0, 100)}`).catch(() => {});
+      const errMsg = e.message.includes("rate limited") || e.message.includes("opcode 8") 
+        ? "⏳ Discord rate limited, try again in 1-2 minutes bro."
+        : `❌ scan failed: ${e.message.slice(0, 80)}`;
+      replyUser(msg, errMsg).catch(() => {});
     }
     return;
   }
