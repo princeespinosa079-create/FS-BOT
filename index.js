@@ -862,7 +862,6 @@ client.on("interactionCreate", async interaction => {
   await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
   paginationMenus.set(uid, menu);
   return;
-}
 // ─── ALTLIST PAGINATION BUTTONS ───
 if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") {
   if (!altListMenus.has(uid)) {
