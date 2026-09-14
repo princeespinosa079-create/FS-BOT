@@ -71,7 +71,9 @@ const COOLDOWNS = {
   rename: 5 * 60,       // 5 minutes
   dl: 10 * 60,          // 10 minutes
   et: 60 * 60,          // 1 hour
-  obf: 60 * 60          // 1 hour
+  obf: 60 * 60,         // 1 hour
+  wh: 10 * 60,          // 10 minutes
+  delwh: 10 * 60        // 10 minutes
 };
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
@@ -978,37 +980,79 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
-  // .ghostdm — Owner Only (DM all members with a role)
+  // .dm — Owner Only (DM all members with a role or single user)
   // ─────────────────────────────────────────────
-  if (/^\.ghostdm(?:\s|$)/i.test(txt)) {
+  if (/^\.dm(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    // Parse role mention or ID
+    // Parse role mention, user mention, or ID
     const roleMention = txt.match(/<@&(\d+)>/);
-    let roleId = null;
+    const userMention = txt.match(/<@!?(\d+)>/);
+    let targetType = null; // "role" or "user"
+    let targetId = null;
     let messageStart = 0;
+    
     if (roleMention) {
-      roleId = roleMention[1];
+      targetType = "role";
+      targetId = roleMention[1];
       messageStart = txt.indexOf(roleMention[0]) + roleMention[0].length;
+    } else if (userMention) {
+      targetType = "user";
+      targetId = userMention[1];
+      messageStart = txt.indexOf(userMention[0]) + userMention[0].length;
     } else {
       const args = txt.split(/\s+/).slice(1);
       if (args[0] && /^\d+$/.test(args[0])) {
-        roleId = args[0].trim();
+        targetId = args[0].trim();
         messageStart = txt.indexOf(args[0]) + args[0].length;
+        // Try to determine if it's a role or user
+        try {
+          const roleCheck = await msg.guild.roles.fetch(targetId);
+          if (roleCheck) targetType = "role";
+        } catch {}
+        if (!targetType) {
+          try {
+            const userCheck = await msg.guild.members.fetch(targetId);
+            if (userCheck) targetType = "user";
+          } catch {}
+        }
       }
     }
-    if (!roleId) { replyUser(msg, "❌ mention a role or paste role ID, dumbass.").catch(() => {}); return; }
+    
+    if (!targetId || !targetType) { replyUser(msg, "❌ mention a role/user or paste ID, dumbass.").catch(() => {}); return; }
     const messageText = txt.slice(messageStart).trim();
     if (!messageText) { replyUser(msg, "❌ put a message to send, idiot.").catch(() => {}); return; }
-    // Fetch role and members
+    
+    if (targetType === "user") {
+      // Single user DM
+      try {
+        const member = await msg.guild.members.fetch(targetId);
+        if (!member) { replyUser(msg, "❌ user not found in this server, dumbass.").catch(() => {}); return; }
+        const startMsg = await replyUser(msg, `⏳ Sending DM to **${member.user.tag}**...`).catch(() => {});
+        try {
+          await member.send(messageText);
+          const result = `✅ **DM Sent!**\n\n👤 User: **${member.user.tag}**\n✅ Status: \`Sent\`\n📨 Message:\n> ${messageText.slice(0, 1000)}`;
+          if (startMsg) startMsg.edit(result).catch(() => {});
+          else replyUser(msg, result).catch(() => {});
+        } catch {
+          const result = `❌ **DM Failed!**\n\n👤 User: **${member.user.tag}**\n❌ Status: \`Failed to send\``;
+          if (startMsg) startMsg.edit(result).catch(() => {});
+          else replyUser(msg, result).catch(() => {});
+        }
+      } catch (e) {
+        replyUser(msg, `❌ invalid user, dumbass.`).catch(() => {});
+      }
+      return;
+    }
+    
+    // Role-based DM (original ghostdm behavior)
     let role = null;
-    try { role = await msg.guild.roles.fetch(roleId); } catch {}
+    try { role = await msg.guild.roles.fetch(targetId); } catch {}
     if (!role) { replyUser(msg, "❌ invalid role, dumbass.").catch(() => {}); return; }
     const startMsg = await replyUser(msg, `⏳ Sending DMs to **${role.members?.size || "?"}** members with role **${role.name}**...`).catch(() => {});
     let sent = 0, failed = 0;
-    // Fetch all members of the guild to ensure cache is populated
     try { await msg.guild.members.fetch(); } catch {}
-    const membersWithRole = msg.guild.members.cache.filter(m => m.roles.cache.has(roleId) && !m.user.bot);
+    const membersWithRole = msg.guild.members.cache.filter(m => m.roles.cache.has(targetId) && !m.user.bot);
     for (const member of membersWithRole.values()) {
       try {
         await member.send(messageText);
@@ -1017,9 +1061,161 @@ client.on("messageCreate", async msg => {
         failed++;
       }
     }
-    const result = `✅ **GhostDM complete!**\n\n👥 Role: **${role.name}**\n✅ Sent: \`${sent}\`\n❌ Failed: \`${failed}\`\n📨 Message:\n> ${messageText.slice(0, 1000)}`;
+    const result = `✅ **DM complete!**\n\n👥 Role: **${role.name}**\n✅ Sent: \`${sent}\`\n❌ Failed: \`${failed}\`\n📨 Message:\n> ${messageText.slice(0, 1000)}`;
     if (startMsg) startMsg.edit(result).catch(() => {});
     else replyUser(msg, result).catch(() => {});
+    return;
+  }
+  // ─────────────────────────────────────────────
+  // .delwh — Delete Webhook (regular + buyer)
+  // ─────────────────────────────────────────────
+  if (/^\.delwh(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    const isBuyerUser = perm.isBuyer;
+    const cd = checkCommandCooldown(msg.author.id, "delwh", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
+    
+    const arg = txt.split(/\s+/)[1]?.trim();
+    if (!arg) {
+      return replyUser(msg, "❌ usage: `.delwh <webhook_url>`, dumbass.").catch(() => {});
+    }
+    
+    let webhookUrl = arg;
+    const urlMatch = txt.match(/(https:\/\/discord\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+)/i);
+    if (urlMatch) webhookUrl = urlMatch[1];
+
+    const timeFooter = `Requested by @${msg.author.username}│Webhook Delete`;
+    const loadingEmbed = new EmbedBuilder()
+      .setColor(getEmbedColor(isBuyerUser))
+      .setTitle("Deleting Webhook URL...")
+      .setDescription("⏳ Processing...")
+      .setFooter({ text: timeFooter });
+    const sentMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
+
+    try {
+      const res = await fetch(webhookUrl, { method: "DELETE" });
+      const resultEmbed = new EmbedBuilder()
+        .setColor(getEmbedColor(isBuyerUser))
+        .setTitle("Result")
+        .setFooter({ text: timeFooter });
+      
+      if (res.ok) {
+        resultEmbed.setDescription("✅ delete.");
+      } else if (res.status === 404) {
+        resultEmbed.setDescription("❌ not found.");
+      } else {
+        resultEmbed.setDescription(`❌ failed: HTTP ${res.status}`);
+      }
+      
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      await msg.channel.send({
+        content: `<@${msg.author.id}> done, delete the webhook bro!`,
+        embeds: [resultEmbed]
+      }).catch(() => {});
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ error: ${e.message.slice(0,100)}`).catch(() => {});
+    }
+    return;
+  }
+  // ─────────────────────────────────────────────
+  // .wh — Webhook Information (regular + buyer)
+  // ─────────────────────────────────────────────
+  if (/^\.wh(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    const isBuyerUser = perm.isBuyer;
+    const cd = checkCommandCooldown(msg.author.id, "wh", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
+    
+    const arg = txt.split(/\s+/)[1]?.trim();
+    if (!arg) {
+      return replyUser(msg, "❌ usage: `.wh <webhook_url>`, dumbass.").catch(() => {});
+    }
+    
+    let webhookUrl = arg;
+    const urlMatch = txt.match(/(https:\/\/discord\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+)/i);
+    if (urlMatch) webhookUrl = urlMatch[1];
+    
+    // Get guild info for loading embed
+    let guildName = msg.guild?.name || "Unknown";
+    let guildMembers = msg.guild?.memberCount || "?";
+    let guildOwner = "Unknown";
+    try {
+      if (msg.guild) {
+        const owner = await msg.guild.fetchOwner();
+        guildOwner = `<@${owner.id}>`;
+      }
+    } catch {}
+    
+    const timeFooter = `Requested by @${msg.author.username}│Webhook Information`;
+    const loadingEmbed = new EmbedBuilder()
+      .setColor(getEmbedColor(isBuyerUser))
+      .setTitle("Please wait.")
+      .setDescription(`**Guild Name:**\n${guildName}\n**Members:**\n${guildMembers}\n**Owner:**\n${guildOwner}`)
+      .setFooter({ text: timeFooter });
+    const sentMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
+    
+    try {
+      const res = await fetch(webhookUrl);
+      if (!res.ok) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        const errorEmbed = new EmbedBuilder()
+          .setColor(getEmbedColor(isBuyerUser))
+          .setTitle("Result")
+          .setDescription(res.status === 404 ? "❌ not found." : `❌ failed: HTTP ${res.status}`)
+          .setFooter({ text: timeFooter });
+        await msg.channel.send({
+          content: `<@${msg.author.id}>`,
+          embeds: [errorEmbed]
+        }).catch(() => {});
+        return;
+      }
+      
+      const wh = await res.json();
+      let whGuildName = "N/A";
+      let whChannel = "N/A";
+      if (wh.guild_id) {
+        try {
+          const g = await client.guilds.fetch(wh.guild_id);
+          whGuildName = g.name;
+        } catch {}
+      }
+      if (wh.channel_id) {
+        try {
+          const c = await client.channels.fetch(wh.channel_id);
+          whChannel = `<#${c.id}>`;
+        } catch { whChannel = `\`${wh.channel_id}\``; }
+      }
+      
+      const infoEmbed = new EmbedBuilder()
+        .setColor(getEmbedColor(isBuyerUser))
+        .setTitle("Webhook Information")
+        .setDescription(
+          `**Name:** ${wh.name || "N/A"}\n` +
+          `**ID:** \`${wh.id || "N/A"}\`\n` +
+          `**Token:** \`${wh.token ? wh.token.slice(0, 15) + "..." : "N/A"}\`\n` +
+          `**Guild:** ${whGuildName}\n` +
+          `**Channel:** ${whChannel}\n` +
+          `**Type:** ${wh.type === 1 ? "Incoming" : wh.type === 2 ? "Channel Follower" : "Unknown"}\n` +
+          `**Created:** <t:${Math.floor(parseInt(wh.id) / 4194304 + 1420070400)}:R>`
+        )
+        .setFooter({ text: timeFooter });
+      
+      if (wh.avatar) {
+        infoEmbed.setThumbnail(`https://cdn.discordapp.com/avatars/${wh.id}/${wh.avatar}.png`);
+      }
+      
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      await msg.channel.send({
+        content: `<@${msg.author.id}>`,
+        embeds: [infoEmbed]
+      }).catch(() => {});
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ error: ${e.message.slice(0,100)}`).catch(() => {});
+    }
     return;
   }
   // ─────────────────────────────────────────────
