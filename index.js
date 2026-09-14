@@ -111,6 +111,7 @@ const client = new Client({
 });
 const runningScans = new Set();
 const paginationMenus = new Map();
+const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false;
@@ -860,6 +861,43 @@ client.on("interactionCreate", async interaction => {
   );
   await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
   paginationMenus.set(uid, menu);
+  return;
+}
+// ─── ALTLIST PAGINATION BUTTONS ───
+if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") {
+  if (!altListMenus.has(uid)) {
+    return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  const menu = altListMenus.get(uid);
+  if (interaction.message.id !== menu.messageId) return;
+  if (interaction.user.id !== menu.authorId) {
+    return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  if (interaction.customId === "alt_prev") menu.page--;
+  if (interaction.customId === "alt_next") menu.page++;
+  if (menu.page < 1) menu.page = 1;
+  if (menu.page > menu.totalPages) menu.page = menu.totalPages;
+  const start = (menu.page - 1) * 5;
+  const pageItems = menu.results.slice(start, start + 5);
+  const lines = pageItems.map((s, i) => {
+    const idx = start + i + 1;
+    const riskLevel = s.score >= 50 ? "🔴 HIGH" : s.score >= 35 ? "🟠 MED" : "🟡 LOW";
+    const createdDate = new Date(s.created).toLocaleDateString("en-US");
+    return `**${idx}.** ${s.member.user.tag} <@${s.member.id}>\n   ${riskLevel} | Score: \`${s.score}\` | Created: ${createdDate}\n   ${s.flags.join(" │ ")}`;
+  });
+  const embed = new EmbedBuilder()
+    .setColor(0x2B2D31)
+    .setTitle(`🔍 Suspicious Accounts — ${menu.results.length} found`)
+    .setDescription(lines.join("\n\n"))
+    .setFooter({ text: `Page ${menu.page}/${menu.totalPages} │ ${menu.guildName} │ ${menu.memberCount} total members` });
+  const altRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("alt_prev").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
+    new ButtonBuilder().setCustomId("alt_next").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
+  );
+  await interaction.update({ embeds: [embed], components: [altRow] }).catch(() => {});
+  altListMenus.set(uid, menu);
+  return;
+}
 });
 // ============================================================
 // WATCHDOG
@@ -1011,8 +1049,8 @@ client.on("messageCreate", async msg => {
         return;
       }
       
-      // Build pages of results (max 15 per embed)
-      const perPage = 15;
+      // Build pages of results (max 5 per embed)
+      const perPage = 5;
       const totalPages = Math.ceil(suspicious.length / perPage);
       const top = suspicious.slice(0, perPage);
       
@@ -1028,7 +1066,18 @@ client.on("messageCreate", async msg => {
         .setDescription(lines.join("\n\n"))
         .setFooter({ text: `Page 1/${totalPages} │ ${msg.guild.name} │ ${msg.guild.memberCount} total members` });
       
-      replyUser(msg, { embeds: [embed] }).catch(() => {});
+      const altRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("alt_prev").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
+        new ButtonBuilder().setCustomId("alt_next").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
+      );
+      
+      const sent = await replyUser(msg, { embeds: [embed], components: [altRow] }).catch(() => {});
+      if (sent) {
+        altListMenus.set(msg.author.id, {
+          results: suspicious, page: 1, totalPages, messageId: sent.id,
+          authorId: msg.author.id, guildName: msg.guild.name, memberCount: msg.guild.memberCount
+        });
+      }
       
     } catch (e) {
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
@@ -1666,8 +1715,6 @@ client.on("messageCreate", async msg => {
           if (uniqueUrls.length > 10) urlSection += `\n- ...and ${uniqueUrls.length - 10} more`;
           description += urlSection.slice(0, 800);
         }
-        // Add file stats
-        description += `\n\n📊 **Stats:** ${linesRemoved} lines removed │ ${((1 - cleanedSize / originalSize) * 100).toFixed(0)}% cleaner`;
         
         const resultEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
