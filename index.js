@@ -70,9 +70,8 @@ const COOLDOWNS = {
   get: 15,              // 15 seconds
   rename: 5 * 60,       // 5 minutes
   dl: 10 * 60,          // 10 minutes
-  et: 60 * 60,          // 1 hour
+  et: 30 * 60,          // 30 minutes
   obf: 60 * 60,         // 1 hour
-  wh: 10 * 60,          // 10 minutes
   delwh: 10 * 60        // 10 minutes
 };
 function formatCooldown(remainingSec) {
@@ -339,10 +338,10 @@ function replyUser(message, payload) {
   return message.reply(body);
 }
 function getEmbedColor(isBuyerUser) {
-  return isBuyerUser ? BUYER_COLOR : REGULAR_COLOR;
+  return REGULAR_COLOR;
 }
 function getFinderTitle(isBuyerUser) {
-  return isBuyerUser ? "Premium Finder Source Results" : "Finder Source Results";
+  return "Finder Source Results";
 }
 // ============================================================
 // FILE HELPERS
@@ -938,6 +937,105 @@ client.on("messageCreate", async msg => {
     ] }).catch(() => {});
     return;
   }
+  // ─────────────────────────────────────────────
+  // .altlist — Alt/Suspicious Account Scanner (Owner Only)
+  // ─────────────────────────────────────────────
+  if (/^\.altlist(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
+    
+    const loadingMsg = await replyUser(msg, "🔍 Scanning server for suspicious accounts...").catch(() => {});
+    
+    try {
+      await msg.guild.members.fetch();
+      const now = Date.now();
+      const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+      const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+      const suspicious = [];
+      
+      for (const member of msg.guild.members.cache.values()) {
+        if (member.user.bot) continue;
+        
+        let score = 0;
+        const flags = [];
+        
+        // 1. Account created < 30 days ago
+        const created = member.user.createdTimestamp;
+        const ageDays = (now - created) / (24 * 60 * 60 * 1000);
+        if (ageDays < 7) { score += 40; flags.push(`🕐 **${ageDays.toFixed(0)} days old**`); }
+        else if (ageDays < 30) { score += 20; flags.push(`🕐 ${ageDays.toFixed(0)} days old`); }
+        
+        // 2. Joined server < 7 days ago
+        const joined = member.joinedTimestamp;
+        if (joined) {
+          const joinDays = (now - joined) / (24 * 60 * 60 * 1000);
+          if (joinDays < 3) { score += 15; flags.push(`🆕 Joined ${joinDays.toFixed(0)}d ago`); }
+        }
+        
+        // 3. Default/no avatar
+        if (!member.user.avatar) { score += 20; flags.push("👤 No avatar"); }
+        
+        // 4. Only @everyone role (no other roles)
+        const nonEveryoneRoles = member.roles.cache.filter(r => r.id !== msg.guild.id);
+        if (nonEveryoneRoles.size === 0) { score += 15; flags.push("🎭 No roles"); }
+        
+        // 5. Username ends with lots of numbers (alt pattern)
+        const uname = member.user.username;
+        const numMatch = uname.match(/(\d{3,})$/);
+        if (numMatch && numMatch[1].length >= 4) { score += 10; flags.push(`🔢 Numbers in name`); }
+        
+        // 6. Display name same as username (generic)
+        if (member.displayName === uname && !member.user.avatar) { score += 5; }
+        
+        // 7. Suspicious: nitro but no avatar / new account contradiction
+        if (member.premiumSince && ageDays < 30) { score += 10; flags.push("⚠️ New + boosting"); }
+        
+        if (score >= 25) {
+          suspicious.push({
+            member,
+            score,
+            flags,
+            ageDays,
+            created
+          });
+        }
+      }
+      
+      // Sort by suspicion score (highest first)
+      suspicious.sort((a, b) => b.score - a.score);
+      
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      
+      if (suspicious.length === 0) {
+        replyUser(msg, "✅ No suspicious accounts found bro, server looks clean.").catch(() => {});
+        return;
+      }
+      
+      // Build pages of results (max 15 per embed)
+      const perPage = 15;
+      const totalPages = Math.ceil(suspicious.length / perPage);
+      const top = suspicious.slice(0, perPage);
+      
+      const lines = top.map((s, i) => {
+        const riskLevel = s.score >= 50 ? "🔴 HIGH" : s.score >= 35 ? "🟠 MED" : "🟡 LOW";
+        const createdDate = new Date(s.created).toLocaleDateString("en-US");
+        return `**${i + 1}.** ${s.member.user.tag} <@${s.member.id}>\n   ${riskLevel} | Score: \`${s.score}\` | Created: ${createdDate}\n   ${s.flags.join(" │ ")}`;
+      });
+      
+      const embed = new EmbedBuilder()
+        .setColor(0x2B2D31)
+        .setTitle(`🔍 Suspicious Accounts — ${suspicious.length} found`)
+        .setDescription(lines.join("\n\n"))
+        .setFooter({ text: `Page 1/${totalPages} │ ${msg.guild.name} │ ${msg.guild.memberCount} total members` });
+      
+      replyUser(msg, { embeds: [embed] }).catch(() => {});
+      
+    } catch (e) {
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      replyUser(msg, `❌ scan failed: ${e.message.slice(0, 100)}`).catch(() => {});
+    }
+    return;
+  }
   if (/^\.getinv(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const serverId = txt.split(/\s+/)[1];
@@ -1095,123 +1193,28 @@ client.on("messageCreate", async msg => {
 
     try {
       const res = await fetch(webhookUrl, { method: "DELETE" });
-      const resultEmbed = new EmbedBuilder()
-        .setColor(getEmbedColor(isBuyerUser))
-        .setTitle("Result")
-        .setFooter({ text: timeFooter });
       
-      if (res.ok) {
-        resultEmbed.setDescription("✅ delete.");
-      } else if (res.status === 404) {
-        resultEmbed.setDescription("❌ not found.");
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      
+      if (res.status === 404) {
+        await msg.channel.send("❌ not found.").catch(() => {});
       } else {
-        resultEmbed.setDescription(`❌ failed: HTTP ${res.status}`);
-      }
-      
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      await msg.channel.send({
-        content: `<@${msg.author.id}> done, delete the webhook bro!`,
-        embeds: [resultEmbed]
-      }).catch(() => {});
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ error: ${e.message.slice(0,100)}`).catch(() => {});
-    }
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .wh — Webhook Information (regular + buyer)
-  // ─────────────────────────────────────────────
-  if (/^\.wh(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "wh", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    
-    const arg = txt.split(/\s+/)[1]?.trim();
-    if (!arg) {
-      return replyUser(msg, "❌ usage: `.wh <webhook_url>`, dumbass.").catch(() => {});
-    }
-    
-    let webhookUrl = arg;
-    const urlMatch = txt.match(/(https:\/\/discord\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+)/i);
-    if (urlMatch) webhookUrl = urlMatch[1];
-    
-    // Get guild info for loading embed
-    let guildName = msg.guild?.name || "Unknown";
-    let guildMembers = msg.guild?.memberCount || "?";
-    let guildOwner = "Unknown";
-    try {
-      if (msg.guild) {
-        const owner = await msg.guild.fetchOwner();
-        guildOwner = `<@${owner.id}>`;
-      }
-    } catch {}
-    
-    const timeFooter = `Requested by @${msg.author.username}│Webhook Information`;
-    const loadingEmbed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Please wait.")
-      .setDescription(`**Guild Name:**\n${guildName}\n**Members:**\n${guildMembers}\n**Owner:**\n${guildOwner}`)
-      .setFooter({ text: timeFooter });
-    const sentMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
-    
-    try {
-      const res = await fetch(webhookUrl);
-      if (!res.ok) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        const errorEmbed = new EmbedBuilder()
+        const resultEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
           .setTitle("Result")
-          .setDescription(res.status === 404 ? "❌ not found." : `❌ failed: HTTP ${res.status}`)
           .setFooter({ text: timeFooter });
+        
+        if (res.ok) {
+          resultEmbed.setDescription("✅ delete.");
+        } else {
+          resultEmbed.setDescription(`❌ failed: HTTP ${res.status}`);
+        }
+        
         await msg.channel.send({
-          content: `<@${msg.author.id}>`,
-          embeds: [errorEmbed]
+          content: `<@${msg.author.id}> done, delete the webhook bro!`,
+          embeds: [resultEmbed]
         }).catch(() => {});
-        return;
       }
-      
-      const wh = await res.json();
-      let whGuildName = "N/A";
-      let whChannel = "N/A";
-      if (wh.guild_id) {
-        try {
-          const g = await client.guilds.fetch(wh.guild_id);
-          whGuildName = g.name;
-        } catch {}
-      }
-      if (wh.channel_id) {
-        try {
-          const c = await client.channels.fetch(wh.channel_id);
-          whChannel = `<#${c.id}>`;
-        } catch { whChannel = `\`${wh.channel_id}\``; }
-      }
-      
-      const infoEmbed = new EmbedBuilder()
-        .setColor(getEmbedColor(isBuyerUser))
-        .setTitle("Webhook Information")
-        .setDescription(
-          `**Name:** ${wh.name || "N/A"}\n` +
-          `**ID:** \`${wh.id || "N/A"}\`\n` +
-          `**Token:** \`${wh.token ? wh.token.slice(0, 15) + "..." : "N/A"}\`\n` +
-          `**Guild:** ${whGuildName}\n` +
-          `**Channel:** ${whChannel}\n` +
-          `**Type:** ${wh.type === 1 ? "Incoming" : wh.type === 2 ? "Channel Follower" : "Unknown"}\n` +
-          `**Created:** <t:${Math.floor(parseInt(wh.id) / 4194304 + 1420070400)}:R>`
-        )
-        .setFooter({ text: timeFooter });
-      
-      if (wh.avatar) {
-        infoEmbed.setThumbnail(`https://cdn.discordapp.com/avatars/${wh.id}/${wh.avatar}.png`);
-      }
-      
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      await msg.channel.send({
-        content: `<@${msg.author.id}>`,
-        embeds: [infoEmbed]
-      }).catch(() => {});
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
       replyUser(msg, `❌ error: ${e.message.slice(0,100)}`).catch(() => {});
@@ -1302,7 +1305,7 @@ client.on("messageCreate", async msg => {
         .setColor(getEmbedColor(isBuyerUser))
         .setTitle("Script Copy")
         .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
-        .setFooter({ text: `Request by @${msg.author.username}│File Turn Into Script` });
+        .setFooter({ text: `Request by @${msg.author.username}│File → Script` });
       await msg.channel.send({
         content: `<@${msg.author.id}> Here is the script bro!`,
         embeds: [embed]
@@ -1595,7 +1598,7 @@ client.on("messageCreate", async msg => {
   }
   // .rename / .rn
   if (/^\.(?:rename|rn)$/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, true);
+    const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "rename", isBuyerUser);
@@ -1627,28 +1630,51 @@ client.on("messageCreate", async msg => {
         const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
         const foundUrls = text.match(urlRegex) || [];
         const cleaned = cleanLuaScript(text);
-        const randChars = "abcdefghijklmnopqrstuvwxyz";
-        let outputName = "";
-        for (let i = 0; i < 20; i++) {
+        
+        // Stats
+        const originalLines = text.split("\n").length;
+        const cleanedLines = cleaned.split("\n").length;
+        const linesRemoved = originalLines - cleanedLines;
+        const originalSize = Buffer.byteLength(text, "utf8");
+        const cleanedSize = Buffer.byteLength(cleaned, "utf8");
+        
+        // Better filename: prefix + random + .lua
+        const randChars = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let outputName = "fixed_";
+        for (let i = 0; i < 12; i++) {
           outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
         }
         outputName += ".lua";
+        
+        // Add clean header to output file
+        const fileHeader = `-- Cleaned & Fixed by Prince Bot\n-- Original: ${file.name}\n-- Lines removed: ${linesRemoved}\n-- Size reduced: ${((1 - cleanedSize / originalSize) * 100).toFixed(1)}%\n\n`;
+        const finalOutput = fileHeader + cleaned;
+        
         const allLines = cleaned.split("\n");
         const previewLines = allLines.slice(0, 5);
         let previewText = previewLines.join("\n");
         if (allLines.length > 5) previewText += "\n...";
+        // Safety truncation
+        if (previewText.length > 3000) previewText = previewText.slice(0, 3000) + "\n...";
+        
         // Build description with URL section if links found
         let description = `\`\`\`lua\n${previewText}\n\`\`\``;
         if (foundUrls.length > 0) {
           const uniqueUrls = [...new Set(foundUrls)];
-          description += `\n\n**URL Found:**\n${uniqueUrls.map(u => `- ${u}`).join("\n")}`;
+          const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
+          let urlSection = `\n\n**URL Found:**\n${urlList}`;
+          if (uniqueUrls.length > 10) urlSection += `\n- ...and ${uniqueUrls.length - 10} more`;
+          description += urlSection.slice(0, 800);
         }
+        // Add file stats
+        description += `\n\n📊 **Stats:** ${linesRemoved} lines removed │ ${((1 - cleanedSize / originalSize) * 100).toFixed(0)}% cleaner`;
+        
         const resultEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
           .setTitle("File Preview")
           .setDescription(description)
           .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
-        const fixedFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
+        const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
           content: `<@${msg.author.id}> **Here is the file bro!**`,
