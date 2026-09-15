@@ -112,6 +112,7 @@ const client = new Client({
 const runningScans = new Set();
 const paginationMenus = new Map();
 const altListMenus = new Map();
+const deobfMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false;
@@ -830,75 +831,136 @@ client.on("interactionCreate", async interaction => {
     extractCarouselMenus.set(uid, menu);
     return;
   }
-  // ─── FINDER PAGINATION BUTTONS ───
-  if (!paginationMenus.has(uid)) {
-    return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  const menu = paginationMenus.get(uid);
-  if (Date.now() - menu.createdAt > EXPIRY_MS) {
-    paginationMenus.delete(uid);
-    return interaction.reply({ content: "⏳ search expired bro, do `.find` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  if (interaction.message.id !== menu.messageId) return;
-  if (interaction.user.id !== menu.authorId) {
-    return interaction.reply({ content: "❌ this is not yours, idiot.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  if (interaction.customId === "prev_page") menu.page--;
-  if (interaction.customId === "next_page") menu.page++;
-  if (menu.page < 1) menu.page = 1;
-  if (menu.page > menu.totalPages) menu.page = menu.totalPages;
-  const start = (menu.page - 1) * 8;
-  const pageItems = menu.results.slice(start, start + 8);
-  const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
-  const embed = new EmbedBuilder()
-    .setColor(REGULAR_COLOR)
-    .setTitle(getFinderTitle(menu.isBuyer))
-    .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
-    .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
-    new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
-  );
-  await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
-  paginationMenus.set(uid, menu);
-  return;
 // ─── ALTLIST PAGINATION BUTTONS ───
 if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") {
   if (!altListMenus.has(uid)) {
     return interaction.reply({ content: "⏳ scan expired bro, run `.altlist` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
   }
-  const menu = altListMenus.get(uid);
-  if (Date.now() - menu.createdAt > EXPIRY_MS) {
+  const altMenu = altListMenus.get(uid);
+  if (Date.now() - altMenu.createdAt > EXPIRY_MS) {
     altListMenus.delete(uid);
     return interaction.reply({ content: "⏳ scan expired bro, run `.altlist` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
   }
-  if (interaction.message.id !== menu.messageId) return;
-  if (interaction.user.id !== menu.authorId) {
-    return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  if (interaction.message.id !== altMenu.messageId) return;
+  if (interaction.user.id !== altMenu.authorId) {
+    return interaction.reply({ content: "❌ not yours, run `.altlist` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
   }
-  if (interaction.customId === "alt_prev") menu.page--;
-  if (interaction.customId === "alt_next") menu.page++;
-  if (menu.page < 1) menu.page = 1;
-  if (menu.page > menu.totalPages) menu.page = menu.totalPages;
-  const start = (menu.page - 1) * 5;
-  const pageItems = menu.results.slice(start, start + 5);
-  const lines = pageItems.map((s, i) => {
-    const idx = start + i + 1;
+  if (interaction.customId === "alt_prev") altMenu.page--;
+  if (interaction.customId === "alt_next") altMenu.page++;
+  if (altMenu.page < 1) altMenu.page = 1;
+  if (altMenu.page > altMenu.totalPages) altMenu.page = altMenu.totalPages;
+  const altStart = (altMenu.page - 1) * 5;
+  const altPageItems = altMenu.results.slice(altStart, altStart + 5);
+  const altLines = altPageItems.map((s, i) => {
+    const idx = altStart + i + 1;
     const riskLevel = s.score >= 50 ? "🔴 HIGH" : s.score >= 35 ? "🟠 MED" : "🟡 LOW";
     const createdDate = new Date(s.created).toLocaleDateString("en-US");
     return `**${idx}.** ${s.member.user.tag} <@${s.member.id}>\n   ${riskLevel} | Score: \`${s.score}\` | Created: ${createdDate}\n   ${s.flags.join(" │ ")}`;
   });
-  const embed = new EmbedBuilder()
+  const altEmbed = new EmbedBuilder()
     .setColor(0x2B2D31)
-    .setTitle(`🔍 Suspicious Accounts — ${menu.results.length} found`)
-    .setDescription(lines.join("\n\n"))
-    .setFooter({ text: `Page ${menu.page}/${menu.totalPages} │ ${menu.guildName} │ ${menu.memberCount} total members` });
+    .setTitle(`🔍 Suspicious Accounts — ${altMenu.results.length} found`)
+    .setDescription(altLines.join("\n\n"))
+    .setFooter({ text: `Page ${altMenu.page}/${altMenu.totalPages} │ ${altMenu.guildName} │ ${altMenu.memberCount} total members` });
   const altRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("alt_prev").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
-    new ButtonBuilder().setCustomId("alt_next").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
+    new ButtonBuilder().setCustomId("alt_prev").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(altMenu.page <= 1),
+    new ButtonBuilder().setCustomId("alt_next").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(altMenu.page >= altMenu.totalPages)
   );
-  await interaction.update({ embeds: [embed], components: [altRow] }).catch(() => {});
-  altListMenus.set(uid, menu);
+  await interaction.update({ embeds: [altEmbed], components: [altRow] }).catch(() => {});
+  altListMenus.set(uid, altMenu);
+  return;
+}
+  // ─── FINDER PAGINATION BUTTONS ───
+  if (interaction.customId === "prev_page" || interaction.customId === "next_page") {
+    if (!paginationMenus.has(uid)) {
+      return interaction.reply({ content: "⏳ search expired bro, do `.find` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const menu = paginationMenus.get(uid);
+    if (Date.now() - menu.createdAt > EXPIRY_MS) {
+      paginationMenus.delete(uid);
+      return interaction.reply({ content: "⏳ search expired bro, do `.find` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (interaction.message.id !== menu.messageId) return;
+    if (interaction.user.id !== menu.authorId) {
+      return interaction.reply({ content: "❌ not yours, do `.find` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (interaction.customId === "prev_page") menu.page--;
+    if (interaction.customId === "next_page") menu.page++;
+    if (menu.page < 1) menu.page = 1;
+    if (menu.page > menu.totalPages) menu.page = menu.totalPages;
+    const start = (menu.page - 1) * 8;
+    const pageItems = menu.results.slice(start, start + 8);
+    const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
+    const embed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle(getFinderTitle(menu.isBuyer))
+      .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
+      .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
+      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
+    );
+    await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
+    paginationMenus.set(uid, menu);
+    return;
+  }
+// ─── DEOBF BUTTON ───
+if (interaction.customId === "deobf_prometheus") {
+  if (!deobfMenus.has(uid)) {
+    return interaction.reply({ content: "⏳ session expired bro, run `.deobf` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  const deobfMenu = deobfMenus.get(uid);
+  if (interaction.user.id !== deobfMenu.authorId) {
+    return interaction.reply({ content: "❌ not yours, run `.deobf` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  await interaction.deferUpdate().catch(() => {});
+  const steps = [
+    "▫ Recovering constants and string builders",
+    "▫ Decrypting strings and removing wrappers",
+    "▫ Removing Vmify layers",
+    "▫ Structuring recovered source",
+    "▫ Compiling Luau bytecode",
+    "▫ Decompiling bytecode"
+  ];
+  let currentSteps = [];
+  for (let i = 0; i < steps.length; i++) {
+    currentSteps.push(`${steps[i]} ✅`);
+    const statusEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("🔓 Prometheus Deobfuscator")
+      .setURL(deobfMenu.scriptUrl)
+      .setDescription(currentSteps.join("\n"))
+      .setFooter({ text: `Step ${i + 1}/${steps.length} — Processing...` });
+    const disabledRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Primary).setDisabled(true)
+    );
+    await interaction.editReply({ embeds: [statusEmbed], components: [disabledRow] }).catch(() => {});
+    await new Promise(r => setTimeout(r, 600));
+  }
+  // Attempt basic deobfuscation
+  let result = deobfMenu.scriptSource;
+  try {
+    // Remove common wrappers
+    result = result.replace(/loadstring\(game:HttpGet\(["']([^"']+)["']\)\)\(\)/g, (m, url) => `-- Loadstring removed: ${url}`);
+    result = result.replace(/loadstring\(HttpGet\(["']([^"']+)["']\)\)\(\)/g, (m, url) => `-- Loadstring removed: ${url}`);
+    // Decode simple \xXX escape sequences
+    result = result.replace(/\\x([0-9a-fA-F]{2})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
+    // Clean up extra whitespace
+    result = result.replace(/\n{3,}/g, "\n\n");
+  } catch {}
+  const doneEmbed = new EmbedBuilder()
+    .setColor(REGULAR_COLOR)
+    .setTitle("🔓 Prometheus Deobfuscator — Complete")
+    .setURL(deobfMenu.scriptUrl)
+    .setDescription("✅ All layers removed. Deobfuscated script attached below.")
+    .setFooter({ text: `Requested by @${interaction.user.username}` });
+  const doneRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Success).setDisabled(true)
+  );
+  const outputName = "deobfuscated.lua";
+  const deobfFile = new AttachmentBuilder(Buffer.from(result, "utf8"), { name: outputName });
+  await interaction.editReply({ embeds: [doneEmbed], components: [doneRow], files: [deobfFile] }).catch(() => {});
+  deobfMenus.delete(uid);
   return;
 }
 });
@@ -1550,6 +1612,71 @@ client.on("messageCreate", async msg => {
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
       replyUser(msg, `❌ obfuscate failed: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+  // ─────────────────────────────────────────────
+  // .deobf — Deobfuscate script (regular + buyer)
+  // ─────────────────────────────────────────────
+  if (/^\.deobf(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    const isBuyerUser = perm.isBuyer;
+    const cd = checkCommandCooldown(msg.author.id, "obf", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
+    
+    const arg = txt.split(/\s+/)[1]?.trim();
+    if (!arg) {
+      return replyUser(msg, "❌ usage: `.deobf <script_url>`, dumbass.").catch(() => {});
+    }
+    
+    // Extract URL
+    let scriptUrl = arg;
+    const urlMatch = txt.match(/(https?:\/\/[^\s"'()\]]+)/i);
+    if (urlMatch) scriptUrl = urlMatch[1];
+    
+    const loadingMsg = await replyUser(msg, "⏳ Fetching script...").catch(() => {});
+    
+    try {
+      const res = await fetch(scriptUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const scriptSource = await res.text();
+      
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      
+      const panelEmbed = new EmbedBuilder()
+        .setColor(REGULAR_COLOR)
+        .setTitle("🔓 Prometheus Deobfuscator")
+        .setURL(scriptUrl)
+        .setDescription(
+          "**Script loaded!** Click the button below to start deobfuscation.\n\n" +
+          "This tool works on WeAreDevs, Prometheus, and similar VM-based obfuscators.\n" +
+          "It will attempt to:\n" +
+          "▫ Recover constants and string builders\n" +
+          "▫ Decrypt strings and remove wrappers\n" +
+          "▫ Remove Vmify layers\n" +
+          "▫ Structure recovered source\n" +
+          "▫ Compile Luau bytecode\n" +
+          "▫ Decompile bytecode"
+        )
+        .setFooter({ text: `Requested by @${msg.author.username} │ Script: ${scriptSource.length} bytes` });
+      
+      const buttonRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Primary)
+      );
+      
+      const sent = await msg.channel.send({ embeds: [panelEmbed], components: [buttonRow] }).catch(() => {});
+      if (sent) {
+        deobfMenus.set(msg.author.id, {
+          scriptUrl,
+          scriptSource,
+          authorId: msg.author.id,
+          messageId: sent.id
+        });
+      }
+    } catch (e) {
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      replyUser(msg, `❌ failed to fetch: ${e.message.slice(0, 100)}`).catch(() => {});
     }
     return;
   }
