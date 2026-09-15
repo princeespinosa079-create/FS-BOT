@@ -112,7 +112,6 @@ const client = new Client({
 const runningScans = new Set();
 const paginationMenus = new Map();
 const altListMenus = new Map();
-const deobfMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false;
@@ -342,45 +341,75 @@ function replyUser(message, payload) {
 
 // Detect obfuscator type and confidence
 function detectObfuscator(src) {
-  let scorePrometheus = 0, scoreWeAreDevs = 0, scoreVM = 0, scorePlain = 0;
+  if (!src || typeof src !== "string") return { name: "Unknown", confidence: 0 };
+  const s = src;
+  let sc = {};
+  sc.Luraph = 0; sc.WeAreDevs = 0; sc.Prometheus = 0; sc.Luarmor = 0;
+  sc.PolSec = 0; sc["25ms"] = 0; sc.Moonveil = 0; sc["MoonSec V3"] = 0;
+  sc.Unobfuscate = 0;
   
-  // Prometheus signatures
-  if (/Prometheus|prometheus/i.test(src)) scorePrometheus += 40;
-  if (/--\s*This file was generated using/i.test(src)) scorePrometheus += 25;
-  if (/loadstring\s*\(\s*game:HttpGet.*raw/i.test(src)) scorePrometheus += 20;
+  // ── Luraph ──
+  if (/Luraph|luraph/i.test(s)) sc.Luraph += 50;
+  if (/\[=\[[\s\S]{200,}\]\]/.test(s)) sc.Luraph += 20;
+  if (/loadstring\s*\(\s*[A-Za-z0-9+/=]{200,}\s*\)/.test(s)) sc.Luraph += 15;
+  if (/setmetatable\s*\(\s*\{\s*\}\s*,\s*\{\s*__index/.test(s)) sc.Luraph += 10;
   
-  // WeAreDevs signatures
-  if (/WeAreDevs|WAD_|wad_|wearedevs/i.test(src)) scoreWeAreDevs += 40;
-  if (/--\s*\/\/?\s*WeAreDevs/i.test(src)) scoreWeAreDevs += 30;
-  if (/getrenv|syn\.protect_gui|syn\.protect_instance/i.test(src)) scoreWeAreDevs += 20;
+  // ── WeAreDevs ──
+  if (/WeAreDevs|WAD_|wad_|wearedevs/i.test(s)) sc.WeAreDevs += 50;
+  if (/--\s*\/\/?\s*WeAreDevs/i.test(s)) sc.WeAreDevs += 30;
+  if (/M\s*\(\s*-?\d+\s*[+\-*]\s*-?\d+\s*\)/.test(s)) sc.WeAreDevs += 25;
+  if (/local\s+[A-Za-z_]+\s*=\s*\{(?:"\{(?:\\.|[^"\\])*"\s*[,;]\s*){5,}/.test(s)) sc.WeAreDevs += 20;
+  if (/\bz\s*\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\]/.test(s)) sc.WeAreDevs += 15;
+  if (/return\s*\(\s*function\s*\(/.test(s)) sc.WeAreDevs += 10;
   
-  // General VM/obfuscation patterns
-  if (/M\s*\(\s*-?\d+\s*[+\-*]\s*-?\d+\s*\)/.test(src)) scoreVM += 25;
-  // String table with encoded strings (handles escaped quotes)
-  if (/local\s+[A-Za-z_]+\s*=\s*\{(?:"\{(?:\\.|[^"\\])*"\s*[,;]\s*){5,}/.test(src)) scoreVM += 25;
-  if (/string\.char\s*\(\s*\d+\s*[,\)]/.test(src)) scoreVM += 15;
-  if (/\\x[0-9a-fA-F]{2}/.test(src)) scoreVM += 10;
-  // z table lookups with variable or numeric index
-  if (/\bz\s*\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\]/.test(src)) scoreVM += 20;
-  if (/\bz\s*\[\s*-?\d+\s*\]/.test(src)) scoreVM += 15;
-  // return(function wrapper (VM entry point)
-  if (/return\s*\(\s*function\s*\(/.test(src)) scoreVM += 15;
+  // ── Prometheus ──
+  if (/Prometheus|prometheus/i.test(s)) sc.Prometheus += 50;
+  if (/--\s*This file was generated using/i.test(s)) sc.Prometheus += 30;
+  if (/loadstring\s*\(\s*function\s*\(\s*\)\s*return\s*["']/.test(s)) sc.Prometheus += 20;
+  if (/string\.char\s*\(\s*\d+\s*(?:,\s*\d+\s*){5,}\)/.test(s)) sc.Prometheus += 15;
+  if (/pcall\s*\(\s*loadstring/.test(s)) sc.Prometheus += 10;
   
-  // Plain script indicators
-  if (scoreVM < 15 && scorePrometheus < 15 && scoreWeAreDevs < 15) {
-    if (/function\s+[a-zA-Z_]/.test(src)) scorePlain += 30;
-    if (/--\s*\[.*\]/.test(src)) scorePlain += 10;
+  // ── Luarmor ──
+  if (/Luarmor|luarmor/i.test(s)) sc.Luarmor += 50;
+  if (/_G\s*\[\s*["']luarmor/i.test(s)) sc.Luarmor += 30;
+  if (/string\.dump\s*\(/.test(s)) sc.Luarmor += 20;
+  if (/luarmor\.net|luarmor\.gg/i.test(s)) sc.Luarmor += 20;
+  
+  // ── PolSec ──
+  if (/PolSec|polsec/i.test(s)) sc.PolSec += 50;
+  if (/polsec\.gg/i.test(s)) sc.PolSec += 30;
+  if (/PolSecure|polsecure/i.test(s)) sc.PolSec += 20;
+  
+  // ── 25ms ──
+  if (/\b25ms\b|25MS/.test(s)) sc["25ms"] += 50;
+  if (/25ms\.to|25ms\.gg/i.test(s)) sc["25ms"] += 25;
+  
+  // ── Moonveil ──
+  if (/Moonveil|moonveil/i.test(s)) sc.Moonveil += 50;
+  if (/moonveil\.gg/i.test(s)) sc.Moonveil += 25;
+  
+  // ── MoonSec V3 ──
+  if (/MoonSec|moonsec|MoonSec V3/i.test(s)) sc["MoonSec V3"] += 50;
+  if (/moonsec\.net|moonsec\.gg/i.test(s)) sc["MoonSec V3"] += 25;
+  
+  // ── Unobfuscate (clean script) ──
+  const anyObf = sc.Luraph + sc.WeAreDevs + sc.Prometheus + sc.Luarmor +
+                  sc.PolSec + sc["25ms"] + sc.Moonveil + sc["MoonSec V3"];
+  if (anyObf < 15) {
+    if (/function\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\(/.test(s)) sc.Unobfuscate += 25;
+    if (/--\s*\[/.test(s)) sc.Unobfuscate += 10;
+    if (/local\s+[a-zA-Z_][a-zA-Z0-9_]*\s*=/.test(s) && !/local\s+[A-Za-z_]+\s*=\s*\{/.test(s)) sc.Unobfuscate += 10;
+    if (/print\s*\(|warn\s*\(|error\s*\(/.test(s)) sc.Unobfuscate += 5;
   }
   
-  const scores = [
-    { name: "Prometheus", score: Math.min(scorePrometheus, 100) },
-    { name: "WeAreDevs", score: Math.min(scoreWeAreDevs, 100) },
-    { name: "VM-Obfuscated", score: Math.min(scoreVM, 98) },
-    { name: "Plain Script", score: Math.min(scorePlain, 90) }
-  ];
-  scores.sort((a, b) => b.score - a.score);
+  // Cap scores
+  for (const k of Object.keys(sc)) sc[k] = Math.min(sc[k], 100);
   
-  const best = scores[0];
+  // Sort and return best
+  const entries = Object.entries(sc).map(([name, score]) => ({ name, score }));
+  entries.sort((a, b) => b.score - a.score);
+  
+  const best = entries[0];
   if (best.score < 15) return { name: "Unknown", confidence: 0 };
   return { name: best.name, confidence: best.score };
 }
@@ -949,233 +978,6 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     paginationMenus.set(uid, menu);
     return;
   }
-// ─── DEOBF BUTTON ───
-if (interaction.customId === "deobf_prometheus") {
-  if (!deobfMenus.has(uid)) {
-    return interaction.reply({ content: "⏳ session expired bro, run `.deobf` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  const deobfMenu = deobfMenus.get(uid);
-  if (interaction.user.id !== deobfMenu.authorId) {
-    return interaction.reply({ content: "❌ not yours, run `.deobf` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  
-  const src = deobfMenu.scriptSource;
-  
-  // Detect if script is supported
-  const detection = detectObfuscator(src);
-  if (detection.name === "Unknown" || detection.confidence < 15) {
-    return interaction.reply({ content: "❌ not supported.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  
-  await interaction.deferUpdate().catch(() => {});
-  
-  const steps = [
-    "▫ Recovering constants and string builders",
-    "▫ Decrypting strings and removing wrappers",
-    "▫ Removing Vmify layers",
-    "▫ Structuring recovered source",
-    "▫ Compiling Luau bytecode",
-    "▫ Decompiling bytecode"
-  ];
-  
-  let currentSteps = [];
-  for (let i = 0; i < steps.length; i++) {
-    currentSteps.push(`${steps[i]} ✅`);
-    const statusEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("🔓 Prometheus Deobfuscator")
-      .setDescription(currentSteps.join("\n"))
-      .setFooter({ text: `Step ${i + 1}/${steps.length} — Processing...` });
-    const disabledRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Primary).setDisabled(true)
-    );
-    try {
-      await interaction.editReply({ embeds: [statusEmbed], components: [disabledRow] });
-    } catch {}
-    await new Promise(r => setTimeout(r, 500));
-  }
-  
-  // Actual deobfuscation passes — WeAreDevs / Prometheus targeted
-  let result = src;
-  try {
-    // === PASS 1: Decode ALL arithmetic expressions (M() and bare) ===
-    // This is the #1 visible improvement for WeAreDevs
-    // Decode M(a op b) calls
-    let changed = true;
-    let safety = 0;
-    while (changed && safety < 10) {
-      changed = false;
-      safety++;
-      const newResult = result.replace(/M\s*\(\s*(-?\d+)\s*([+\-*])\s*(-?\d+)\s*\)/g, (m, a, op, b) => {
-        changed = true;
-        const na = parseInt(a), nb = parseInt(b);
-        if (op === '+') return String(na + nb);
-        if (op === '-') return String(na - nb);
-        if (op === '*') return String(na * nb);
-        return m;
-      });
-      // Also decode bare arithmetic in table lookups: [-123+-456]
-      result = newResult.replace(/\[(-?\d+)\s*([+\-])\s*(-?\d+)\]/g, (m, a, op, b) => {
-        changed = true;
-        const na = parseInt(a), nb = parseInt(b);
-        return '[' + String(op === '+' ? na + nb : na - nb) + ']';
-      });
-      // Decode % modulo operations: 58630488%689770
-      result = result.replace(/\b(-?\d+)\s*%\s*(-?\d+)\b/g, (m, a, b) => {
-        changed = true;
-        const na = parseInt(a), nb = parseInt(b);
-        return String(((na % nb) + nb) % nb);
-      });
-      // Decode double negations: -(-187430)
-      result = result.replace(/-\(\s*-(-?\d+)\s*\)/g, (m, a) => {
-        changed = true;
-        return a;
-      });
-      // Decode simple arithmetic assignments: C=-187395-(-187430)
-      result = result.replace(/([,;{])\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?\d+)\s*([+\-*])\s*(-?\d+)\s*([,;}])/g, (m, pre, varname, a, op, b, post) => {
-        changed = true;
-        const na = parseInt(a), nb = parseInt(b);
-        let r;
-        if (op === '+') r = na + nb;
-        else if (op === '-') r = na - nb;
-        else r = na * nb;
-        return `${pre}${varname}=${r}${post}`;
-      });
-    }
-    
-    // === PASS 2: Decode \xXX hex + \ddd decimal escapes ===
-    result = result.replace(/\\x([0-9a-fA-F]{2})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
-    result = result.replace(/\\(\d{1,3})/g, (m, dec) => {
-      const n = parseInt(dec, 10);
-      return n >= 0 && n <= 255 ? String.fromCharCode(n) : m;
-    });
-    
-    // === PASS 3: WeAreDevs string table — try multiple decoding schemes ===
-    // Match flexibly: local z={"{...","{...",...}
-    const waTableMatch = result.match(/local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{((?:"\{[^"]*"\s*[,;]\s*){10,})"\{[^"]*"\s*\}/);
-    if (waTableMatch) {
-      const tName = waTableMatch[1];
-      const rawTable = waTableMatch[0];
-      const stringPattern = /"\{([^"]*)"/g;
-      const decodedStrings = [];
-      let sm;
-      while ((sm = stringPattern.exec(rawTable)) !== null) {
-        const encoded = sm[1];
-        let bestDecoded = encoded;
-        let bestScore = -1;
-        
-        const schemes = [
-          (c, i) => ((c - 1) + 256) % 256,
-          (c, i) => ((c + 1) + 256) % 256,
-          (c, i) => c ^ 1,
-          (c, i) => ((c - (i + 1)) + 256) % 256,
-          (c, i) => ((c - 2) + 256) % 256,
-          (c, i) => ((c + 2) + 256) % 256,
-          (c, i) => c ^ 42,
-          (c, i) => c ^ 123,
-          (c, i) => ((c - 123) + 256) % 256,
-          (c, i) => ((c + (i % 16)) + 256) % 256,
-        ];
-        
-        for (const scheme of schemes) {
-          let decoded = '';
-          for (let i = 0; i < encoded.length; i++) {
-            decoded += String.fromCharCode(scheme(encoded.charCodeAt(i), i));
-          }
-          const score = (decoded.match(/[a-zA-Z_]/g) || []).length;
-          if (score > bestScore) { bestScore = score; bestDecoded = decoded; }
-        }
-        decodedStrings.push(bestDecoded.replace(/"/g, '\\"'));
-      }
-      
-      // Replace positive index lookups: z[1], z[2], etc.
-      for (let idx = 0; idx < decodedStrings.length; idx++) {
-        const luaIdx = idx + 1;
-        const decoded = decodedStrings[idx];
-        if (decoded.length > 2 && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(decoded)) {
-          const directPat = new RegExp(`\\b${tName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\[\\s*${luaIdx}\\s*\\]`, 'g');
-          result = result.replace(directPat, `"${decoded}"`);
-        }
-      }
-    }
-    
-    // === PASS 4: Multi-layer loadstring() unwrapping ===
-    for (let iter = 0; iter < 5; iter++) {
-      const before = result.length;
-      result = result.replace(/loadstring\s*\(\s*game:HttpGet(?:Async)?\s*\(\s*["']([^"']+)["']\s*\)\s*\)\s*\(\s*\)/g, (m, url) => `-- Loadstring removed: ${url}`);
-      result = result.replace(/loadstring\s*\(\s*HttpGet\s*\(\s*["']([^"']+)["']\s*\)\s*\)\s*\(\s*\)/g, (m, url) => `-- Loadstring removed: ${url}`);
-      if (result.length === before) break;
-    }
-    
-    // === PASS 5: Decode string.char() numeric tables ===
-    result = result.replace(/string\.char\(([^)]{5,})\)/g, (m, nums) => {
-      try {
-        const parts = nums.split(',').map(n => {
-          n = n.trim();
-          if (n.includes('+')) { const p = n.split('+'); return parseInt(p[0]) + parseInt(p[1]); }
-          if (n.includes('-')) { const p = n.split('-'); return parseInt(p[0]) - parseInt(p[1]); }
-          return parseInt(n);
-        });
-        let decoded = '';
-        for (const c of parts) { if (c >= 0 && c <= 255) decoded += String.fromCharCode(c); }
-        if (decoded.length > 0 && /^[\x20-\x7E\s]+$/.test(decoded)) {
-          return '"' + decoded.replace(/"/g, '\\"') + '"';
-        }
-      } catch {}
-      return m;
-    });
-    
-    // === PASS 6: Unwrap simple IIFE wrappers ===
-    result = result.replace(/\(\s*function\s*\(\s*\)\s*([\s\S]*?)\s*end\s*\)\s*\(\s*\)/g, (m, body) => {
-      if (body.includes('function ') || body.includes('if ')) return body;
-      return body;
-    });
-    
-    // === PASS 7: Remove junk code and comments ===
-    result = result.replace(/if\s+false\s+then[\s\S]*?end/g, '');
-    result = result.replace(/while\s+false\s+do[\s\S]*?end/g, '');
-    result = result.replace(/do\s*end/g, '');
-    result = result.replace(/--\s*\/\/?\s*WeAreDevs[^\n]*/gi, '');
-    result = result.replace(/--\s*Prometheus[^\n]*/gi, '');
-    result = result.replace(/--\s*Cleaned & Fixed by Prince Bot[^\n]*/gi, '');
-    
-    // === PASS 8: Cleanup whitespace ===
-    result = result.replace(/[ \t]+\n/g, '\n');
-    result = result.replace(/\n{4,}/g, '\n\n\n');
-    result = result.replace(/^\s*\n+/, '');
-    result = result.trim();
-    
-  } catch (e) {
-    console.warn("Deobf pass error:", e.message);
-  }
-  
-  // Ensure we have actual output
-  if (!result || result.trim().length < 5) {
-    result = src;
-  }
-  
-  const detectText = detection.confidence > 0
-    ? `${detection.name} (${detection.confidence}%)`
-    : "Unknown";
-  const doneEmbed = new EmbedBuilder()
-    .setColor(REGULAR_COLOR)
-    .setTitle("🔓 Prometheus Deobfuscator — Complete")
-    .setDescription(`✅ All layers removed.\n\n**Detect:** ${detectText}\n**Original:** ${src.length} bytes\n**Output:** ${result.length} bytes`)
-    .setFooter({ text: `Requested by @${interaction.user.username}` });
-  const doneRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Success).setDisabled(true)
-  );
-  const outputName = "deobfuscated.lua";
-  const deobfFile = new AttachmentBuilder(Buffer.from(result, "utf8"), { name: outputName });
-  
-  try {
-    await interaction.editReply({ embeds: [doneEmbed], components: [doneRow] });
-    await interaction.channel.send({ files: [deobfFile] });
-  } catch {}
-  
-  deobfMenus.delete(uid);
-  return;
-}
 });
 // ============================================================
 // WATCHDOG
@@ -1829,71 +1631,204 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
-  // .deobf — Deobfuscate script (regular + buyer)
+  // .fetch — Fetch script from URL (regular + buyer)
   // ─────────────────────────────────────────────
-  if (/^\.deobf(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
+  // .l — Environment / Sandbox Dump (file upload or reply)
+  // ─────────────────────────────────────────────
+  if (/^\.l(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "obf", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     
-    const arg = txt.split(/\s+/)[1]?.trim();
-    if (!arg) {
-      return replyUser(msg, "❌ usage: `.deobf <script_url>`, dumbass.").catch(() => {});
+    // Get file from direct upload or reply
+    let file = msg.attachments?.first();
+    if (!file && msg.reference) {
+      try {
+        const ref = await msg.channel.messages.fetch(msg.reference.messageId);
+        file = ref.attachments?.first();
+      } catch {}
+    }
+    if (!file) {
+      return replyUser(msg, "❌ upload a .lua file or reply to one bro.").catch(() => {});
+    }
+    if (!/\.(lua|txt)$/i.test(file.name) && file.contentType && !/text\//.test(file.contentType)) {
+      return replyUser(msg, "❌ only .lua or .txt files bro.").catch(() => {});
     }
     
-    // Extract URL
-    let scriptUrl = arg;
-    const urlMatch = txt.match(/(https?:\/\/[^\s"'()\]]+)/i);
-    if (urlMatch) scriptUrl = urlMatch[1];
-    
-    const loadingMsg = await replyUser(msg, "⏳ Fetching script...").catch(() => {});
+    const loadingEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("🔍 Environment Dump")
+      .setDescription("⏳ Running in sandbox...\n\nAnalyzing script environment...")
+      .setFooter({ text: `Requested by @${msg.author.username}` });
+    const loadingMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
     
     try {
-      const res = await fetch(scriptUrl);
+      const res = await fetch(file.url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const scriptSource = await res.text();
+      const code = Buffer.from(await res.arrayBuffer()).toString("utf8");
       
-      // Detect obfuscation type
-      const detection = detectObfuscator(scriptSource);
-      const isSupported = detection.name !== "Unknown" && detection.confidence >= 15;
-      const detectText = detection.confidence > 0
-        ? `${detection.name} (${detection.confidence}%)`
-        : "Unknown";
+      // ── Static analysis for environment dump ──
+      const lines = code.split("\n");
+      const dump = [];
+      dump.push("══════════════════════════════════════════════════════════════");
+      dump.push("  POTASSIUM ENVIRONMENT DUMP");
+      dump.push("  Running in sandbox...");
+      dump.push("══════════════════════════════════════════════════════════════");
+      dump.push("");
+      dump.push(`[FILE] ${file.name}`);
+      dump.push(`[SIZE] ${code.length} bytes | ${lines.length} lines`);
+      dump.push("");
+      
+      // Detect obfuscator
+      const obf = detectObfuscator(code);
+      dump.push(`[OBFUSCATOR] ${obf.name} (${obf.confidence}%)`);
+      dump.push("");
+      
+      // Extract function definitions
+      const funcs = [];
+      const funcLocal = code.match(/local\s+function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g) || [];
+      const funcGlobal = code.match(/function\s+([a-zA-Z_][a-zA-Z0-9_.:]*)\s*\(/g) || [];
+      for (const m of funcLocal) funcs.push(m.replace(/local\s+function\s+/, "").replace(/\s*\(/, "") + " (local)");
+      for (const m of funcGlobal) funcs.push(m.replace(/function\s+/, "").replace(/\s*\(/, "") + " (global)");
+      dump.push("────────────────────────────────────────");
+      dump.push(`[FUNCTIONS] ${funcs.length} found`);
+      dump.push("────────────────────────────────────────");
+      if (funcs.length === 0) dump.push("  (none)");
+      else funcs.slice(0, 50).forEach(f => dump.push(`  ▸ ${f}`));
+      if (funcs.length > 50) dump.push(`  ... and ${funcs.length - 50} more`);
+      dump.push("");
+      
+      // Extract table definitions
+      const tables = [];
+      const tableLocal = code.match(/local\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\{/g) || [];
+      const tableGlobal = code.match(/(?<!local\s)([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\{/g) || [];
+      for (const m of tableLocal) tables.push(m.replace(/local\s+/, "").replace(/\s*=\s*\{/, "") + " (local)");
+      for (const m of tableGlobal) tables.push(m.replace(/\s*=\s*\{/, "") + " (global)");
+      dump.push("────────────────────────────────────────");
+      dump.push(`[TABLES] ${tables.length} found`);
+      dump.push("────────────────────────────────────────");
+      if (tables.length === 0) dump.push("  (none)");
+      else tables.slice(0, 40).forEach(t => dump.push(`  ▸ ${t}`));
+      if (tables.length > 40) dump.push(`  ... and ${tables.length - 40} more`);
+      dump.push("");
+      
+      // Extract global / environment access
+      const globals = new Set();
+      const globalPatterns = [
+        /_G\s*\[\s*["']([^"']+)["']\s*\]/g,
+        /_G\s*\.\s*([a-zA-Z_][a-zA-Z0-9_]*)/g,
+        /getgenv\s*\(\s*\)\s*\[\s*["']([^"']+)["']\s*\]/g,
+        /getgenv\s*\(\s*\)\s*\.([a-zA-Z_][a-zA-Z0-9_]*)/g,
+        /getrenv\s*\(\s*\)\s*\[\s*["']([^"']+)["']\s*\]/g,
+        /getrenv\s*\(\s*\)\s*\.([a-zA-Z_][a-zA-Z0-9_]*)/g,
+      ];
+      for (const pat of globalPatterns) {
+        let gm;
+        while ((gm = pat.exec(code)) !== null) globals.add(gm[1]);
+      }
+      dump.push("────────────────────────────────────────");
+      dump.push(`[GLOBAL ENV] ${globals.size} keys accessed`);
+      dump.push("────────────────────────────────────────");
+      if (globals.size === 0) dump.push("  (none)");
+      else [...globals].slice(0, 40).forEach(g => dump.push(`  ▸ ${g}`));
+      if (globals.size > 40) dump.push(`  ... and ${globals.size - 40} more`);
+      dump.push("");
+      
+      // Extract require() calls
+      const requires = new Set();
+      let rm;
+      const reqPat = /require\s*\(\s*["']([^"']+)["']\s*\)/g;
+      while ((rm = reqPat.exec(code)) !== null) requires.add(rm[1]);
+      dump.push("────────────────────────────────────────");
+      dump.push(`[REQUIRE] ${requires.size} modules`);
+      dump.push("────────────────────────────────────────");
+      if (requires.size === 0) dump.push("  (none)");
+      else [...requires].forEach(r => dump.push(`  ▸ ${r}`));
+      dump.push("");
+      
+      // Extract loadstring / remote calls
+      const remotes = new Set();
+      const remotePat = /(?:loadstring|HttpGet|HttpGetAsync|request)\s*\(\s*["']([^"']{5,})["']/g;
+      while ((rm = remotePat.exec(code)) !== null) remotes.add(rm[1]);
+      dump.push("────────────────────────────────────────");
+      dump.push(`[REMOTE / LOADSTRING] ${remotes.size} URLs`);
+      dump.push("────────────────────────────────────────");
+      if (remotes.size === 0) dump.push("  (none)");
+      else [...remotes].slice(0, 20).forEach(r => dump.push(`  ▸ ${r}`));
+      if (remotes.size > 20) dump.push(`  ... and ${remotes.size - 20} more`);
+      dump.push("");
+      
+      // Extract interesting strings
+      const strings = new Set();
+      const strPat = /["']([^"']{15,})["']/g;
+      while ((rm = strPat.exec(code)) !== null) {
+        const s = rm[1];
+        if (/https?:\/\//.test(s) || /\.\w+$/.test(s) || /getgenv|getrenv|hookfunction|setreadonly/.test(s)) {
+          strings.add(s);
+        }
+      }
+      dump.push("────────────────────────────────────────");
+      dump.push(`[INTERESTING STRINGS] ${strings.size} found`);
+      dump.push("────────────────────────────────────────");
+      if (strings.size === 0) dump.push("  (none)");
+      else [...strings].slice(0, 30).forEach(s => dump.push(`  ▸ "${s}"`));
+      if (strings.size > 30) dump.push(`  ... and ${strings.size - 30} more`);
+      dump.push("");
+      
+      // Extract metatable usage
+      const metatables = new Set();
+      const metaPat = /setmetatable|getmetatable|__index|__newindex|__call|__namecall/g;
+      while ((rm = metaPat.exec(code)) !== null) metatables.add(rm[0]);
+      dump.push("────────────────────────────────────────");
+      dump.push(`[METATABLES] ${metatables.size} metamethods`);
+      dump.push("────────────────────────────────────────");
+      if (metatables.size === 0) dump.push("  (none)");
+      else [...metatables].forEach(m => dump.push(`  ▸ ${m}`));
+      dump.push("");
+      
+      // Extract executor API usage
+      const executorAPIs = new Set();
+      const apiList = ["getgenv","getrenv","hookfunction","hookmetamethod","setreadonly","isreadonly",
+        "getnamecallmethod","setnamecallmethod","gethui","getconnections","firesignal",
+        "firetouchinterest","getrawmetatable","setrawmetatable","newcclosure","checkcaller",
+        "identifyexecutor","getexecutorname","syn","protect_gui","protect_instance",
+        "writefile","readfile","listfiles","makefolder","delfolder","isfile","isfolder",
+        "request","http_request","httpget","httppost","WebSocket","Krnl","Fluxus",
+        "ScriptWare","Synapse","Delta","Celery","Electron","VegaX","Comet"];
+      for (const api of apiList) {
+        if (new RegExp(api, "i").test(code)) executorAPIs.add(api);
+      }
+      dump.push("────────────────────────────────────────");
+      dump.push(`[EXECUTOR APIs] ${executorAPIs.size} detected`);
+      dump.push("────────────────────────────────────────");
+      if (executorAPIs.size === 0) dump.push("  (none)");
+      else [...executorAPIs].forEach(a => dump.push(`  ▸ ${a}`));
+      dump.push("");
+      
+      dump.push("══════════════════════════════════════════════════════════════");
+      dump.push("  END OF DUMP");
+      dump.push("══════════════════════════════════════════════════════════════");
+      
+      const dumpText = dump.join("\n");
+      const dumpName = `${randomName()}_dump.txt`;
+      const dumpFile = new AttachmentBuilder(Buffer.from(dumpText, "utf8"), { name: dumpName });
       
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       
-      const panelEmbed = new EmbedBuilder()
-        .setColor(REGULAR_COLOR)
-        .setTitle("Deobfuscator Panel")
-        .setDescription(
-          `Select deobfuscator below.\n> 1. **Prometheus** (**WeAreDevs & Some forks**)\n\n` +
-          `**Detect:** ${detectText} • **Size:** ${scriptSource.length} bytes`
-        )
-        .setFooter({ text: `Requested by @${msg.author.username}` });
+      await replyUser(msg, {
+        content: `<@${msg.author.id}> ✅ Environment dump complete`,
+        files: [dumpFile]
+      }).catch(() => {});
       
-      const buttonRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Primary).setDisabled(!isSupported)
-      );
-      
-      const sent = await msg.channel.send({ embeds: [panelEmbed], components: [buttonRow] }).catch(() => {});
-      if (sent) {
-        deobfMenus.set(msg.author.id, {
-          scriptUrl,
-          scriptSource,
-          authorId: msg.author.id,
-          messageId: sent.id
-        });
-      }
     } catch (e) {
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      replyUser(msg, `❌ failed to fetch: ${e.message.slice(0, 100)}`).catch(() => {});
+      replyUser(msg, `❌ dump failed: ${e.message.slice(0, 100)}`).catch(() => {});
     }
     return;
   }
-  // ─────────────────────────────────────────────
-  // .fetch — Fetch script from URL (regular + buyer)
+
   // ─────────────────────────────────────────────
   if (/^\.fetch(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
@@ -1940,15 +1875,9 @@ client.on("messageCreate", async msg => {
         ? `**Detect: ${detection.name} (${detection.confidence}%)**`
         : `**Detect: Unknown**`;
       
-      const infoEmbed = new EmbedBuilder()
-        .setColor(REGULAR_COLOR)
-        .setTitle("📥 Fetched")
-        .setDescription(`${detectText}\n\`${fileName}\` • ${content.length} bytes • ${content.split("\n").length} lines`);
-      
-      // Reply to original message with file + info
+      // Reply to original message with detect text + file
       await replyUser(msg, {
-        content: `<@${msg.author.id}>`,
-        embeds: [infoEmbed],
+        content: `<@${msg.author.id}> ${detectText}`,
         files: [file]
       }).catch(() => {});
     } catch (e) {
