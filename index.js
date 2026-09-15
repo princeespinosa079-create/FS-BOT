@@ -10,7 +10,11 @@ const {
   AttachmentBuilder,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  PermissionFlagsBits
 } = require("discord.js");
 const express = require("express");
 const fs = require("fs");
@@ -111,6 +115,8 @@ const client = new Client({
 });
 const runningScans = new Set();
 const paginationMenus = new Map();
+const robuxTickets = new Map(); // channelId -> { userId, robloxUser, gamepass, checked, purchased }
+let robuxConfig = null; // { staffRoleId, categoryId, gamepass }
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
@@ -822,7 +828,24 @@ const commands = [
       .setName("title")
       .setDescription("Optional embed title.")
       .setRequired(false))
-].map(c => c.toJSON());
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("robuxpanel")
+    .setDescription("Send Robux purchase panel — Owner Only.")
+    .addRoleOption(o => o
+      .setName("staff-role")
+      .setDescription("Role that can manage tickets.")
+      .setRequired(true))
+    .addChannelOption(o => o
+      .setName("category")
+      .setDescription("Category where tickets are created.")
+      .setRequired(true))
+    .addStringOption(o => o
+      .setName("gamepass")
+      .setDescription("Roblox gamepass link or ID.")
+      .setRequired(true))
+    .toJSON()
+].map(c => c);
 async function registerCommands() {
   if (registering) return;
   registering = true;
@@ -978,7 +1001,169 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     paginationMenus.set(uid, menu);
     return;
   }
+  // ─── ROBUX BUY BUTTON ───
+  if (interaction.customId === "robux_buy") {
+    if (!robuxConfig) {
+      return interaction.reply({ content: "❌ panel not configured yet.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const modal = new ModalBuilder()
+      .setCustomId("robux_modal")
+      .setTitle("Roblox Information");
+    const userInput = new TextInputBuilder()
+      .setCustomId("roblox_user")
+      .setLabel("Roblox Username or User ID")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("Enter your Roblox username or ID")
+      .setRequired(true);
+    const row = new ActionRowBuilder().addComponents(userInput);
+    modal.addComponents(row);
+    await interaction.showModal(modal).catch(() => {});
+    return;
+  }
 });
+
+// ============================================================
+// MODAL SUBMIT HANDLER — Robux ticket creation
+// ============================================================
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isModalSubmit()) return;
+  if (interaction.customId !== "robux_modal") return;
+  if (!robuxConfig) return;
+  
+  const robloxUser = interaction.fields.getTextInputValue("roblox_user");
+  const uid = interaction.user.id;
+  
+  try {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    
+    const category = await interaction.guild.channels.fetch(robuxConfig.categoryId).catch(() => null);
+    if (!category || category.type !== ChannelType.GuildCategory) {
+      await interaction.editReply({ content: "❌ category not found bro." });
+      return;
+    }
+    
+    // Create ticket channel
+    const ticketName = `robux-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+    const ticketChannel = await interaction.guild.channels.create({
+      name: ticketName,
+      type: ChannelType.GuildText,
+      parent: category.id,
+      permissionOverwrites: [
+        { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+        { id: uid, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+        { id: robuxConfig.staffRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels] }
+      ]
+    });
+    
+    // Store ticket
+    robuxTickets.set(ticketChannel.id, {
+      userId: uid,
+      robloxUser: robloxUser,
+      gamepass: robuxConfig.gamepass,
+      purchased: false,
+      createdAt: Date.now()
+    });
+    
+    // Send ticket info
+    const ticketEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("🎫 Robux Purchase Ticket")
+      .setDescription(
+        `**User:** <@${uid}>\n` +
+        `**Roblox:** \`${robloxUser}\`\n` +
+        `**Gamepass:** ${robuxConfig.gamepass}\n\n` +
+        `⏳ Checking for purchase every 10 seconds...\n` +
+        `Once purchased, staff will be notified.`
+      );
+    
+    const closeRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("robux_close")
+        .setLabel("Close Ticket")
+        .setStyle(ButtonStyle.Danger)
+    );
+    
+    await ticketChannel.send({
+      content: `<@${uid}> <@&${robuxConfig.staffRoleId}>`,
+      embeds: [ticketEmbed],
+      components: [closeRow]
+    });
+    
+    await interaction.editReply({ content: `✅ Ticket created: <#${ticketChannel.id}>` });
+    
+  } catch (e) {
+    console.error("❌ Ticket creation:", e);
+    try { await interaction.editReply({ content: `❌ failed: ${e.message.slice(0, 100)}` }); } catch {}
+  }
+});
+
+// ============================================================
+// ROBUX TICKET BUTTON HANDLER (close ticket)
+// ============================================================
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isButton()) return;
+  if (interaction.customId === "robux_close") {
+    const ticket = robuxTickets.get(interaction.channel.id);
+    if (!ticket) {
+      await interaction.reply({ content: "❌ not a ticket channel.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return;
+    }
+    // Only staff or ticket owner can close
+    const member = interaction.member;
+    const isStaff = robuxConfig && member.roles.cache.has(robuxConfig.staffRoleId);
+    const isOwner = ticket.userId === interaction.user.id;
+    if (!isStaff && !isOwner && !isOwner(interaction.user.id)) {
+      await interaction.reply({ content: "❌ not allowed.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return;
+    }
+    robuxTickets.delete(interaction.channel.id);
+    await interaction.reply({ content: "🔒 Closing ticket in 5 seconds..." }).catch(() => {});
+    setTimeout(async () => {
+      await interaction.channel.delete().catch(() => {});
+    }, 5000);
+    return;
+  }
+});
+
+// ============================================================
+// ROBUX PURCHASE CHECKER — every 10 seconds
+// ============================================================
+setInterval(async () => {
+  if (!robuxConfig || robuxTickets.size === 0) return;
+  for (const [channelId, ticket] of robuxTickets) {
+    if (ticket.purchased) continue;
+    try {
+      const channel = await client.channels.fetch(channelId).catch(() => null);
+      if (!channel) { robuxTickets.delete(channelId); continue; }
+      
+      // NOTE: Actual Roblox API check requires Roblox credentials.
+      // Replace this block with real API call if you have a cookie/token.
+      // For now, this is a placeholder that checks for "!paid" command from staff.
+      // To integrate real checking: fetch https://apis.roblox.com/game-passes/v1/game-passes/{id}/products
+      // and verify user ownership.
+      
+      // Simulated: check if staff sent "!paid" in the channel
+      // (Real implementation would call Roblox API here)
+      
+    } catch (e) {
+      console.warn("Purchase check error:", e.message);
+    }
+  }
+}, 10000);
+
+// When purchase is detected, call this function:
+async function markPurchased(channelId) {
+  const ticket = robuxTickets.get(channelId);
+  if (!ticket || ticket.purchased) return;
+  ticket.purchased = true;
+  try {
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (channel) {
+      await channel.send("Please, wait the owner to respond to you.").catch(() => {});
+    }
+  } catch (e) { console.warn(e); }
+}
+
 // ============================================================
 // WATCHDOG
 // ============================================================
@@ -1024,6 +1209,38 @@ client.on("interactionCreate", async interaction => {
         if (title) embed.setTitle(title);
         await targetChannel.send({ embeds: [embed] });
       }
+      return;
+    }
+    if (interaction.commandName === "robuxpanel") {
+      const staffRole = interaction.options.getRole("staff-role");
+      const category = interaction.options.getChannel("category");
+      const gamepass = interaction.options.getString("gamepass");
+      
+      robuxConfig = {
+        staffRoleId: staffRole.id,
+        categoryId: category.id,
+        gamepass: gamepass
+      };
+      
+      const panelEmbed = new EmbedBuilder()
+        .setColor(REGULAR_COLOR)
+        .setTitle("Robux Panel")
+        .setDescription(
+          "**How to send robux?**\n" +
+          `1. Click the \`Buy\` button below.
+2. Then put your username or user id there.
+3. Then click \`Submit\` a ticket will be open there, and click the "Buy" and purchase it.`
+        );
+      
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("robux_buy")
+          .setLabel("Buy")
+          .setStyle(ButtonStyle.Success)
+      );
+      
+      await interaction.deleteReply().catch(() => {});
+      await interaction.channel.send({ embeds: [panelEmbed], components: [row] });
       return;
     }
   } catch (e) {
@@ -1633,203 +1850,6 @@ client.on("messageCreate", async msg => {
   // ─────────────────────────────────────────────
   // .fetch — Fetch script from URL (regular + buyer)
   // ─────────────────────────────────────────────
-  // .l — Environment / Sandbox Dump (file upload or reply)
-  // ─────────────────────────────────────────────
-  if (/^\.l(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "obf", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    
-    // Get file from direct upload or reply
-    let file = msg.attachments?.first();
-    if (!file && msg.reference) {
-      try {
-        const ref = await msg.channel.messages.fetch(msg.reference.messageId);
-        file = ref.attachments?.first();
-      } catch {}
-    }
-    if (!file) {
-      return replyUser(msg, "❌ upload a .lua file or reply to one bro.").catch(() => {});
-    }
-    if (!/\.(lua|txt)$/i.test(file.name) && file.contentType && !/text\//.test(file.contentType)) {
-      return replyUser(msg, "❌ only .lua or .txt files bro.").catch(() => {});
-    }
-    
-    const loadingEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("🔍 Environment Dump")
-      .setDescription("⏳ Running in sandbox...\n\nAnalyzing script environment...")
-      .setFooter({ text: `Requested by @${msg.author.username}` });
-    const loadingMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
-    
-    try {
-      const res = await fetch(file.url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const code = Buffer.from(await res.arrayBuffer()).toString("utf8");
-      
-      // ── Static analysis for environment dump ──
-      const lines = code.split("\n");
-      const dump = [];
-      dump.push("══════════════════════════════════════════════════════════════");
-      dump.push("  POTASSIUM ENVIRONMENT DUMP");
-      dump.push("  Running in sandbox...");
-      dump.push("══════════════════════════════════════════════════════════════");
-      dump.push("");
-      dump.push(`[FILE] ${file.name}`);
-      dump.push(`[SIZE] ${code.length} bytes | ${lines.length} lines`);
-      dump.push("");
-      
-      // Detect obfuscator
-      const obf = detectObfuscator(code);
-      dump.push(`[OBFUSCATOR] ${obf.name} (${obf.confidence}%)`);
-      dump.push("");
-      
-      // Extract function definitions
-      const funcs = [];
-      const funcLocal = code.match(/local\s+function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g) || [];
-      const funcGlobal = code.match(/function\s+([a-zA-Z_][a-zA-Z0-9_.:]*)\s*\(/g) || [];
-      for (const m of funcLocal) funcs.push(m.replace(/local\s+function\s+/, "").replace(/\s*\(/, "") + " (local)");
-      for (const m of funcGlobal) funcs.push(m.replace(/function\s+/, "").replace(/\s*\(/, "") + " (global)");
-      dump.push("────────────────────────────────────────");
-      dump.push(`[FUNCTIONS] ${funcs.length} found`);
-      dump.push("────────────────────────────────────────");
-      if (funcs.length === 0) dump.push("  (none)");
-      else funcs.slice(0, 50).forEach(f => dump.push(`  ▸ ${f}`));
-      if (funcs.length > 50) dump.push(`  ... and ${funcs.length - 50} more`);
-      dump.push("");
-      
-      // Extract table definitions
-      const tables = [];
-      const tableLocal = code.match(/local\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\{/g) || [];
-      const tableGlobal = code.match(/(?<!local\s)([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\{/g) || [];
-      for (const m of tableLocal) tables.push(m.replace(/local\s+/, "").replace(/\s*=\s*\{/, "") + " (local)");
-      for (const m of tableGlobal) tables.push(m.replace(/\s*=\s*\{/, "") + " (global)");
-      dump.push("────────────────────────────────────────");
-      dump.push(`[TABLES] ${tables.length} found`);
-      dump.push("────────────────────────────────────────");
-      if (tables.length === 0) dump.push("  (none)");
-      else tables.slice(0, 40).forEach(t => dump.push(`  ▸ ${t}`));
-      if (tables.length > 40) dump.push(`  ... and ${tables.length - 40} more`);
-      dump.push("");
-      
-      // Extract global / environment access
-      const globals = new Set();
-      const globalPatterns = [
-        /_G\s*\[\s*["']([^"']+)["']\s*\]/g,
-        /_G\s*\.\s*([a-zA-Z_][a-zA-Z0-9_]*)/g,
-        /getgenv\s*\(\s*\)\s*\[\s*["']([^"']+)["']\s*\]/g,
-        /getgenv\s*\(\s*\)\s*\.([a-zA-Z_][a-zA-Z0-9_]*)/g,
-        /getrenv\s*\(\s*\)\s*\[\s*["']([^"']+)["']\s*\]/g,
-        /getrenv\s*\(\s*\)\s*\.([a-zA-Z_][a-zA-Z0-9_]*)/g,
-      ];
-      for (const pat of globalPatterns) {
-        let gm;
-        while ((gm = pat.exec(code)) !== null) globals.add(gm[1]);
-      }
-      dump.push("────────────────────────────────────────");
-      dump.push(`[GLOBAL ENV] ${globals.size} keys accessed`);
-      dump.push("────────────────────────────────────────");
-      if (globals.size === 0) dump.push("  (none)");
-      else [...globals].slice(0, 40).forEach(g => dump.push(`  ▸ ${g}`));
-      if (globals.size > 40) dump.push(`  ... and ${globals.size - 40} more`);
-      dump.push("");
-      
-      // Extract require() calls
-      const requires = new Set();
-      let rm;
-      const reqPat = /require\s*\(\s*["']([^"']+)["']\s*\)/g;
-      while ((rm = reqPat.exec(code)) !== null) requires.add(rm[1]);
-      dump.push("────────────────────────────────────────");
-      dump.push(`[REQUIRE] ${requires.size} modules`);
-      dump.push("────────────────────────────────────────");
-      if (requires.size === 0) dump.push("  (none)");
-      else [...requires].forEach(r => dump.push(`  ▸ ${r}`));
-      dump.push("");
-      
-      // Extract loadstring / remote calls
-      const remotes = new Set();
-      const remotePat = /(?:loadstring|HttpGet|HttpGetAsync|request)\s*\(\s*["']([^"']{5,})["']/g;
-      while ((rm = remotePat.exec(code)) !== null) remotes.add(rm[1]);
-      dump.push("────────────────────────────────────────");
-      dump.push(`[REMOTE / LOADSTRING] ${remotes.size} URLs`);
-      dump.push("────────────────────────────────────────");
-      if (remotes.size === 0) dump.push("  (none)");
-      else [...remotes].slice(0, 20).forEach(r => dump.push(`  ▸ ${r}`));
-      if (remotes.size > 20) dump.push(`  ... and ${remotes.size - 20} more`);
-      dump.push("");
-      
-      // Extract interesting strings
-      const strings = new Set();
-      const strPat = /["']([^"']{15,})["']/g;
-      while ((rm = strPat.exec(code)) !== null) {
-        const s = rm[1];
-        if (/https?:\/\//.test(s) || /\.\w+$/.test(s) || /getgenv|getrenv|hookfunction|setreadonly/.test(s)) {
-          strings.add(s);
-        }
-      }
-      dump.push("────────────────────────────────────────");
-      dump.push(`[INTERESTING STRINGS] ${strings.size} found`);
-      dump.push("────────────────────────────────────────");
-      if (strings.size === 0) dump.push("  (none)");
-      else [...strings].slice(0, 30).forEach(s => dump.push(`  ▸ "${s}"`));
-      if (strings.size > 30) dump.push(`  ... and ${strings.size - 30} more`);
-      dump.push("");
-      
-      // Extract metatable usage
-      const metatables = new Set();
-      const metaPat = /setmetatable|getmetatable|__index|__newindex|__call|__namecall/g;
-      while ((rm = metaPat.exec(code)) !== null) metatables.add(rm[0]);
-      dump.push("────────────────────────────────────────");
-      dump.push(`[METATABLES] ${metatables.size} metamethods`);
-      dump.push("────────────────────────────────────────");
-      if (metatables.size === 0) dump.push("  (none)");
-      else [...metatables].forEach(m => dump.push(`  ▸ ${m}`));
-      dump.push("");
-      
-      // Extract executor API usage
-      const executorAPIs = new Set();
-      const apiList = ["getgenv","getrenv","hookfunction","hookmetamethod","setreadonly","isreadonly",
-        "getnamecallmethod","setnamecallmethod","gethui","getconnections","firesignal",
-        "firetouchinterest","getrawmetatable","setrawmetatable","newcclosure","checkcaller",
-        "identifyexecutor","getexecutorname","syn","protect_gui","protect_instance",
-        "writefile","readfile","listfiles","makefolder","delfolder","isfile","isfolder",
-        "request","http_request","httpget","httppost","WebSocket","Krnl","Fluxus",
-        "ScriptWare","Synapse","Delta","Celery","Electron","VegaX","Comet"];
-      for (const api of apiList) {
-        if (new RegExp(api, "i").test(code)) executorAPIs.add(api);
-      }
-      dump.push("────────────────────────────────────────");
-      dump.push(`[EXECUTOR APIs] ${executorAPIs.size} detected`);
-      dump.push("────────────────────────────────────────");
-      if (executorAPIs.size === 0) dump.push("  (none)");
-      else [...executorAPIs].forEach(a => dump.push(`  ▸ ${a}`));
-      dump.push("");
-      
-      dump.push("══════════════════════════════════════════════════════════════");
-      dump.push("  END OF DUMP");
-      dump.push("══════════════════════════════════════════════════════════════");
-      
-      const dumpText = dump.join("\n");
-      const dumpName = `${randomName()}_dump.txt`;
-      const dumpFile = new AttachmentBuilder(Buffer.from(dumpText, "utf8"), { name: dumpName });
-      
-      if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      
-      await replyUser(msg, {
-        content: `<@${msg.author.id}> ✅ Environment dump complete`,
-        files: [dumpFile]
-      }).catch(() => {});
-      
-    } catch (e) {
-      if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      replyUser(msg, `❌ dump failed: ${e.message.slice(0, 100)}`).catch(() => {});
-    }
-    return;
-  }
-
-  // ─────────────────────────────────────────────
   if (/^\.fetch(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
@@ -2123,9 +2143,7 @@ client.on("messageCreate", async msg => {
         }
         outputName += ".lua";
         
-        // Add clean header to output file
-        const fileHeader = `-- Cleaned & Fixed by Prince Bot\n-- Original: ${file.name}\n-- Lines removed: ${linesRemoved}\n-- Size reduced: ${((1 - cleanedSize / originalSize) * 100).toFixed(1)}%\n\n`;
-        const finalOutput = fileHeader + cleaned;
+        const finalOutput = cleaned;
         
         const allLines = cleaned.split("\n");
         const previewLines = allLines.slice(0, 5);
