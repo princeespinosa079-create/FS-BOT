@@ -339,6 +339,51 @@ function replyUser(message, payload) {
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
   return message.reply(body);
 }
+
+// Detect obfuscator type and confidence
+function detectObfuscator(src) {
+  let scorePrometheus = 0, scoreWeAreDevs = 0, scoreVM = 0, scorePlain = 0;
+  
+  // Prometheus signatures
+  if (/Prometheus|prometheus/i.test(src)) scorePrometheus += 40;
+  if (/--\s*This file was generated using/i.test(src)) scorePrometheus += 25;
+  if (/loadstring\s*\(\s*game:HttpGet.*raw/i.test(src)) scorePrometheus += 20;
+  
+  // WeAreDevs signatures
+  if (/WeAreDevs|WAD_|wad_|wearedevs/i.test(src)) scoreWeAreDevs += 40;
+  if (/--\s*\/\/?\s*WeAreDevs/i.test(src)) scoreWeAreDevs += 30;
+  if (/getrenv|syn\.protect_gui|syn\.protect_instance/i.test(src)) scoreWeAreDevs += 20;
+  
+  // General VM/obfuscation patterns
+  if (/M\s*\(\s*-?\d+\s*[+\-*]\s*-?\d+\s*\)/.test(src)) scoreVM += 25;
+  // String table with encoded strings (handles escaped quotes)
+  if (/local\s+[A-Za-z_]+\s*=\s*\{(?:"\{(?:\\.|[^"\\])*"\s*[,;]\s*){5,}/.test(src)) scoreVM += 25;
+  if (/string\.char\s*\(\s*\d+\s*[,\)]/.test(src)) scoreVM += 15;
+  if (/\\x[0-9a-fA-F]{2}/.test(src)) scoreVM += 10;
+  // z table lookups with variable or numeric index
+  if (/\bz\s*\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\]/.test(src)) scoreVM += 20;
+  if (/\bz\s*\[\s*-?\d+\s*\]/.test(src)) scoreVM += 15;
+  // return(function wrapper (VM entry point)
+  if (/return\s*\(\s*function\s*\(/.test(src)) scoreVM += 15;
+  
+  // Plain script indicators
+  if (scoreVM < 15 && scorePrometheus < 15 && scoreWeAreDevs < 15) {
+    if (/function\s+[a-zA-Z_]/.test(src)) scorePlain += 30;
+    if (/--\s*\[.*\]/.test(src)) scorePlain += 10;
+  }
+  
+  const scores = [
+    { name: "Prometheus", score: Math.min(scorePrometheus, 100) },
+    { name: "WeAreDevs", score: Math.min(scoreWeAreDevs, 100) },
+    { name: "VM-Obfuscated", score: Math.min(scoreVM, 98) },
+    { name: "Plain Script", score: Math.min(scorePlain, 90) }
+  ];
+  scores.sort((a, b) => b.score - a.score);
+  
+  const best = scores[0];
+  if (best.score < 15) return { name: "Unknown", confidence: 0 };
+  return { name: best.name, confidence: best.score };
+}
 function getEmbedColor(isBuyerUser) {
   return REGULAR_COLOR;
 }
@@ -916,18 +961,9 @@ if (interaction.customId === "deobf_prometheus") {
   
   const src = deobfMenu.scriptSource;
   
-  // Detect if script is WeAreDevs / Prometheus obfuscated
-  const isWeAreDevs = /WeAreDevs|WAD_|wad_|wearedevs/i.test(src) 
-    || /--\s*\/\/?\s*WeAreDevs/i.test(src)
-    || /getrenv|getgenv|syn\.|protect_gui/i.test(src) && /\\x[0-9a-f]{2}/i.test(src);
-  const isPrometheus = /Prometheus|prometheus/i.test(src)
-    || /--\s*This file was generated using/i.test(src)
-    || /loadstring\(game:HttpGet\(.*raw.*\)\)/i.test(src) && src.length > 5000;
-  const hasObfuscation = /\\x[0-9a-f]{2}/i.test(src) 
-    || /\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+/.test(src) && src.length > 3000
-    || /string\.char\(\s*\d+/.test(src);
-  
-  if (!isWeAreDevs && !isPrometheus && !hasObfuscation) {
+  // Detect if script is supported
+  const detection = detectObfuscator(src);
+  if (detection.name === "Unknown" || detection.confidence < 15) {
     return interaction.reply({ content: "❌ not supported.", flags: MessageFlags.Ephemeral }).catch(() => {});
   }
   
@@ -1118,10 +1154,13 @@ if (interaction.customId === "deobf_prometheus") {
     result = src;
   }
   
+  const detectText = detection.confidence > 0
+    ? `${detection.name} (${detection.confidence}%)`
+    : "Unknown";
   const doneEmbed = new EmbedBuilder()
     .setColor(REGULAR_COLOR)
     .setTitle("🔓 Prometheus Deobfuscator — Complete")
-    .setDescription(`✅ All layers removed.\n\n**Detected:** ${isWeAreDevs ? "WeAreDevs" : isPrometheus ? "Prometheus" : hasObfuscation ? "VM-Obfuscated" : "Unknown"}\n**Original size:** ${src.length} bytes\n**Output size:** ${result.length} bytes`)
+    .setDescription(`✅ All layers removed.\n\n**Detect:** ${detectText}\n**Original:** ${src.length} bytes\n**Output:** ${result.length} bytes`)
     .setFooter({ text: `Requested by @${interaction.user.username}` });
   const doneRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Success).setDisabled(true)
@@ -1817,34 +1856,20 @@ client.on("messageCreate", async msg => {
       const scriptSource = await res.text();
       
       // Detect obfuscation type
-      const isWeAreDevs = /WeAreDevs|WAD_|wad_|wearedevs/i.test(scriptSource) 
-        || /--\s*\/\/?\s*WeAreDevs/i.test(scriptSource)
-        || /getrenv|getgenv|syn\.|protect_gui/i.test(scriptSource) && /\\x[0-9a-f]{2}/i.test(scriptSource);
-      const isPrometheus = /Prometheus|prometheus/i.test(scriptSource)
-        || /--\s*This file was generated using/i.test(scriptSource)
-        || /loadstring\(game:HttpGet\(.*raw.*\)\)/i.test(scriptSource) && scriptSource.length > 5000;
-      const hasObfuscation = /\\x[0-9a-f]{2}/i.test(scriptSource) 
-        || /\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+/.test(scriptSource) && scriptSource.length > 3000
-        || /string\.char\(\s*\d+/.test(scriptSource);
-      const isSupported = isWeAreDevs || isPrometheus || hasObfuscation;
-      const detectedType = isWeAreDevs ? "WeAreDevs" : isPrometheus ? "Prometheus" : hasObfuscation ? "VM-Obfuscated" : "Plain / Unknown";
+      const detection = detectObfuscator(scriptSource);
+      const isSupported = detection.name !== "Unknown" && detection.confidence >= 15;
+      const detectText = detection.confidence > 0
+        ? `${detection.name} (${detection.confidence}%)`
+        : "Unknown";
       
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       
       const panelEmbed = new EmbedBuilder()
         .setColor(REGULAR_COLOR)
-        .setTitle("🔓 Prometheus Deobfuscator")
+        .setTitle("Deobfuscator Panel")
         .setDescription(
-          `**Script loaded!** ${isSupported ? "✅ Supported" : "⚠️ May not be supported"}\n` +
-          `**Detected:** \`${detectedType}\`\n` +
-          `**Size:** \`${scriptSource.length}\` bytes\n\n` +
-          "Click the button below to start deobfuscation.\n\n" +
-          "▫ Recover constants and string builders\n" +
-          "▫ Decrypt strings and remove wrappers\n" +
-          "▫ Remove Vmify layers\n" +
-          "▫ Structure recovered source\n" +
-          "▫ Compile Luau bytecode\n" +
-          "▫ Decompile bytecode"
+          `Select deobfuscator below.\n> 1. **Prometheus** (**WeAreDevs & Some forks**)\n\n` +
+          `**Detect:** ${detectText} • **Size:** ${scriptSource.length} bytes`
         )
         .setFooter({ text: `Requested by @${msg.author.username}` });
       
@@ -1909,11 +1934,21 @@ client.on("messageCreate", async msg => {
       
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       
+      const detection = detectObfuscator(content);
       const file = new AttachmentBuilder(Buffer.from(content, "utf8"), { name: fileName });
+      const detectText = detection.confidence > 0
+        ? `**Detect: ${detection.name} (${detection.confidence}%)**`
+        : `**Detect: Unknown**`;
       
-      // Reply to original message with file
+      const infoEmbed = new EmbedBuilder()
+        .setColor(REGULAR_COLOR)
+        .setTitle("📥 Fetched")
+        .setDescription(`${detectText}\n\`${fileName}\` • ${content.length} bytes • ${content.split("\n").length} lines`);
+      
+      // Reply to original message with file + info
       await replyUser(msg, {
         content: `<@${msg.author.id}>`,
+        embeds: [infoEmbed],
         files: [file]
       }).catch(() => {});
     } catch (e) {
