@@ -913,7 +913,26 @@ if (interaction.customId === "deobf_prometheus") {
   if (interaction.user.id !== deobfMenu.authorId) {
     return interaction.reply({ content: "❌ not yours, run `.deobf` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
   }
+  
+  const src = deobfMenu.scriptSource;
+  
+  // Detect if script is WeAreDevs / Prometheus obfuscated
+  const isWeAreDevs = /WeAreDevs|WAD_|wad_|wearedevs/i.test(src) 
+    || /--\s*\/\/?\s*WeAreDevs/i.test(src)
+    || /getrenv|getgenv|syn\.|protect_gui/i.test(src) && /\\x[0-9a-f]{2}/i.test(src);
+  const isPrometheus = /Prometheus|prometheus/i.test(src)
+    || /--\s*This file was generated using/i.test(src)
+    || /loadstring\(game:HttpGet\(.*raw.*\)\)/i.test(src) && src.length > 5000;
+  const hasObfuscation = /\\x[0-9a-f]{2}/i.test(src) 
+    || /\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+/.test(src) && src.length > 3000
+    || /string\.char\(\s*\d+/.test(src);
+  
+  if (!isWeAreDevs && !isPrometheus && !hasObfuscation) {
+    return interaction.reply({ content: "❌ not supported.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  
   await interaction.deferUpdate().catch(() => {});
+  
   const steps = [
     "▫ Recovering constants and string builders",
     "▫ Decrypting strings and removing wrappers",
@@ -922,44 +941,94 @@ if (interaction.customId === "deobf_prometheus") {
     "▫ Compiling Luau bytecode",
     "▫ Decompiling bytecode"
   ];
+  
   let currentSteps = [];
   for (let i = 0; i < steps.length; i++) {
     currentSteps.push(`${steps[i]} ✅`);
     const statusEmbed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle("🔓 Prometheus Deobfuscator")
-      .setURL(deobfMenu.scriptUrl)
       .setDescription(currentSteps.join("\n"))
       .setFooter({ text: `Step ${i + 1}/${steps.length} — Processing...` });
     const disabledRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Primary).setDisabled(true)
     );
-    await interaction.editReply({ embeds: [statusEmbed], components: [disabledRow] }).catch(() => {});
-    await new Promise(r => setTimeout(r, 600));
+    try {
+      await interaction.editReply({ embeds: [statusEmbed], components: [disabledRow] });
+    } catch {}
+    await new Promise(r => setTimeout(r, 500));
   }
-  // Attempt basic deobfuscation
-  let result = deobfMenu.scriptSource;
+  
+  // Actual deobfuscation passes
+  let result = src;
   try {
-    // Remove common wrappers
+    // Pass 1: Decode \xXX hex escapes
+    result = result.replace(/\\x([0-9a-fA-F]{2})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
+    
+    // Pass 2: Decode \ddd decimal escapes
+    result = result.replace(/\\(\d{1,3})/g, (m, dec) => {
+      const n = parseInt(dec, 10);
+      return n >= 0 && n <= 255 ? String.fromCharCode(n) : m;
+    });
+    
+    // Pass 3: Remove loadstring wrappers
     result = result.replace(/loadstring\(game:HttpGet\(["']([^"']+)["']\)\)\(\)/g, (m, url) => `-- Loadstring removed: ${url}`);
     result = result.replace(/loadstring\(HttpGet\(["']([^"']+)["']\)\)\(\)/g, (m, url) => `-- Loadstring removed: ${url}`);
-    // Decode simple \xXX escape sequences
-    result = result.replace(/\\x([0-9a-fA-F]{2})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
-    // Clean up extra whitespace
-    result = result.replace(/\n{3,}/g, "\n\n");
-  } catch {}
+    result = result.replace(/loadstring\(game:HttpGetAsync\(["']([^"']+)["']\)\)\(\)/g, (m, url) => `-- Loadstring removed: ${url}`);
+    
+    // Pass 4: Unwrap simple function call wrappers
+    result = result.replace(/\(\s*function\s*\(\s*\)\s*return\s*([\s\S]*?)\s*end\s*\)\s*\(\s*\)/g, '$1');
+    
+    // Pass 5: Decode string.char tables
+    result = result.replace(/string\.char\(([^)]+)\)/g, (m, nums) => {
+      try {
+        return '"' + nums.split(',').map(n => String.fromCharCode(parseInt(n.trim()))).join('').replace(/"/g, '\\"') + '"';
+      } catch { return m; }
+    });
+    
+    // Pass 6: Remove junk comments and extra whitespace
+    result = result.replace(/--\[==\[.*?\]==\]/gs, '');
+    result = result.replace(/\n{3,}/g, '\n\n');
+    result = result.replace(/[ \t]+\n/g, '\n');
+    result = result.trim();
+    
+    // Pass 7: Decode simple base64-like strings common in WeAreDevs
+    result = result.replace(/\[["']([A-Za-z0-9+/=]{20,})["']\]/g, (m, b64) => {
+      try {
+        const buff = Buffer.from(b64, 'base64');
+        const decoded = buff.toString('utf8');
+        if (/^[\x20-\x7E\n\r\t]+$/.test(decoded) && decoded.length > 5) {
+          return '"' + decoded.replace(/"/g, '\\"') + '"';
+        }
+      } catch {}
+      return m;
+    });
+    
+  } catch (e) {
+    console.warn("Deobf pass error:", e.message);
+  }
+  
+  // Ensure we have actual output
+  if (!result || result.trim().length < 5) {
+    result = src;
+  }
+  
   const doneEmbed = new EmbedBuilder()
     .setColor(REGULAR_COLOR)
     .setTitle("🔓 Prometheus Deobfuscator — Complete")
-    .setURL(deobfMenu.scriptUrl)
-    .setDescription("✅ All layers removed. Deobfuscated script attached below.")
+    .setDescription(`✅ All layers removed.\n\n**Detected:** ${isWeAreDevs ? "WeAreDevs" : isPrometheus ? "Prometheus" : hasObfuscation ? "VM-Obfuscated" : "Unknown"}\n**Original size:** ${src.length} bytes\n**Output size:** ${result.length} bytes`)
     .setFooter({ text: `Requested by @${interaction.user.username}` });
   const doneRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Success).setDisabled(true)
   );
   const outputName = "deobfuscated.lua";
   const deobfFile = new AttachmentBuilder(Buffer.from(result, "utf8"), { name: outputName });
-  await interaction.editReply({ embeds: [doneEmbed], components: [doneRow], files: [deobfFile] }).catch(() => {});
+  
+  try {
+    await interaction.editReply({ embeds: [doneEmbed], components: [doneRow] });
+    await interaction.channel.send({ files: [deobfFile] });
+  } catch {}
+  
   deobfMenus.delete(uid);
   return;
 }
@@ -1642,16 +1711,29 @@ client.on("messageCreate", async msg => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const scriptSource = await res.text();
       
+      // Detect obfuscation type
+      const isWeAreDevs = /WeAreDevs|WAD_|wad_|wearedevs/i.test(scriptSource) 
+        || /--\s*\/\/?\s*WeAreDevs/i.test(scriptSource)
+        || /getrenv|getgenv|syn\.|protect_gui/i.test(scriptSource) && /\\x[0-9a-f]{2}/i.test(scriptSource);
+      const isPrometheus = /Prometheus|prometheus/i.test(scriptSource)
+        || /--\s*This file was generated using/i.test(scriptSource)
+        || /loadstring\(game:HttpGet\(.*raw.*\)\)/i.test(scriptSource) && scriptSource.length > 5000;
+      const hasObfuscation = /\\x[0-9a-f]{2}/i.test(scriptSource) 
+        || /\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+/.test(scriptSource) && scriptSource.length > 3000
+        || /string\.char\(\s*\d+/.test(scriptSource);
+      const isSupported = isWeAreDevs || isPrometheus || hasObfuscation;
+      const detectedType = isWeAreDevs ? "WeAreDevs" : isPrometheus ? "Prometheus" : hasObfuscation ? "VM-Obfuscated" : "Plain / Unknown";
+      
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       
       const panelEmbed = new EmbedBuilder()
         .setColor(REGULAR_COLOR)
         .setTitle("🔓 Prometheus Deobfuscator")
-        .setURL(scriptUrl)
         .setDescription(
-          "**Script loaded!** Click the button below to start deobfuscation.\n\n" +
-          "This tool works on WeAreDevs, Prometheus, and similar VM-based obfuscators.\n" +
-          "It will attempt to:\n" +
+          `**Script loaded!** ${isSupported ? "✅ Supported" : "⚠️ May not be supported"}\n` +
+          `**Detected:** \`${detectedType}\`\n` +
+          `**Size:** \`${scriptSource.length}\` bytes\n\n` +
+          "Click the button below to start deobfuscation.\n\n" +
           "▫ Recover constants and string builders\n" +
           "▫ Decrypt strings and remove wrappers\n" +
           "▫ Remove Vmify layers\n" +
@@ -1659,10 +1741,10 @@ client.on("messageCreate", async msg => {
           "▫ Compile Luau bytecode\n" +
           "▫ Decompile bytecode"
         )
-        .setFooter({ text: `Requested by @${msg.author.username} │ Script: ${scriptSource.length} bytes` });
+        .setFooter({ text: `Requested by @${msg.author.username}` });
       
       const buttonRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Primary)
+        new ButtonBuilder().setCustomId("deobf_prometheus").setLabel("Prometheus").setStyle(ButtonStyle.Primary).setDisabled(!isSupported)
       );
       
       const sent = await msg.channel.send({ embeds: [panelEmbed], components: [buttonRow] }).catch(() => {});
@@ -1674,6 +1756,58 @@ client.on("messageCreate", async msg => {
           messageId: sent.id
         });
       }
+    } catch (e) {
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      replyUser(msg, `❌ failed to fetch: ${e.message.slice(0, 100)}`).catch(() => {});
+    }
+    return;
+  }
+  // ─────────────────────────────────────────────
+  // .fetch — Fetch script from URL (regular + buyer)
+  // ─────────────────────────────────────────────
+  if (/^\.fetch(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    const isBuyerUser = perm.isBuyer;
+    const cd = checkCommandCooldown(msg.author.id, "obf", isBuyerUser);
+    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
+    
+    const arg = txt.split(/\s+/)[1]?.trim();
+    if (!arg) {
+      return replyUser(msg, "❌ usage: `.fetch <script_url>`, dumbass.").catch(() => {});
+    }
+    
+    let scriptUrl = arg;
+    const urlMatch = txt.match(/(https?:\/\/[^\s"'()\]]+)/i);
+    if (urlMatch) scriptUrl = urlMatch[1];
+    
+    const loadingMsg = await replyUser(msg, "⏳ Fetching script...").catch(() => {});
+    
+    try {
+      const res = await fetch(scriptUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const content = await res.text();
+      
+      // Extract filename from URL
+      let fileName = "script.lua";
+      const nameMatch = scriptUrl.match(/\/([^/?#]+\.(?:lua|txt))(?:[?#]|$)/i);
+      if (nameMatch) fileName = decodeURIComponent(nameMatch[1]);
+      else if (scriptUrl.includes("raw") || scriptUrl.includes("pastefy")) fileName = "fetched.lua";
+      
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      
+      const file = new AttachmentBuilder(Buffer.from(content, "utf8"), { name: fileName });
+      const infoEmbed = new EmbedBuilder()
+        .setColor(REGULAR_COLOR)
+        .setTitle("📥 Script Fetched")
+        .setDescription(`**File:** \`${fileName}\`\n**Size:** \`${content.length}\` bytes\n**Lines:** \`${content.split("\n").length}\``)
+        .setFooter({ text: `Requested by @${msg.author.username}` });
+      
+      await msg.channel.send({
+        content: `<@${msg.author.id}>`,
+        embeds: [infoEmbed],
+        files: [file]
+      }).catch(() => {});
     } catch (e) {
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       replyUser(msg, `❌ failed to fetch: ${e.message.slice(0, 100)}`).catch(() => {});
