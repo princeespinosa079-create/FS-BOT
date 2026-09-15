@@ -837,7 +837,7 @@ client.on("interactionCreate", async interaction => {
   const menu = paginationMenus.get(uid);
   if (Date.now() - menu.createdAt > EXPIRY_MS) {
     paginationMenus.delete(uid);
-    return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    return interaction.reply({ content: "⏳ search expired bro, do `.find` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
   }
   if (interaction.message.id !== menu.messageId) return;
   if (interaction.user.id !== menu.authorId) {
@@ -865,9 +865,13 @@ client.on("interactionCreate", async interaction => {
 // ─── ALTLIST PAGINATION BUTTONS ───
 if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") {
   if (!altListMenus.has(uid)) {
-    return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    return interaction.reply({ content: "⏳ scan expired bro, run `.altlist` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
   }
   const menu = altListMenus.get(uid);
+  if (Date.now() - menu.createdAt > EXPIRY_MS) {
+    altListMenus.delete(uid);
+    return interaction.reply({ content: "⏳ scan expired bro, run `.altlist` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
   if (interaction.message.id !== menu.messageId) return;
   if (interaction.user.id !== menu.authorId) {
     return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -937,7 +941,7 @@ client.on("interactionCreate", async interaction => {
         await targetChannel.send({ content: text });
       } else {
         const embed = new EmbedBuilder()
-          .setColor(0x808080)
+          .setColor(REGULAR_COLOR)
           .setDescription(text)
           .setFooter({ text: timeFooter });
         if (title) embed.setTitle(title);
@@ -981,6 +985,80 @@ client.on("messageCreate", async msg => {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
     
+    // Check if user provided a specific user ID/mention
+    const targetArg = txt.split(/\s+/)[1]?.trim();
+    let targetUserId = null;
+    if (targetArg) {
+      const mentionMatch = targetArg.match(/<@!?(\d+)>/);
+      if (mentionMatch) targetUserId = mentionMatch[1];
+      else if (/^\d+$/.test(targetArg)) targetUserId = targetArg;
+    }
+    
+    // Single user check mode
+    if (targetUserId) {
+      try {
+        const targetMember = await msg.guild.members.fetch(targetUserId).catch(() => null);
+        if (!targetMember || targetMember.user.bot) {
+          replyUser(msg, "❌ user not found or is a bot, dumbass.").catch(() => {});
+          return;
+        }
+        const now = Date.now();
+        let score = 0;
+        const flags = [];
+        const created = targetMember.user.createdTimestamp;
+        const ageDays = (now - created) / (24 * 60 * 60 * 1000);
+        
+        if (ageDays < 7) { score += 40; flags.push(`🕐 **${ageDays.toFixed(0)} days old**`); }
+        else if (ageDays < 30) { score += 20; flags.push(`🕐 ${ageDays.toFixed(0)} days old`); }
+        
+        const joined = targetMember.joinedTimestamp;
+        if (joined) {
+          const joinDays = (now - joined) / (24 * 60 * 60 * 1000);
+          if (joinDays < 3) { score += 15; flags.push(`🆕 Joined ${joinDays.toFixed(0)}d ago`); }
+        }
+        
+        if (!targetMember.user.avatar) { score += 20; flags.push("👤 No avatar"); }
+        
+        const nonEveryoneRoles = targetMember.roles.cache.filter(r => r.id !== msg.guild.id);
+        if (nonEveryoneRoles.size === 0) { score += 15; flags.push("🎭 No roles"); }
+        
+        const uname = targetMember.user.username;
+        const numMatch = uname.match(/(\d{3,})$/);
+        if (numMatch && numMatch[1].length >= 4) { score += 10; flags.push(`🔢 Numbers in name`); }
+        
+        if (targetMember.displayName === uname && !targetMember.user.avatar) { score += 5; }
+        
+        if (targetMember.premiumSince && ageDays < 30) { score += 10; flags.push("⚠️ New + boosting"); }
+        
+        const riskLevel = score >= 50 ? "🔴 HIGH RISK" : score >= 35 ? "🟠 MEDIUM RISK" : score >= 25 ? "🟡 LOW RISK" : "✅ CLEAN";
+        const createdDate = new Date(created).toLocaleDateString("en-US");
+        const joinDate = joined ? new Date(joined).toLocaleDateString("en-US") : "Unknown";
+        
+        const userEmbed = new EmbedBuilder()
+          .setColor(score >= 25 ? 0x2B2D31 : 0x2B2D31)
+          .setTitle(`🔍 Account Check — ${targetMember.user.tag}`)
+          .setThumbnail(targetMember.user.avatarURL({ dynamic: true }) || null)
+          .setDescription(
+            `**User:** <@${targetMember.id}>\n` +
+            `**ID:** \`${targetMember.id}\`\n` +
+            `**Risk:** ${riskLevel} (Score: \`${score}\`)\n` +
+            `**Created:** ${createdDate} (${ageDays.toFixed(0)} days ago)\n` +
+            `**Joined:** ${joinDate}\n` +
+            `**Avatar:** ${targetMember.user.avatar ? "✅ Has avatar" : "❌ No avatar"}\n` +
+            `**Roles:** ${nonEveryoneRoles.size}\n\n` +
+            (flags.length > 0 ? `**Flags:**\n${flags.map(f => `• ${f}`).join("\n")}` : "**Flags:** None — account looks clean ✅")
+          )
+          .setFooter({ text: `Suspicion score: ${score}/100+` });
+        
+        replyUser(msg, { embeds: [userEmbed] }).catch(() => {});
+        return;
+      } catch (e) {
+        replyUser(msg, `❌ error: ${e.message.slice(0, 100)}`).catch(() => {});
+        return;
+      }
+    }
+    
+    // Full server scan mode
     const loadingMsg = await replyUser(msg, "🔍 Scanning server for suspicious accounts...").catch(() => {});
     
     try {
@@ -1088,7 +1166,8 @@ client.on("messageCreate", async msg => {
       if (sent) {
         altListMenus.set(msg.author.id, {
           results: suspicious, page: 1, totalPages, messageId: sent.id,
-          authorId: msg.author.id, guildName: msg.guild.name, memberCount: msg.guild.memberCount
+          authorId: msg.author.id, guildName: msg.guild.name, memberCount: msg.guild.memberCount,
+          createdAt: Date.now()
         });
       }
       
@@ -1262,7 +1341,7 @@ client.on("messageCreate", async msg => {
       if (sentMsg) await sentMsg.delete().catch(() => {});
       
       if (res.status === 404) {
-        await msg.channel.send("❌ not found.").catch(() => {});
+        await msg.channel.send(`<@${msg.author.id}> ❌ Not Found`).catch(() => {});
       } else {
         const resultEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
@@ -1270,7 +1349,7 @@ client.on("messageCreate", async msg => {
           .setFooter({ text: timeFooter });
         
         if (res.ok) {
-          resultEmbed.setDescription("✅ delete.");
+          resultEmbed.setDescription("✅ Delete");
         } else {
           resultEmbed.setDescription(`❌ failed: HTTP ${res.status}`);
         }
@@ -1703,10 +1782,10 @@ client.on("messageCreate", async msg => {
         const originalSize = Buffer.byteLength(text, "utf8");
         const cleanedSize = Buffer.byteLength(cleaned, "utf8");
         
-        // Better filename: prefix + random + .lua
-        const randChars = "abcdefghijklmnopqrstuvwxyz0123456789";
-        let outputName = "fixed_";
-        for (let i = 0; i < 12; i++) {
+        // Filename: 20 random chars + .lua
+        const randChars = "abcdefghijklmnopqrstuvwxyz";
+        let outputName = "";
+        for (let i = 0; i < 20; i++) {
           outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
         }
         outputName += ".lua";
