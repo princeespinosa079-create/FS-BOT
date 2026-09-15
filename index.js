@@ -959,50 +959,97 @@ if (interaction.customId === "deobf_prometheus") {
     await new Promise(r => setTimeout(r, 500));
   }
   
-  // Actual deobfuscation passes
+  // Actual deobfuscation passes — WeAreDevs / Prometheus targeted
   let result = src;
   try {
-    // Pass 1: Decode \xXX hex escapes
+    // === PASS 1: Decode ALL escape sequences ===
     result = result.replace(/\\x([0-9a-fA-F]{2})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
-    
-    // Pass 2: Decode \ddd decimal escapes
     result = result.replace(/\\(\d{1,3})/g, (m, dec) => {
       const n = parseInt(dec, 10);
       return n >= 0 && n <= 255 ? String.fromCharCode(n) : m;
     });
     
-    // Pass 3: Remove loadstring wrappers
-    result = result.replace(/loadstring\(game:HttpGet\(["']([^"']+)["']\)\)\(\)/g, (m, url) => `-- Loadstring removed: ${url}`);
-    result = result.replace(/loadstring\(HttpGet\(["']([^"']+)["']\)\)\(\)/g, (m, url) => `-- Loadstring removed: ${url}`);
-    result = result.replace(/loadstring\(game:HttpGetAsync\(["']([^"']+)["']\)\)\(\)/g, (m, url) => `-- Loadstring removed: ${url}`);
+    // === PASS 2: Remove multi-layer loadstring wrappers ===
+    let prevLen = -1;
+    let iterations = 0;
+    while (prevLen !== result.length && iterations < 5) {
+      prevLen = result.length;
+      result = result.replace(/loadstring\s*\(\s*game:HttpGet(?:Async)?\s*\(\s*["']([^"']+)["']\s*\)\s*\)\s*\(\s*\)/g, (m, url) => `-- Loadstring removed: ${url}`);
+      result = result.replace(/loadstring\s*\(\s*HttpGet\s*\(\s*["']([^"']+)["']\s*\)\s*\)\s*\(\s*\)/g, (m, url) => `-- Loadstring removed: ${url}`);
+      result = result.replace(/loadstring\s*\(\s*([\s\S]*?)\s*\)\s*\(\s*\)/g, (m, inner) => {
+        if (inner.length < 500 && !inner.includes('function')) return inner.trim();
+        return m;
+      });
+      iterations++;
+    }
     
-    // Pass 4: Unwrap simple function call wrappers
-    result = result.replace(/\(\s*function\s*\(\s*\)\s*return\s*([\s\S]*?)\s*end\s*\)\s*\(\s*\)/g, '$1');
-    
-    // Pass 5: Decode string.char tables
-    result = result.replace(/string\.char\(([^)]+)\)/g, (m, nums) => {
+    // === PASS 3: Decode string.char() numeric tables with arithmetic ===
+    result = result.replace(/string\.char\(([^)]{5,})\)/g, (m, nums) => {
       try {
-        return '"' + nums.split(',').map(n => String.fromCharCode(parseInt(n.trim()))).join('').replace(/"/g, '\\"') + '"';
-      } catch { return m; }
-    });
-    
-    // Pass 6: Remove junk comments and extra whitespace
-    result = result.replace(/--\[==\[.*?\]==\]/gs, '');
-    result = result.replace(/\n{3,}/g, '\n\n');
-    result = result.replace(/[ \t]+\n/g, '\n');
-    result = result.trim();
-    
-    // Pass 7: Decode simple base64-like strings common in WeAreDevs
-    result = result.replace(/\[["']([A-Za-z0-9+/=]{20,})["']\]/g, (m, b64) => {
-      try {
-        const buff = Buffer.from(b64, 'base64');
-        const decoded = buff.toString('utf8');
-        if (/^[\x20-\x7E\n\r\t]+$/.test(decoded) && decoded.length > 5) {
+        const parts = nums.split(',').map(n => {
+          n = n.trim();
+          if (n.includes('+')) { const p = n.split('+'); return parseInt(p[0]) + parseInt(p[1]); }
+          if (n.includes('-')) { const p = n.split('-'); return parseInt(p[0]) - parseInt(p[1]); }
+          if (n.includes('^')) { const p = n.split('^'); return Math.pow(parseInt(p[0]), parseInt(p[1])); }
+          if (n.includes('*')) { const p = n.split('*'); return parseInt(p[0]) * parseInt(p[1]); }
+          return parseInt(n);
+        });
+        let decoded = '';
+        for (const c of parts) { if (c >= 0 && c <= 255) decoded += String.fromCharCode(c); }
+        if (decoded.length > 0 && /^[\x20-\x7E\s]+$/.test(decoded)) {
           return '"' + decoded.replace(/"/g, '\\"') + '"';
         }
       } catch {}
       return m;
     });
+    
+    // === PASS 4: WeAreDevs table-based string decoder ===
+    const tablePattern = /local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{(\d+(?:\s*,\s*\d+){10,})\}/g;
+    let tableMatch;
+    while ((tableMatch = tablePattern.exec(result)) !== null) {
+      const tName = tableMatch[1];
+      const nums = tableMatch[2].split(',').map(n => parseInt(n.trim()));
+      const chars = nums.map(n => n >= 0 && n <= 255 ? String.fromCharCode(n) : '?');
+      const lookupPattern = new RegExp(`\\b${tName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\[\\s*(\\d+)\\s*\\]`, 'g');
+      result = result.replace(lookupPattern, (m, idx) => {
+        const i = parseInt(idx) - 1;
+        return chars[i] ? `"${chars[i].replace(/"/g, '\\"')}"` : m;
+      });
+    }
+    result = result.replace(/"([A-Za-z0-9])"\s*\.\.\s*"([A-Za-z0-9])"/g, (m, a, b) => `"${a}${b}"`);
+    
+    // === PASS 5: Unwrap IIFE wrappers ===
+    result = result.replace(/\(\s*function\s*\(\s*\)\s*([\s\S]*?)\s*end\s*\)\s*\(\s*\)/g, (m, body) => {
+      if (body.includes('function ') || body.includes('if ')) return body;
+      return body;
+    });
+    
+    // === PASS 6: Remove junk code patterns ===
+    result = result.replace(/if\s+false\s+then[\s\S]*?end/g, '');
+    result = result.replace(/while\s+false\s+do[\s\S]*?end/g, '');
+    result = result.replace(/do\s*end/g, '');
+    result = result.replace(/--\s*\/\/?\s*WeAreDevs[^\n]*/gi, '');
+    result = result.replace(/--\s*Prometheus[^\n]*/gi, '');
+    result = result.replace(/--\s*This file was generated[^\n]*/gi, '');
+    
+    // === PASS 7: Decode base64 encoded strings ===
+    result = result.replace(/["']([A-Za-z0-9+/]{30,}={0,2})["']/g, (m, b64) => {
+      try {
+        const buff = Buffer.from(b64, 'base64');
+        const decoded = buff.toString('utf8');
+        if (decoded.length > 10 && /^[\x20-\x7E\s]+$/.test(decoded) && 
+            (decoded.includes('function') || decoded.includes('local') || decoded.includes('='))) {
+          return decoded;
+        }
+      } catch {}
+      return m;
+    });
+    
+    // === PASS 8: Cleanup whitespace ===
+    result = result.replace(/[ \t]+\n/g, '\n');
+    result = result.replace(/\n{4,}/g, '\n\n\n');
+    result = result.replace(/^\s*\n+/, '');
+    result = result.trim();
     
   } catch (e) {
     console.warn("Deobf pass error:", e.message);
@@ -1781,31 +1828,34 @@ client.on("messageCreate", async msg => {
     const urlMatch = txt.match(/(https?:\/\/[^\s"'()\]]+)/i);
     if (urlMatch) scriptUrl = urlMatch[1];
     
-    const loadingMsg = await replyUser(msg, "⏳ Fetching script...").catch(() => {});
+    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}│ Prince Fetch`;
+    const loadingEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("Fetching URL...")
+      .setDescription(`the url ${scriptUrl}`)
+      .setFooter({ text: timeFooter });
+    const loadingMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
     
     try {
       const res = await fetch(scriptUrl);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const content = await res.text();
       
-      // Extract filename from URL
-      let fileName = "script.lua";
-      const nameMatch = scriptUrl.match(/\/([^/?#]+\.(?:lua|txt))(?:[?#]|$)/i);
-      if (nameMatch) fileName = decodeURIComponent(nameMatch[1]);
-      else if (scriptUrl.includes("raw") || scriptUrl.includes("pastefy")) fileName = "fetched.lua";
+      // 20 random letters filename
+      const randChars = "abcdefghijklmnopqrstuvwxyz";
+      let fileName = "";
+      for (let i = 0; i < 20; i++) {
+        fileName += randChars.charAt(Math.floor(Math.random() * randChars.length));
+      }
+      fileName += ".lua";
       
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       
       const file = new AttachmentBuilder(Buffer.from(content, "utf8"), { name: fileName });
-      const infoEmbed = new EmbedBuilder()
-        .setColor(REGULAR_COLOR)
-        .setTitle("📥 Script Fetched")
-        .setDescription(`**File:** \`${fileName}\`\n**Size:** \`${content.length}\` bytes\n**Lines:** \`${content.split("\n").length}\``)
-        .setFooter({ text: `Requested by @${msg.author.username}` });
       
-      await msg.channel.send({
+      // Reply to original message with file
+      await replyUser(msg, {
         content: `<@${msg.author.id}>`,
-        embeds: [infoEmbed],
         files: [file]
       }).catch(() => {});
     } catch (e) {
