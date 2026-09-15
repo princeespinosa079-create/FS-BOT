@@ -962,36 +962,122 @@ if (interaction.customId === "deobf_prometheus") {
   // Actual deobfuscation passes — WeAreDevs / Prometheus targeted
   let result = src;
   try {
-    // === PASS 1: Decode ALL escape sequences ===
+    // === PASS 1: Decode ALL arithmetic expressions (M() and bare) ===
+    // This is the #1 visible improvement for WeAreDevs
+    // Decode M(a op b) calls
+    let changed = true;
+    let safety = 0;
+    while (changed && safety < 10) {
+      changed = false;
+      safety++;
+      const newResult = result.replace(/M\s*\(\s*(-?\d+)\s*([+\-*])\s*(-?\d+)\s*\)/g, (m, a, op, b) => {
+        changed = true;
+        const na = parseInt(a), nb = parseInt(b);
+        if (op === '+') return String(na + nb);
+        if (op === '-') return String(na - nb);
+        if (op === '*') return String(na * nb);
+        return m;
+      });
+      // Also decode bare arithmetic in table lookups: [-123+-456]
+      result = newResult.replace(/\[(-?\d+)\s*([+\-])\s*(-?\d+)\]/g, (m, a, op, b) => {
+        changed = true;
+        const na = parseInt(a), nb = parseInt(b);
+        return '[' + String(op === '+' ? na + nb : na - nb) + ']';
+      });
+      // Decode % modulo operations: 58630488%689770
+      result = result.replace(/\b(-?\d+)\s*%\s*(-?\d+)\b/g, (m, a, b) => {
+        changed = true;
+        const na = parseInt(a), nb = parseInt(b);
+        return String(((na % nb) + nb) % nb);
+      });
+      // Decode double negations: -(-187430)
+      result = result.replace(/-\(\s*-(-?\d+)\s*\)/g, (m, a) => {
+        changed = true;
+        return a;
+      });
+      // Decode simple arithmetic assignments: C=-187395-(-187430)
+      result = result.replace(/([,;{])\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?\d+)\s*([+\-*])\s*(-?\d+)\s*([,;}])/g, (m, pre, varname, a, op, b, post) => {
+        changed = true;
+        const na = parseInt(a), nb = parseInt(b);
+        let r;
+        if (op === '+') r = na + nb;
+        else if (op === '-') r = na - nb;
+        else r = na * nb;
+        return `${pre}${varname}=${r}${post}`;
+      });
+    }
+    
+    // === PASS 2: Decode \xXX hex + \ddd decimal escapes ===
     result = result.replace(/\\x([0-9a-fA-F]{2})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
     result = result.replace(/\\(\d{1,3})/g, (m, dec) => {
       const n = parseInt(dec, 10);
       return n >= 0 && n <= 255 ? String.fromCharCode(n) : m;
     });
     
-    // === PASS 2: Remove multi-layer loadstring wrappers ===
-    let prevLen = -1;
-    let iterations = 0;
-    while (prevLen !== result.length && iterations < 5) {
-      prevLen = result.length;
-      result = result.replace(/loadstring\s*\(\s*game:HttpGet(?:Async)?\s*\(\s*["']([^"']+)["']\s*\)\s*\)\s*\(\s*\)/g, (m, url) => `-- Loadstring removed: ${url}`);
-      result = result.replace(/loadstring\s*\(\s*HttpGet\s*\(\s*["']([^"']+)["']\s*\)\s*\)\s*\(\s*\)/g, (m, url) => `-- Loadstring removed: ${url}`);
-      result = result.replace(/loadstring\s*\(\s*([\s\S]*?)\s*\)\s*\(\s*\)/g, (m, inner) => {
-        if (inner.length < 500 && !inner.includes('function')) return inner.trim();
-        return m;
-      });
-      iterations++;
+    // === PASS 3: WeAreDevs string table — try multiple decoding schemes ===
+    // Match flexibly: local z={"{...","{...",...}
+    const waTableMatch = result.match(/local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{((?:"\{[^"]*"\s*[,;]\s*){10,})"\{[^"]*"\s*\}/);
+    if (waTableMatch) {
+      const tName = waTableMatch[1];
+      const rawTable = waTableMatch[0];
+      const stringPattern = /"\{([^"]*)"/g;
+      const decodedStrings = [];
+      let sm;
+      while ((sm = stringPattern.exec(rawTable)) !== null) {
+        const encoded = sm[1];
+        let bestDecoded = encoded;
+        let bestScore = -1;
+        
+        const schemes = [
+          (c, i) => ((c - 1) + 256) % 256,
+          (c, i) => ((c + 1) + 256) % 256,
+          (c, i) => c ^ 1,
+          (c, i) => ((c - (i + 1)) + 256) % 256,
+          (c, i) => ((c - 2) + 256) % 256,
+          (c, i) => ((c + 2) + 256) % 256,
+          (c, i) => c ^ 42,
+          (c, i) => c ^ 123,
+          (c, i) => ((c - 123) + 256) % 256,
+          (c, i) => ((c + (i % 16)) + 256) % 256,
+        ];
+        
+        for (const scheme of schemes) {
+          let decoded = '';
+          for (let i = 0; i < encoded.length; i++) {
+            decoded += String.fromCharCode(scheme(encoded.charCodeAt(i), i));
+          }
+          const score = (decoded.match(/[a-zA-Z_]/g) || []).length;
+          if (score > bestScore) { bestScore = score; bestDecoded = decoded; }
+        }
+        decodedStrings.push(bestDecoded.replace(/"/g, '\\"'));
+      }
+      
+      // Replace positive index lookups: z[1], z[2], etc.
+      for (let idx = 0; idx < decodedStrings.length; idx++) {
+        const luaIdx = idx + 1;
+        const decoded = decodedStrings[idx];
+        if (decoded.length > 2 && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(decoded)) {
+          const directPat = new RegExp(`\\b${tName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\[\\s*${luaIdx}\\s*\\]`, 'g');
+          result = result.replace(directPat, `"${decoded}"`);
+        }
+      }
     }
     
-    // === PASS 3: Decode string.char() numeric tables with arithmetic ===
+    // === PASS 4: Multi-layer loadstring() unwrapping ===
+    for (let iter = 0; iter < 5; iter++) {
+      const before = result.length;
+      result = result.replace(/loadstring\s*\(\s*game:HttpGet(?:Async)?\s*\(\s*["']([^"']+)["']\s*\)\s*\)\s*\(\s*\)/g, (m, url) => `-- Loadstring removed: ${url}`);
+      result = result.replace(/loadstring\s*\(\s*HttpGet\s*\(\s*["']([^"']+)["']\s*\)\s*\)\s*\(\s*\)/g, (m, url) => `-- Loadstring removed: ${url}`);
+      if (result.length === before) break;
+    }
+    
+    // === PASS 5: Decode string.char() numeric tables ===
     result = result.replace(/string\.char\(([^)]{5,})\)/g, (m, nums) => {
       try {
         const parts = nums.split(',').map(n => {
           n = n.trim();
           if (n.includes('+')) { const p = n.split('+'); return parseInt(p[0]) + parseInt(p[1]); }
           if (n.includes('-')) { const p = n.split('-'); return parseInt(p[0]) - parseInt(p[1]); }
-          if (n.includes('^')) { const p = n.split('^'); return Math.pow(parseInt(p[0]), parseInt(p[1])); }
-          if (n.includes('*')) { const p = n.split('*'); return parseInt(p[0]) * parseInt(p[1]); }
           return parseInt(n);
         });
         let decoded = '';
@@ -1003,47 +1089,19 @@ if (interaction.customId === "deobf_prometheus") {
       return m;
     });
     
-    // === PASS 4: WeAreDevs table-based string decoder ===
-    const tablePattern = /local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{(\d+(?:\s*,\s*\d+){10,})\}/g;
-    let tableMatch;
-    while ((tableMatch = tablePattern.exec(result)) !== null) {
-      const tName = tableMatch[1];
-      const nums = tableMatch[2].split(',').map(n => parseInt(n.trim()));
-      const chars = nums.map(n => n >= 0 && n <= 255 ? String.fromCharCode(n) : '?');
-      const lookupPattern = new RegExp(`\\b${tName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\[\\s*(\\d+)\\s*\\]`, 'g');
-      result = result.replace(lookupPattern, (m, idx) => {
-        const i = parseInt(idx) - 1;
-        return chars[i] ? `"${chars[i].replace(/"/g, '\\"')}"` : m;
-      });
-    }
-    result = result.replace(/"([A-Za-z0-9])"\s*\.\.\s*"([A-Za-z0-9])"/g, (m, a, b) => `"${a}${b}"`);
-    
-    // === PASS 5: Unwrap IIFE wrappers ===
+    // === PASS 6: Unwrap simple IIFE wrappers ===
     result = result.replace(/\(\s*function\s*\(\s*\)\s*([\s\S]*?)\s*end\s*\)\s*\(\s*\)/g, (m, body) => {
       if (body.includes('function ') || body.includes('if ')) return body;
       return body;
     });
     
-    // === PASS 6: Remove junk code patterns ===
+    // === PASS 7: Remove junk code and comments ===
     result = result.replace(/if\s+false\s+then[\s\S]*?end/g, '');
     result = result.replace(/while\s+false\s+do[\s\S]*?end/g, '');
     result = result.replace(/do\s*end/g, '');
     result = result.replace(/--\s*\/\/?\s*WeAreDevs[^\n]*/gi, '');
     result = result.replace(/--\s*Prometheus[^\n]*/gi, '');
-    result = result.replace(/--\s*This file was generated[^\n]*/gi, '');
-    
-    // === PASS 7: Decode base64 encoded strings ===
-    result = result.replace(/["']([A-Za-z0-9+/]{30,}={0,2})["']/g, (m, b64) => {
-      try {
-        const buff = Buffer.from(b64, 'base64');
-        const decoded = buff.toString('utf8');
-        if (decoded.length > 10 && /^[\x20-\x7E\s]+$/.test(decoded) && 
-            (decoded.includes('function') || decoded.includes('local') || decoded.includes('='))) {
-          return decoded;
-        }
-      } catch {}
-      return m;
-    });
+    result = result.replace(/--\s*Cleaned & Fixed by Prince Bot[^\n]*/gi, '');
     
     // === PASS 8: Cleanup whitespace ===
     result = result.replace(/[ \t]+\n/g, '\n');
@@ -1832,7 +1890,7 @@ client.on("messageCreate", async msg => {
     const loadingEmbed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle("Fetching URL...")
-      .setDescription(`the url ${scriptUrl}`)
+      .setDescription(scriptUrl)
       .setFooter({ text: timeFooter });
     const loadingMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
     
