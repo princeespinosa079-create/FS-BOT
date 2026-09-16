@@ -76,6 +76,7 @@ const COOLDOWNS = {
   dl: 10 * 60,          // 10 minutes
   et: 30 * 60,          // 30 minutes
   obf: 60 * 60,         // 1 hour
+  fetch: 15,            // 15 seconds
   delwh: 10 * 60        // 10 minutes
 };
 function formatCooldown(remainingSec) {
@@ -398,10 +399,70 @@ function detectObfuscator(src) {
   if (/MoonSec|moonsec|MoonSec V3/i.test(s)) sc["MoonSec V3"] += 50;
   if (/moonsec\.net|moonsec\.gg/i.test(s)) sc["MoonSec V3"] += 25;
   
+  // ── Solara ──
+  if (/Solara|solara/i.test(s)) sc.Solara += 50;
+  if (/solara\.gg|solara\.app/i.test(s)) sc.Solara += 25;
+  
+  // ── Hydrogen ──
+  if (/Hydrogen|hydrogen/i.test(s)) sc.Hydrogen += 50;
+  if (/hydrogen\.gg|hydrogen\.exe/i.test(s)) sc.Hydrogen += 25;
+  
+  // ── Wave ──
+  if (/\bWave\b|wave\.exe/i.test(s)) sc.Wave += 45;
+  
+  // ── Evon ──
+  if (/Evon|evon/i.test(s)) sc.Evon += 45;
+  if (/evon\.gg/i.test(s)) sc.Evon += 25;
+  
+  // ── Synapse X ──
+  if (/Synapse|synapse|Synapse X/i.test(s)) sc["Synapse X"] += 45;
+  if (/syn\.|synapse\.cc/i.test(s)) sc["Synapse X"] += 25;
+  
+  // ── Script-Ware ──
+  if (/Script-Ware|ScriptWare|script-ware/i.test(s)) sc["Script-Ware"] += 45;
+  if (/sw\.|scriptware/i.test(s)) sc["Script-Ware"] += 20;
+  
+  // ── Krnl ──
+  if (/Krnl|krnl/i.test(s)) sc.Krnl += 45;
+  if (/krnl\.gg|krnl\.ca/i.test(s)) sc.Krnl += 25;
+  
+  // ── Fluxus ──
+  if (/Fluxus|fluxus/i.test(s)) sc.Fluxus += 45;
+  if (/fluxteam|fluxus\.gg/i.test(s)) sc.Fluxus += 25;
+  
+  // ── Delta ──
+  if (/Delta|delta/i.test(s)) sc.Delta += 40;
+  if (/delta\.gg|deltaexec/i.test(s)) sc.Delta += 25;
+  
+  // ── Celery ──
+  if (/Celery|celery/i.test(s)) sc.Celery += 40;
+  if (/celery\.gg|celeryexec/i.test(s)) sc.Celery += 25;
+  
+  // ── Electron ──
+  if (/Electron|electron/i.test(s)) sc.Electron += 40;
+  if (/electron\.gg/i.test(s)) sc.Electron += 25;
+  
+  // ── Comet ──
+  if (/Comet|comet/i.test(s)) sc.Comet += 40;
+  if (/comet\.gg/i.test(s)) sc.Comet += 25;
+  
+  // ── Vega X ──
+  if (/Vega X|VegaX|vegax/i.test(s)) sc["Vega X"] += 40;
+  if (/vegax\.gg/i.test(s)) sc["Vega X"] += 25;
+  
+  // ── VM-Obfuscated (general fallback) ──
+  let vmScore = 0;
+  if (/loadstring\s*\(/.test(s)) vmScore += 10;
+  if (/\\x[0-9a-fA-F]{2}/.test(s)) vmScore += 10;
+  if (/string\.char\s*\(/.test(s)) vmScore += 10;
+  if (/setmetatable|getmetatable/.test(s)) vmScore += 5;
+  if (/pcall\s*\(|xpcall\s*\(/.test(s)) vmScore += 5;
+  if (/\bassert\s*\(/.test(s)) vmScore += 5;
+  sc["VM-Obfuscated"] = vmScore;
+  
   // ── Unobfuscate (clean script) ──
-  const anyObf = sc.Luraph + sc.WeAreDevs + sc.Prometheus + sc.Luarmor +
-                  sc.PolSec + sc["25ms"] + sc.Moonveil + sc["MoonSec V3"];
-  if (anyObf < 15) {
+  const allObfScores = Object.values(sc).reduce((a, b) => a + b, 0) - (sc.Unobfuscate || 0);
+  if (allObfScores < 15) {
     if (/function\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\(/.test(s)) sc.Unobfuscate += 25;
     if (/--\s*\[/.test(s)) sc.Unobfuscate += 10;
     if (/local\s+[a-zA-Z_][a-zA-Z0-9_]*\s*=/.test(s) && !/local\s+[A-Za-z_]+\s*=\s*\{/.test(s)) sc.Unobfuscate += 10;
@@ -694,35 +755,44 @@ function extractFilesFromZip(zipBuffer) {
 function cleanLuaScript(text) {
   if (!text) return "";
   let cleaned = text;
-  // Step 1: Remove multi-line comments --[[ ... ]]
+  // Step 1: Remove multi-line comments --[[ ... ]] — but preserve code inside
   cleaned = cleaned.replace(/--\[\[[\s\S]*?\]\]/g, "");
-  // Step 2: Remove single-line comments --... (but keep the line structure)
-  cleaned = cleaned.replace(/--[^\n]*/g, "");
-  // Step 3: Remove print statements (whole lines)
+  // Step 2: Remove single-line comments --... (but NOT if they contain Discord invites)
+  cleaned = cleaned.split("\n").map(line => {
+    // If line has Discord invite in comment, keep the whole line
+    if (/discord\.gg\/|discord\.com\/invite\//i.test(line)) return line;
+    // Otherwise remove comments
+    return line.replace(/--[^\n]*/g, "");
+  }).join("\n");
+  // Step 3: Remove print/warn statements — but only if they are standalone lines
   cleaned = cleaned.split("\n").map(line => {
     const trimmed = line.trim();
-    if (/^print\s*\(/.test(trimmed) && /\)\s*[;]?$/.test(trimmed)) return "";
-    if (/^\s*print\s*\(/.test(line) && /\)\s*;?\s*$/.test(line)) return "";
+    // Only remove if the ENTIRE line is just a print/warn call
+    if (/^print\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return "";
+    if (/^warn\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return "";
     return line;
   }).join("\n");
-  // Step 4: Remove URLs / links
-  cleaned = cleaned.replace(/https?:\/\/[^\s"'()\]]+/g, "");
-  cleaned = cleaned.replace(/www\.[^\s"'()\]]+/g, "");
-  cleaned = cleaned.replace(/discord\.gg\/[^\s"'()\]]+/g, "");
-  // Step 5: Filter — keep lines that look like Lua code
-  // Lines starting with Lua keywords (after indentation)
+  // Step 4: Remove URLs — BUT KEEP Discord invite links
+  cleaned = cleaned.replace(/https?:\/\/[^\s"'()\]]+/g, (match) => {
+    if (/discord\.gg\/|discord\.com\/invite\//i.test(match)) return match;
+    return "";
+  });
+  cleaned = cleaned.replace(/www\.[^\s"'()\]]+/g, (match) => {
+    if (/discord\.gg\/|discord\.com\/invite\//i.test(match)) return match;
+    return "";
+  });
+  // Step 5: Smart filter — KEEP lines that are valid Lua code or contain Discord invites
   const LUA_KEYWORD_START = /^\s*(local|function|if|elseif|else|for|while|repeat|until|return|break|do|end|goto|in|then)\b/;
-  // Lines that are standalone keywords
   const LUA_STANDALONE = /^\s*(break|end|goto|return|true|false|nil|else|then|do|repeat|until)\s*[;]?\s*$/;
-  // Lines with code syntax markers
   const LUA_CODE_MARKERS = /[=+\-*/%^#<>~{}()\[\];:,.]|["']|::|\.\.\.|\.\.|\b\d+\.?\d*\b/;
   cleaned = cleaned.split("\n").filter(line => {
     const trimmed = line.trim();
-    if (!trimmed) return true; // keep blank lines for readability
+    if (!trimmed) return true; // keep blank lines
     if (LUA_STANDALONE.test(trimmed)) return true;
     if (LUA_KEYWORD_START.test(line)) return true;
     if (LUA_CODE_MARKERS.test(trimmed)) return true;
-    // Remove: pure text lines with no code structure
+    // KEEP lines with Discord invites even if they don't look like code
+    if (/discord\.gg\/|discord\.com\/invite\//i.test(line)) return true;
     return false;
   }).join("\n");
   // Step 6: Collapse excessive blank lines (max 2 consecutive)
@@ -970,12 +1040,12 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
   // ─── FINDER PAGINATION BUTTONS ───
   if (interaction.customId === "prev_page" || interaction.customId === "next_page") {
     if (!paginationMenus.has(uid)) {
-      return interaction.reply({ content: "⏳ search expired bro, do `.find` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return interaction.reply({ content: "❌ not yours, do `.find` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     const menu = paginationMenus.get(uid);
     if (Date.now() - menu.createdAt > EXPIRY_MS) {
       paginationMenus.delete(uid);
-      return interaction.reply({ content: "⏳ search expired bro, do `.find` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return interaction.reply({ content: "❌ not yours, do `.find` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     if (interaction.message.id !== menu.messageId) return;
     if (interaction.user.id !== menu.authorId) {
@@ -1854,7 +1924,7 @@ client.on("messageCreate", async msg => {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "obf", isBuyerUser);
+    const cd = checkCommandCooldown(msg.author.id, "fetch", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     
     const arg = txt.split(/\s+/)[1]?.trim();
