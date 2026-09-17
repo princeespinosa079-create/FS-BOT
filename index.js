@@ -1091,6 +1091,40 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     modal.addComponents(row);
     await interaction.showModal(modal).catch(() => {});
     return;
+  // ─── CHANGE FILE BUTTON ───
+  if (interaction.customId.startsWith("change_btn:")) {
+    const tempKey = interaction.customId.replace("change_btn:", "");
+    const temp = changeFileTemp.get(tempKey);
+    
+    // Cleanup expired entries
+    for (const [k, v] of changeFileTemp) {
+      if (v.expiresAt < Date.now()) changeFileTemp.delete(k);
+    }
+    
+    if (!temp) {
+      return interaction.reply({ content: "❌ session expired, run .change again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (temp.authorId !== interaction.user.id) {
+      return interaction.reply({ content: "❌ not yours, run .change so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    
+    // Show modal
+    const modal = new ModalBuilder()
+      .setCustomId(`change_modal:${tempKey}`)
+      .setTitle("Change File Name");
+    const nameInput = new TextInputBuilder()
+      .setCustomId("new_filename")
+      .setLabel("New File Name")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("example: myscript.lua")
+      .setValue(temp.originalName)
+      .setRequired(true);
+    const row = new ActionRowBuilder().addComponents(nameInput);
+    modal.addComponents(row);
+    
+    await interaction.showModal(modal).catch(() => {});
+    return;
+  }
   }
 });
 
@@ -1137,20 +1171,12 @@ client.on("interactionCreate", async interaction => {
     contentText = contentText.replace(/https?:\/\/(?:discord\.gg\/|discord\.com\/invite\/)[^\s"'()\]]+/gi, "https://discord.gg/TBBAUZu8cW");
     
     const newFile = new AttachmentBuilder(Buffer.from(contentText, "utf8"), { name: newName });
-    const avatarURL = interaction.user.displayAvatarURL({ dynamic: true, size: 128 });
-    
-    const doneEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("✅ File Renamed")
-      .setDescription(`**Original:** \`${temp.originalName}\`\n**New:** \`${newName}\``)
-      .setAuthor({ name: `Changed by @${interaction.user.username}`, iconURL: avatarURL });
     
     await interaction.deleteReply().catch(() => {});
     const channel = await client.channels.fetch(temp.channelId).catch(() => null);
     if (channel) {
       await channel.send({
-        content: `<@${interaction.user.id}>`,
-        embeds: [doneEmbed],
+        content: `<@${interaction.user.id}> Here you go bro!`,
         files: [newFile]
       }).catch(() => {});
     }
@@ -2054,7 +2080,7 @@ client.on("messageCreate", async msg => {
         .setColor(REGULAR_COLOR)
         .setTitle("File Preview")
         .setDescription(description)
-        .setAuthor({ name: `Requested by @${msg.author.username} │ Prince Fetch`, iconURL: avatarURL });
+        .setFooter({ text: `Requested by @${msg.author.username} │ Prince Fetch`, iconURL: avatarURL });
       
       // Reply to original message with embed + file
       await replyUser(msg, {
@@ -2329,7 +2355,7 @@ client.on("messageCreate", async msg => {
           .setColor(getEmbedColor(isBuyerUser))
           .setTitle("File Preview")
           .setDescription(description)
-          .setAuthor({ name: `Requested by @${msg.author.username} │ Prince Rename`, iconURL: avatarURL });
+          .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename`, iconURL: avatarURL });
         const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
@@ -2344,7 +2370,7 @@ client.on("messageCreate", async msg => {
     }, delay);
     return;
   }
-  // .change — rename file via modal (upload, reply, or forwarded)
+  // .change — rename file via button + modal (upload, reply, or forwarded)
   // ─────────────────────────────────────────────
   if (/^\.change(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
@@ -2356,10 +2382,6 @@ client.on("messageCreate", async msg => {
       try {
         const ref = await msg.channel.messages.fetch(msg.reference.messageId);
         file = ref.attachments?.first();
-        // Also check if the referenced message itself is a forward with attachments
-        if (!file && ref.embeds?.length) {
-          // Try to get attachment from the original message structure
-        }
       } catch {}
     }
     if (!file) {
@@ -2369,7 +2391,7 @@ client.on("messageCreate", async msg => {
       return replyUser(msg, "❌ only .lua or .txt files bro.").catch(() => {});
     }
     
-    // Store file info temporarily for modal handler
+    // Store file info temporarily for button handler
     const tempKey = `change_${msg.author.id}_${Date.now()}`;
     changeFileTemp.set(tempKey, {
       fileUrl: file.url,
@@ -2379,21 +2401,18 @@ client.on("messageCreate", async msg => {
       expiresAt: Date.now() + 5 * 60 * 1000
     });
     
-    // Show modal
-    const modal = new ModalBuilder()
-      .setCustomId(`change_modal:${tempKey}`)
-      .setTitle("Change File Name");
-    const nameInput = new TextInputBuilder()
-      .setCustomId("new_filename")
-      .setLabel("New File Name")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("example: myscript.lua")
-      .setValue(file.name)
-      .setRequired(true);
-    const row = new ActionRowBuilder().addComponents(nameInput);
-    modal.addComponents(row);
+    // Send message with green Change button — no embed
+    const btnRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`change_btn:${tempKey}`)
+        .setLabel("Change")
+        .setStyle(ButtonStyle.Success)
+    );
     
-    await msg.showModal(modal).catch(() => {});
+    await replyUser(msg, {
+      content: "Click the button below to change your File Name.",
+      components: [btnRow]
+    }).catch(() => {});
     return;
   }
   // .get
