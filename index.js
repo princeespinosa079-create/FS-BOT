@@ -118,7 +118,6 @@ const runningScans = new Set();
 const paginationMenus = new Map();
 const robuxTickets = new Map(); // channelId -> { userId, robloxUser, gamepass, checked, purchased }
 let robuxConfig = null; // { staffRoleId, categoryId, gamepass }
-const changeFileTemp = new Map(); // tempKey -> file info for .change modal
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
@@ -767,12 +766,12 @@ function cleanLuaScript(text) {
     if (/discord\.gg\/TBBAUZu8cW/i.test(line)) return line;
     return line.replace(/--[^\n]*/g, "");
   }).join("\n");
-  // Step 3: Replace standalone print/warn with "best leaker prince"
+  // Step 3: Replace standalone print/warn with "prince is the best"
   cleaned = cleaned.split("\n").map(line => {
     const trimmed = line.trim();
     const indent = line.match(/^(\s*)/)[1];
-    if (/^print\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return indent + 'print("best leaker prince")';
-    if (/^warn\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return indent + 'print("best leaker prince")';
+    if (/^print\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return indent + 'print("prince is the best")';
+    if (/^warn\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return indent + 'print("prince is the best")';
     return line;
   }).join("\n");
   // Step 4: Remove URLs — BUT KEEP our official Discord invite link
@@ -1091,97 +1090,10 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     modal.addComponents(row);
     await interaction.showModal(modal).catch(() => {});
     return;
-  // ─── CHANGE FILE BUTTON ───
-  if (interaction.customId.startsWith("change_btn:")) {
-    const tempKey = interaction.customId.replace("change_btn:", "");
-    const temp = changeFileTemp.get(tempKey);
-    
-    if (!temp || temp.expiresAt < Date.now()) {
-      // Cleanup expired
-      for (const [k, v] of changeFileTemp) if (v.expiresAt < Date.now()) changeFileTemp.delete(k);
-      return interaction.reply({ content: "❌ session expired, run .change again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    if (temp.authorId !== interaction.user.id) {
-      return interaction.reply({ content: "❌ not yours, run .change so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    
-    // Show modal immediately — no delays
-    const modal = new ModalBuilder()
-      .setCustomId(`change_modal:${tempKey}`)
-      .setTitle("Change File Name");
-    const nameInput = new TextInputBuilder()
-      .setCustomId("new_filename")
-      .setLabel("New File Name")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("example: myscript.lua")
-      .setValue(temp.originalName)
-      .setRequired(true);
-    modal.addComponents(new ActionRowBuilder().addComponents(nameInput));
-    
-    interaction.showModal(modal).catch(() => {});
-    return;
-  }
   }
 });
 
 // ============================================================
-// MODAL SUBMIT HANDLER — .change file rename
-// ============================================================
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isModalSubmit()) return;
-  if (!interaction.customId.startsWith("change_modal:")) return;
-  
-  const tempKey = interaction.customId.replace("change_modal:", "");
-  const temp = changeFileTemp.get(tempKey);
-  changeFileTemp.delete(tempKey);
-  
-  // Cleanup expired entries
-  for (const [k, v] of changeFileTemp) {
-    if (v.expiresAt < Date.now()) changeFileTemp.delete(k);
-  }
-  
-  if (!temp || temp.authorId !== interaction.user.id) {
-    return interaction.reply({ content: "❌ session expired, run .change again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  
-  try {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    let newName = interaction.fields.getTextInputValue("new_filename").trim();
-    
-    // Ensure .lua or .txt extension
-    if (!/\.(lua|txt)$/i.test(newName)) {
-      // Keep original extension if user didn't specify
-      const origExt = temp.originalName.match(/\.(lua|txt)$/i);
-      if (origExt) newName += origExt[0].toLowerCase();
-      else newName += ".lua";
-    }
-    // Sanitize filename
-    newName = newName.replace(/[<>:"/\\|?*]/g, "_");
-    
-    const res = await fetch(temp.fileUrl);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const fileData = Buffer.from(await res.arrayBuffer());
-    
-    // Replace Discord invites in content
-    let contentText = fileData.toString("utf8");
-    contentText = contentText.replace(/https?:\/\/(?:discord\.gg\/|discord\.com\/invite\/)[^\s"'()\]]+/gi, "https://discord.gg/TBBAUZu8cW");
-    
-    const newFile = new AttachmentBuilder(Buffer.from(contentText, "utf8"), { name: newName });
-    
-    await interaction.deleteReply().catch(() => {});
-    const channel = await client.channels.fetch(temp.channelId).catch(() => null);
-    if (channel) {
-      await channel.send({
-        content: `<@${interaction.user.id}> Here you go bro!`,
-        files: [newFile]
-      }).catch(() => {});
-    }
-    
-  } catch (e) {
-    console.error("❌ Change modal:", e);
-    try { await interaction.editReply({ content: `❌ failed: ${e.message.slice(0, 100)}` }); } catch {}
-  }
-});
 
 // ============================================================
 // MODAL SUBMIT HANDLER — Robux ticket creation
@@ -1328,13 +1240,6 @@ async function markPurchased(channelId) {
 // ============================================================
 // WATCHDOG
 // ============================================================
-// Cleanup expired .change temp entries every minute
-setInterval(() => {
-  for (const [k, v] of changeFileTemp) {
-    if (v.expiresAt < Date.now()) changeFileTemp.delete(k);
-  }
-}, 60000);
-
 setInterval(async () => {
   if (isReady || reconnecting || Date.now() - lastReady < 60000) return;
   reconnecting = true;
@@ -1911,7 +1816,7 @@ client.on("messageCreate", async msg => {
         .setColor(getEmbedColor(isBuyerUser))
         .setTitle("Script Copy")
         .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
-        .setFooter({ text: `Request by @${msg.author.username}│File → Script` });
+        .setFooter({ text: `Request by @${msg.author.username}│File → Script`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
       await msg.channel.send({
         content: `<@${msg.author.id}> Here is the script bro!`,
         embeds: [embed]
@@ -2071,7 +1976,11 @@ client.on("messageCreate", async msg => {
       if (allLines.length > 5) previewText += "\n...";
       if (previewText.length > 3000) previewText = previewText.slice(0, 3000) + "\n...";
       
-      let description = `\`\`\`lua\n${previewText}\n\`\`\``;
+      const detection = detectObfuscator(fileContent);
+      const detectText = detection.confidence > 0
+        ? `**Detect: ${detection.name} (${detection.confidence}%)**`
+        : `**Detect: Unknown**`;
+      let description = `${detectText}\n\n\`\`\`lua\n${previewText}\n\`\`\``;
       if (foundUrls.length > 0) {
         const uniqueUrls = [...new Set(foundUrls)].slice(0, 10).map(u => `- ${u.replace(/https?:\/\/(?:discord\.gg\/|discord\.com\/invite\/)[^\s"'()\]]+/gi, "https://discord.gg/TBBAUZu8cW")}`);
         let urlSection = `\n\n**URL Found:**\n${uniqueUrls.join("\n")}`;
@@ -2371,51 +2280,6 @@ client.on("messageCreate", async msg => {
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
       }
     }, delay);
-    return;
-  }
-  // .change — rename file via button + modal (upload, reply, or forwarded)
-  // ─────────────────────────────────────────────
-  if (/^\.change(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    
-    // Get file from: direct upload, reply to message, or forwarded
-    let file = msg.attachments?.first();
-    if (!file && msg.reference) {
-      try {
-        const ref = await msg.channel.messages.fetch(msg.reference.messageId);
-        file = ref.attachments?.first();
-      } catch {}
-    }
-    if (!file) {
-      return replyUser(msg, "❌ upload a file, reply to one, or reply to a forwarded file bro.").catch(() => {});
-    }
-    if (!/\.(lua|txt)$/i.test(file.name) && file.contentType && !/text\//.test(file.contentType)) {
-      return replyUser(msg, "❌ only .lua or .txt files bro.").catch(() => {});
-    }
-    
-    // Store file info temporarily for button handler
-    const tempKey = `change_${msg.author.id}_${Date.now()}`;
-    changeFileTemp.set(tempKey, {
-      fileUrl: file.url,
-      originalName: file.name,
-      authorId: msg.author.id,
-      channelId: msg.channelId,
-      expiresAt: Date.now() + 5 * 60 * 1000
-    });
-    
-    // Send message with green Change button — no embed
-    const btnRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`change_btn:${tempKey}`)
-        .setLabel("Change")
-        .setStyle(ButtonStyle.Success)
-    );
-    
-    await replyUser(msg, {
-      content: "Click the button below to change your File Name.",
-      components: [btnRow]
-    }).catch(() => {});
     return;
   }
   // .get
