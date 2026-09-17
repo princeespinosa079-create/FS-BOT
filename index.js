@@ -1096,19 +1096,16 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     const tempKey = interaction.customId.replace("change_btn:", "");
     const temp = changeFileTemp.get(tempKey);
     
-    // Cleanup expired entries
-    for (const [k, v] of changeFileTemp) {
-      if (v.expiresAt < Date.now()) changeFileTemp.delete(k);
-    }
-    
-    if (!temp) {
+    if (!temp || temp.expiresAt < Date.now()) {
+      // Cleanup expired
+      for (const [k, v] of changeFileTemp) if (v.expiresAt < Date.now()) changeFileTemp.delete(k);
       return interaction.reply({ content: "❌ session expired, run .change again.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     if (temp.authorId !== interaction.user.id) {
       return interaction.reply({ content: "❌ not yours, run .change so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     
-    // Show modal
+    // Show modal immediately — no delays
     const modal = new ModalBuilder()
       .setCustomId(`change_modal:${tempKey}`)
       .setTitle("Change File Name");
@@ -1119,10 +1116,9 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       .setPlaceholder("example: myscript.lua")
       .setValue(temp.originalName)
       .setRequired(true);
-    const row = new ActionRowBuilder().addComponents(nameInput);
-    modal.addComponents(row);
+    modal.addComponents(new ActionRowBuilder().addComponents(nameInput));
     
-    await interaction.showModal(modal).catch(() => {});
+    interaction.showModal(modal).catch(() => {});
     return;
   }
   }
@@ -1332,6 +1328,13 @@ async function markPurchased(channelId) {
 // ============================================================
 // WATCHDOG
 // ============================================================
+// Cleanup expired .change temp entries every minute
+setInterval(() => {
+  for (const [k, v] of changeFileTemp) {
+    if (v.expiresAt < Date.now()) changeFileTemp.delete(k);
+  }
+}, 60000);
+
 setInterval(async () => {
   if (isReady || reconnecting || Date.now() - lastReady < 60000) return;
   reconnecting = true;
