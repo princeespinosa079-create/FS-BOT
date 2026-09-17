@@ -118,6 +118,7 @@ const runningScans = new Set();
 const paginationMenus = new Map();
 const robuxTickets = new Map(); // channelId -> { userId, robloxUser, gamepass, checked, purchased }
 let robuxConfig = null; // { staffRoleId, categoryId, gamepass }
+const changeFileTemp = new Map(); // tempKey -> file info for .change modal
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
@@ -669,6 +670,8 @@ async function scanChannel(channel) {
           const fileSize = Number(a.size || 0);
           const url = a.url || a.proxyURL || a.proxy_url;
           if (!baseName || !url) continue;
+          // Skip files that are unavailable (exactly 36 bytes = Discord unavailable placeholder)
+          if (fileSize === 36) continue;
           const isDupBase = existingBases.has(baseName);
           const isDupFull = existingFullNames.has(fullName);
           if (isDupBase || isDupFull) {
@@ -755,30 +758,29 @@ function extractFilesFromZip(zipBuffer) {
 function cleanLuaScript(text) {
   if (!text) return "";
   let cleaned = text;
+  // Step 0: Replace ALL Discord invite links with the official one
+  cleaned = cleaned.replace(/https?:\/\/(?:discord\.gg\/|discord\.com\/invite\/)[^\s"'()\]]+/gi, "https://discord.gg/TBBAUZu8cW");
   // Step 1: Remove multi-line comments --[[ ... ]] — but preserve code inside
   cleaned = cleaned.replace(/--\[\[[\s\S]*?\]\]/g, "");
   // Step 2: Remove single-line comments --... (but NOT if they contain Discord invites)
   cleaned = cleaned.split("\n").map(line => {
-    // If line has Discord invite in comment, keep the whole line
-    if (/discord\.gg\/|discord\.com\/invite\//i.test(line)) return line;
-    // Otherwise remove comments
+    if (/discord\.gg\/TBBAUZu8cW/i.test(line)) return line;
     return line.replace(/--[^\n]*/g, "");
   }).join("\n");
-  // Step 3: Remove print/warn statements — but only if they are standalone lines
+  // Step 3: Replace standalone print/warn with "best leaker prince"
   cleaned = cleaned.split("\n").map(line => {
     const trimmed = line.trim();
-    // Only remove if the ENTIRE line is just a print/warn call
-    if (/^print\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return "";
-    if (/^warn\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return "";
+    const indent = line.match(/^(\s*)/)[1];
+    if (/^print\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return indent + 'print("best leaker prince")';
+    if (/^warn\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return indent + 'print("best leaker prince")';
     return line;
   }).join("\n");
-  // Step 4: Remove URLs — BUT KEEP Discord invite links
+  // Step 4: Remove URLs — BUT KEEP our official Discord invite link
   cleaned = cleaned.replace(/https?:\/\/[^\s"'()\]]+/g, (match) => {
-    if (/discord\.gg\/|discord\.com\/invite\//i.test(match)) return match;
+    if (/discord\.gg\/TBBAUZu8cW/i.test(match)) return match;
     return "";
   });
   cleaned = cleaned.replace(/www\.[^\s"'()\]]+/g, (match) => {
-    if (/discord\.gg\/|discord\.com\/invite\//i.test(match)) return match;
     return "";
   });
   // Step 5: Smart filter — KEEP lines that are valid Lua code or contain Discord invites
@@ -1089,6 +1091,73 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     modal.addComponents(row);
     await interaction.showModal(modal).catch(() => {});
     return;
+  }
+});
+
+// ============================================================
+// MODAL SUBMIT HANDLER — .change file rename
+// ============================================================
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isModalSubmit()) return;
+  if (!interaction.customId.startsWith("change_modal:")) return;
+  
+  const tempKey = interaction.customId.replace("change_modal:", "");
+  const temp = changeFileTemp.get(tempKey);
+  changeFileTemp.delete(tempKey);
+  
+  // Cleanup expired entries
+  for (const [k, v] of changeFileTemp) {
+    if (v.expiresAt < Date.now()) changeFileTemp.delete(k);
+  }
+  
+  if (!temp || temp.authorId !== interaction.user.id) {
+    return interaction.reply({ content: "❌ session expired, run .change again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  
+  try {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    let newName = interaction.fields.getTextInputValue("new_filename").trim();
+    
+    // Ensure .lua or .txt extension
+    if (!/\.(lua|txt)$/i.test(newName)) {
+      // Keep original extension if user didn't specify
+      const origExt = temp.originalName.match(/\.(lua|txt)$/i);
+      if (origExt) newName += origExt[0].toLowerCase();
+      else newName += ".lua";
+    }
+    // Sanitize filename
+    newName = newName.replace(/[<>:"/\\|?*]/g, "_");
+    
+    const res = await fetch(temp.fileUrl);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const fileData = Buffer.from(await res.arrayBuffer());
+    
+    // Replace Discord invites in content
+    let contentText = fileData.toString("utf8");
+    contentText = contentText.replace(/https?:\/\/(?:discord\.gg\/|discord\.com\/invite\/)[^\s"'()\]]+/gi, "https://discord.gg/TBBAUZu8cW");
+    
+    const newFile = new AttachmentBuilder(Buffer.from(contentText, "utf8"), { name: newName });
+    const avatarURL = interaction.user.displayAvatarURL({ dynamic: true, size: 128 });
+    
+    const doneEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("✅ File Renamed")
+      .setDescription(`**Original:** \`${temp.originalName}\`\n**New:** \`${newName}\``)
+      .setAuthor({ name: `Changed by @${interaction.user.username}`, iconURL: avatarURL });
+    
+    await interaction.deleteReply().catch(() => {});
+    const channel = await client.channels.fetch(temp.channelId).catch(() => null);
+    if (channel) {
+      await channel.send({
+        content: `<@${interaction.user.id}>`,
+        embeds: [doneEmbed],
+        files: [newFile]
+      }).catch(() => {});
+    }
+    
+  } catch (e) {
+    console.error("❌ Change modal:", e);
+    try { await interaction.editReply({ content: `❌ failed: ${e.message.slice(0, 100)}` }); } catch {}
   }
 });
 
@@ -1959,15 +2028,38 @@ client.on("messageCreate", async msg => {
       
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       
-      const detection = detectObfuscator(content);
-      const file = new AttachmentBuilder(Buffer.from(content, "utf8"), { name: fileName });
-      const detectText = detection.confidence > 0
-        ? `**Detect: ${detection.name} (${detection.confidence}%)**`
-        : `**Detect: Unknown**`;
+      // Replace Discord invites in content
+      let fileContent = content.replace(/https?:\/\/(?:discord\.gg\/|discord\.com\/invite\/)[^\s"'()\]]+/gi, "https://discord.gg/TBBAUZu8cW");
       
-      // Reply to original message with detect text + file
+      const file = new AttachmentBuilder(Buffer.from(fileContent, "utf8"), { name: fileName });
+      
+      // Build preview embed like .rename
+      const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
+      const foundUrls = content.match(urlRegex) || [];
+      const allLines = fileContent.split("\n");
+      const previewLines = allLines.slice(0, 5);
+      let previewText = previewLines.join("\n");
+      if (allLines.length > 5) previewText += "\n...";
+      if (previewText.length > 3000) previewText = previewText.slice(0, 3000) + "\n...";
+      
+      let description = `\`\`\`lua\n${previewText}\n\`\`\``;
+      if (foundUrls.length > 0) {
+        const uniqueUrls = [...new Set(foundUrls)].slice(0, 10).map(u => `- ${u.replace(/https?:\/\/(?:discord\.gg\/|discord\.com\/invite\/)[^\s"'()\]]+/gi, "https://discord.gg/TBBAUZu8cW")}`);
+        let urlSection = `\n\n**URL Found:**\n${uniqueUrls.join("\n")}`;
+        description += urlSection.slice(0, 800);
+      }
+      
+      const avatarURL = msg.author.displayAvatarURL({ dynamic: true, size: 128 });
+      const resultEmbed = new EmbedBuilder()
+        .setColor(REGULAR_COLOR)
+        .setTitle("File Preview")
+        .setDescription(description)
+        .setAuthor({ name: `Requested by @${msg.author.username} │ Prince Fetch`, iconURL: avatarURL });
+      
+      // Reply to original message with embed + file
       await replyUser(msg, {
-        content: `<@${msg.author.id}> ${detectText}`,
+        content: `<@${msg.author.id}>`,
+        embeds: [resultEmbed],
         files: [file]
       }).catch(() => {});
     } catch (e) {
@@ -2232,11 +2324,12 @@ client.on("messageCreate", async msg => {
           description += urlSection.slice(0, 800);
         }
         
+        const avatarURL = msg.author.displayAvatarURL({ dynamic: true, size: 128 });
         const resultEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
           .setTitle("File Preview")
           .setDescription(description)
-          .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename` });
+          .setAuthor({ name: `Requested by @${msg.author.username} │ Prince Rename`, iconURL: avatarURL });
         const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
@@ -2249,6 +2342,58 @@ client.on("messageCreate", async msg => {
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
       }
     }, delay);
+    return;
+  }
+  // .change — rename file via modal (upload, reply, or forwarded)
+  // ─────────────────────────────────────────────
+  if (/^\.change(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
+    
+    // Get file from: direct upload, reply to message, or forwarded
+    let file = msg.attachments?.first();
+    if (!file && msg.reference) {
+      try {
+        const ref = await msg.channel.messages.fetch(msg.reference.messageId);
+        file = ref.attachments?.first();
+        // Also check if the referenced message itself is a forward with attachments
+        if (!file && ref.embeds?.length) {
+          // Try to get attachment from the original message structure
+        }
+      } catch {}
+    }
+    if (!file) {
+      return replyUser(msg, "❌ upload a file, reply to one, or reply to a forwarded file bro.").catch(() => {});
+    }
+    if (!/\.(lua|txt)$/i.test(file.name) && file.contentType && !/text\//.test(file.contentType)) {
+      return replyUser(msg, "❌ only .lua or .txt files bro.").catch(() => {});
+    }
+    
+    // Store file info temporarily for modal handler
+    const tempKey = `change_${msg.author.id}_${Date.now()}`;
+    changeFileTemp.set(tempKey, {
+      fileUrl: file.url,
+      originalName: file.name,
+      authorId: msg.author.id,
+      channelId: msg.channelId,
+      expiresAt: Date.now() + 5 * 60 * 1000
+    });
+    
+    // Show modal
+    const modal = new ModalBuilder()
+      .setCustomId(`change_modal:${tempKey}`)
+      .setTitle("Change File Name");
+    const nameInput = new TextInputBuilder()
+      .setCustomId("new_filename")
+      .setLabel("New File Name")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("example: myscript.lua")
+      .setValue(file.name)
+      .setRequired(true);
+    const row = new ActionRowBuilder().addComponents(nameInput);
+    modal.addComponents(row);
+    
+    await msg.showModal(modal).catch(() => {});
     return;
   }
   // .get
