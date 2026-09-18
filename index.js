@@ -118,6 +118,7 @@ const runningScans = new Set();
 const paginationMenus = new Map();
 const robuxTickets = new Map(); // channelId -> { userId, robloxUser, gamepass, checked, purchased }
 let robuxConfig = null; // { staffRoleId, categoryId, gamepass }
+let guessGame = null; // { answer, channelId, messageId, active }
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
@@ -208,16 +209,36 @@ async function hasPrinceStatus(userId) {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
     const member = await mainGuild.members.fetch(userId, { force: true });
-    if (!member?.presence?.activities) return false;
+    if (!member?.presence?.activities) return hasServerTag(member);
     for (const act of member.presence.activities) {
       if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
         return true;
       }
     }
-    return false;
+    return hasServerTag(member);
   } catch {
     return false;
   }
+}
+// Check if user has Server Tag (guild-specific avatar set = server identity)
+function hasServerTag(member) {
+  if (!member) return false;
+  // Server Tag = user has set a guild-specific avatar/profile
+  if (member.avatar) return true;
+  // Also check if user has the PRINCE_ROLE already (server-tagged)
+  if (member.roles?.cache?.has(PRINCE_ROLE_ID)) return true;
+  return false;
+}
+// Check if guild supports Server Tag feature
+function guildSupportsServerTag(guild) {
+  if (!guild) return false;
+  // Server Identity/Tag feature is available in all guilds that have it enabled
+  // Check for common features that indicate server identity support
+  const features = guild.features || [];
+  return features.includes("GUILD_SERVER_GUIDE") || 
+         features.includes("MEMBER_VERIFICATION_GATE_ENABLED") ||
+         features.includes("NEWS") ||
+         true; // Most modern guilds support server identity
 }
 async function isInMainGuild(userId) {
   try {
@@ -229,6 +250,8 @@ async function isInMainGuild(userId) {
   }
 }
 function memberHasPrinceStatus(member) {
+  if (!member) return false;
+  if (hasServerTag(member)) return true;
   if (!member?.presence?.activities) return false;
   for (const act of member.presence.activities) {
     if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
@@ -307,19 +330,23 @@ async function checkRegularPermission(msg, needsFileReply = false) {
   }
 
   const hasStatus = await hasPrinceStatus(msg.author.id);
+  const tagSupported = msg.guild ? guildSupportsServerTag(msg.guild) : false;
+  const noStatusMsg = tagSupported
+    ? "❌ put `.gg/TBBAUZu8cW` in your status or use the server tag."
+    : "❌ put `.gg/TBBAUZu8cW` in your status first bro.";
 
   // If channel is restricted
   if (!channelAllowed(msg)) {
     if (hasStatus) {
       return { allowed: false, reason: "❌ not here, dumbass.", isBuyer: false };
     } else {
-      return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro.", isBuyer: false };
+      return { allowed: false, reason: noStatusMsg, isBuyer: false };
     }
   }
 
-  // Must have status
+  // Must have status or server tag
   if (!hasStatus) {
-    return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro.", isBuyer: false };
+    return { allowed: false, reason: noStatusMsg, isBuyer: false };
   }
 
   if (needsFileReply && !isReplyingToFile(msg)) {
@@ -353,7 +380,14 @@ function detectObfuscator(src) {
   let sc = {};
   sc.Luraph = 0; sc.WeAreDevs = 0; sc.Prometheus = 0; sc.Luarmor = 0;
   sc.PolSec = 0; sc["25ms"] = 0; sc.Moonveil = 0; sc["MoonSec V3"] = 0;
-  sc.Unobfuscate = 0;
+  sc.Solara = 0; sc.Hydrogen = 0; sc.Wave = 0; sc.Evon = 0;
+  sc["Synapse X"] = 0; sc["Script-Ware"] = 0; sc.Krnl = 0; sc.Fluxus = 0;
+  sc.Delta = 0; sc.Celery = 0; sc.Electron = 0; sc.Comet = 0;
+  sc["Vega X"] = 0; sc.IronBrew = 0; sc.DarkEccentric = 0; sc.Axon = 0;
+  sc.ProtoSmasher = 0; sc.Elysian = 0; sc.SirHurt = 0; sc.CocoZ = 0;
+  sc.Zaptosis = 0; sc["Obfuscator.Lua"] = 0; sc.LuaMinify = 0;
+  sc["Base64-Encoded"] = 0; sc["XOR-Encrypted"] = 0; sc.Bytecode = 0;
+  sc["VM-Obfuscated"] = 0; sc.Unobfuscate = 0;
   
   // ── Luraph ──
   if (/Luraph|luraph/i.test(s)) sc.Luraph += 50;
@@ -450,6 +484,48 @@ function detectObfuscator(src) {
   if (/Vega X|VegaX|vegax/i.test(s)) sc["Vega X"] += 40;
   if (/vegax\.gg/i.test(s)) sc["Vega X"] += 25;
   
+  // ── More Obfuscators ──
+  // ── IronBrew ──
+  if (/IronBrew|ironbrew|IB2|IB_/i.test(s)) sc.IronBrew += 50;
+  if (/ironbrew\.io/i.test(s)) sc.IronBrew += 25;
+  
+  // ── DarkEccentric ──
+  if (/DarkEccentric|darkeccentric|DE_/i.test(s)) sc.DarkEccentric += 50;
+  
+  // ── Axon ──
+  if (/\bAxon\b|axon\.exe/i.test(s)) sc.Axon += 45;
+  
+  // ── ProtoSmasher ──
+  if (/ProtoSmasher|protosmasher/i.test(s)) sc.ProtoSmasher += 45;
+  
+  // ── Elysian ──
+  if (/Elysian|elysian/i.test(s)) sc.Elysian += 45;
+  
+  // ── SirHurt ──
+  if (/SirHurt|sirhurt/i.test(s)) sc.SirHurt += 45;
+  
+  // ── CocoZ ──
+  if (/CocoZ|cocoz/i.test(s)) sc.CocoZ += 45;
+  
+  // ── Zaptosis ──
+  if (/Zaptosis|zaptosis/i.test(s)) sc.Zaptosis += 45;
+  
+  // ── Obfuscator.Lua ──
+  if (/Obfuscator\.Lua|obfuscator\.lua/i.test(s)) sc["Obfuscator.Lua"] += 45;
+  
+  // ── LuaMinify ──
+  if (/luamin|lua_min|minified\slua/i.test(s)) sc.LuaMinify += 35;
+  
+  // ── Base64-Encoded ──
+  if (/loadstring\s*\(\s*game:HttpGet.*base64|base64decode|base64_decode/i.test(s)) sc["Base64-Encoded"] += 35;
+  
+  // ── XOR-Encrypted ──
+  if (/xor\s*\(|bit\.bxor|string\.char\s*\(\s*\d+\s*%/i.test(s)) sc["XOR-Encrypted"] += 30;
+  
+  // ── Bytecode ──
+  if (/string\.dump|loadstring\s*\(\s*\\x/i.test(s)) sc.Bytecode += 40;
+  if (/\\x[0-9a-fA-F]{2}.*\\x[0-9a-fA-F]{2}.*\\x[0-9a-fA-F]{2}/.test(s)) sc.Bytecode += 20;
+  
   // ── VM-Obfuscated (general fallback) ──
   let vmScore = 0;
   if (/loadstring\s*\(/.test(s)) vmScore += 10;
@@ -533,7 +609,9 @@ function idForFile() {
   return id;
 }
 function getFile(id) {
-  return library.files.find(file => file.id === String(id || "").trim()) || null;
+  const f = library.files.find(file => file.id === String(id || "").trim()) || null;
+  if (f && Number(f.size || 0) === 36) return null; // skip unavailable placeholder files
+  return f;
 }
 async function getFreshUrl(file) {
   try {
@@ -561,7 +639,9 @@ function findFiles(query) {
   if (!query) return [];
   const tokens = query.split(" ").filter(Boolean);
   const seenNames = new Set();
-  return library.files.map(file => {
+  return library.files
+    .filter(file => Number(file.size || 0) !== 36) // skip unavailable placeholder files
+    .map(file => {
     const name = normalize(file.filename);
     let score = 0;
     if (name === query) score += 5000;
@@ -915,6 +995,16 @@ const commands = [
       .setName("gamepass")
       .setDescription("Roblox gamepass link or ID.")
       .setRequired(true))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("guessnumber")
+    .setDescription("Start a guess-the-number game event — Owner Only.")
+    .addIntegerOption(o => o
+      .setName("answer")
+      .setDescription("The correct number (1-10000).")
+      .setRequired(true)
+      .setMinValue(1)
+      .setMaxValue(10000))
     .toJSON()
 ].map(c => c);
 async function registerCommands() {
@@ -1089,6 +1179,27 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     const row = new ActionRowBuilder().addComponents(userInput);
     modal.addComponents(row);
     await interaction.showModal(modal).catch(() => {});
+    return;
+  }
+  // ─── GUESS NUMBER START BUTTON ───
+  if (interaction.customId === "guess_start") {
+    if (!guessGame || !guessGame.answer) {
+      return interaction.reply({ content: "❌ game not set up.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    // Remove original panel and show unlock embed
+    await interaction.update({ embeds: [], components: [] }).catch(() => {});
+    
+    guessGame.active = true;
+    
+    const unlockEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setDescription(
+        "> 🔓 UNLOCK!\n" +
+        "💀 TRY TO WIN LOL!\n" +
+        "🔢 1 - 10000!"
+      );
+    
+    await interaction.channel.send({ embeds: [unlockEmbed] }).catch(() => {});
     return;
   }
 });
@@ -1316,6 +1427,28 @@ client.on("interactionCreate", async interaction => {
       await interaction.channel.send({ embeds: [panelEmbed], components: [row] });
       return;
     }
+    if (interaction.commandName === "guessnumber") {
+      const answer = interaction.options.getInteger("answer");
+      
+      const gameEmbed = new EmbedBuilder()
+        .setColor(REGULAR_COLOR)
+        .setTitle("🧧Game Event")
+        .setDescription("Click the `Start` button below to start the game.");
+      
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("guess_start")
+          .setLabel("Start")
+          .setStyle(ButtonStyle.Success)
+      );
+      
+      guessGame = { answer: answer, channelId: interaction.channelId, active: false };
+      
+      await interaction.deleteReply().catch(() => {});
+      const sentMsg = await interaction.channel.send({ embeds: [gameEmbed], components: [row] });
+      guessGame.messageId = sentMsg.id;
+      return;
+    }
   } catch (e) {
     console.error("❌ Interaction:", e);
     const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
@@ -1329,6 +1462,26 @@ client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
   const txt = (msg.content || "").trim();
   const isDM = !msg.guild;
+  
+  // ─── GUESS NUMBER GAME ───
+  if (guessGame && guessGame.active && msg.channelId === guessGame.channelId) {
+    const numGuess = parseInt(txt.trim(), 10);
+    if (!isNaN(numGuess) && numGuess >= 1 && numGuess <= 10000 && String(numGuess) === txt.trim()) {
+      if (numGuess === guessGame.answer) {
+        guessGame.active = false;
+        const winEmbed = new EmbedBuilder()
+          .setColor(REGULAR_COLOR)
+          .setDescription(
+            `> 🔒 LOCK!\n` +
+            `🎊 WINNER <@${msg.author.id}>\n` +
+            `✅ ANSWER: ${guessGame.answer}`
+          );
+        await msg.channel.send({ embeds: [winEmbed] }).catch(() => {});
+        guessGame = null;
+        return;
+      }
+    }
+  }
 
   // ─────────────────────────────────────────────
   // OWNER-ONLY DOT COMMANDS
@@ -1936,8 +2089,17 @@ client.on("messageCreate", async msg => {
     }
     
     let scriptUrl = arg;
-    const urlMatch = txt.match(/(https?:\/\/[^\s"'()\]]+)/i);
-    if (urlMatch) scriptUrl = urlMatch[1];
+    // Support multiple URL formats: raw URLs, URLs in angle brackets, markdown, etc.
+    const urlPatterns = [
+      /https?:\/\/[^\s"'()\]<>]+/i,           // raw URL
+      /<(https?:\/\/[^>]+)>/i,                     // <URL>
+      /\[.*?\]\((https?:\/\/[^)]+)\)/i,        // [text](URL) markdown
+      /url\s*[:=]\s*["']?(https?:\/\/[^\s"'()\]]+)/i, // url: URL
+    ];
+    for (const pat of urlPatterns) {
+      const m = txt.match(pat);
+      if (m) { scriptUrl = m[1] || m[0]; break; }
+    }
     
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}│ Prince Fetch`;
     const loadingEmbed = new EmbedBuilder()
