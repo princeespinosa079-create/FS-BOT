@@ -1194,9 +1194,9 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     const unlockEmbed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setDescription(
-        "> 🔓 UNLOCK!\n" +
-        "💀 TRY TO WIN LOL!\n" +
-        "🔢 1 - 10000!"
+        "> 🔓 **UNLOCK!**\n" +
+        "> 💀 **TRY TO WIN LOL!**\n" +
+        "> 🔢 **1 - 10000!**"
       );
     
     await interaction.channel.send({ embeds: [unlockEmbed] }).catch(() => {});
@@ -1432,8 +1432,8 @@ client.on("interactionCreate", async interaction => {
       
       const gameEmbed = new EmbedBuilder()
         .setColor(REGULAR_COLOR)
-        .setTitle("🧧Game Event")
-        .setDescription("Click the `Start` button below to start the game.");
+        .setTitle("Game Event")
+        .setDescription("> **Click the** `Start` **button below to start the game.**");
       
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -1472,9 +1472,9 @@ client.on("messageCreate", async msg => {
         const winEmbed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
           .setDescription(
-            `> 🔒 LOCK!\n` +
-            `🎊 WINNER <@${msg.author.id}>\n` +
-            `✅ ANSWER: ${guessGame.answer}`
+            `> 🔒 **LOCK!**\n` +
+            `> 🎊 **WINNER** <@${msg.author.id}>\n` +
+            `> ✅ **ANSWER:** ${guessGame.answer}`
           );
         await msg.channel.send({ embeds: [winEmbed] }).catch(() => {});
         guessGame = null;
