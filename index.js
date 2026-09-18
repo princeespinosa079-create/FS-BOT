@@ -118,7 +118,6 @@ const runningScans = new Set();
 const paginationMenus = new Map();
 const robuxTickets = new Map(); // channelId -> { userId, robloxUser, gamepass, checked, purchased }
 let robuxConfig = null; // { staffRoleId, categoryId, gamepass }
-let guessGame = null; // { answer, channelId, messageId, active }
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
@@ -225,8 +224,6 @@ function hasServerTag(member) {
   if (!member) return false;
   // Server Tag = user has set a guild-specific avatar/profile
   if (member.avatar) return true;
-  // Also check if user has the PRINCE_ROLE already (server-tagged)
-  if (member.roles?.cache?.has(PRINCE_ROLE_ID)) return true;
   return false;
 }
 // Check if guild supports Server Tag feature
@@ -995,16 +992,6 @@ const commands = [
       .setName("gamepass")
       .setDescription("Roblox gamepass link or ID.")
       .setRequired(true))
-    .toJSON(),
-  new SlashCommandBuilder()
-    .setName("guessnumber")
-    .setDescription("Start a guess-the-number game event — Owner Only.")
-    .addIntegerOption(o => o
-      .setName("answer")
-      .setDescription("The correct number (1-10000).")
-      .setRequired(true)
-      .setMinValue(1)
-      .setMaxValue(10000))
     .toJSON()
 ].map(c => c);
 async function registerCommands() {
@@ -1179,27 +1166,6 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     const row = new ActionRowBuilder().addComponents(userInput);
     modal.addComponents(row);
     await interaction.showModal(modal).catch(() => {});
-    return;
-  }
-  // ─── GUESS NUMBER START BUTTON ───
-  if (interaction.customId === "guess_start") {
-    if (!guessGame || !guessGame.answer) {
-      return interaction.reply({ content: "❌ game not set up.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    // Remove original panel and show unlock embed
-    await interaction.update({ embeds: [], components: [] }).catch(() => {});
-    
-    guessGame.active = true;
-    
-    const unlockEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setDescription(
-        "> 🔓 **UNLOCK!**\n" +
-        "> 💀 **TRY TO WIN LOL!**\n" +
-        "> 🔢 **1 - 10000!**"
-      );
-    
-    await interaction.channel.send({ embeds: [unlockEmbed] }).catch(() => {});
     return;
   }
 });
@@ -1427,28 +1393,6 @@ client.on("interactionCreate", async interaction => {
       await interaction.channel.send({ embeds: [panelEmbed], components: [row] });
       return;
     }
-    if (interaction.commandName === "guessnumber") {
-      const answer = interaction.options.getInteger("answer");
-      
-      const gameEmbed = new EmbedBuilder()
-        .setColor(REGULAR_COLOR)
-        .setTitle("Game Event")
-        .setDescription("> **Click the** `Start` **button below to start the game.**");
-      
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("guess_start")
-          .setLabel("Start")
-          .setStyle(ButtonStyle.Success)
-      );
-      
-      guessGame = { answer: answer, channelId: interaction.channelId, active: false };
-      
-      await interaction.deleteReply().catch(() => {});
-      const sentMsg = await interaction.channel.send({ embeds: [gameEmbed], components: [row] });
-      guessGame.messageId = sentMsg.id;
-      return;
-    }
   } catch (e) {
     console.error("❌ Interaction:", e);
     const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
@@ -1462,28 +1406,6 @@ client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
   const txt = (msg.content || "").trim();
   const isDM = !msg.guild;
-  
-  // ─── GUESS NUMBER GAME ───
-  if (guessGame && guessGame.active && msg.channelId === guessGame.channelId) {
-    const numGuess = parseInt(txt.trim(), 10);
-    if (!isNaN(numGuess) && numGuess >= 1 && numGuess <= 10000 && String(numGuess) === txt.trim()) {
-      if (numGuess === guessGame.answer) {
-        guessGame.active = false;
-        const winEmbed = new EmbedBuilder()
-          .setColor(REGULAR_COLOR)
-          .setDescription(
-            `> 🔒 **LOCK!**\n` +
-            `> 🎊 **WINNER** <@${msg.author.id}>\n` +
-            `> ✅ **ANSWER:** ${guessGame.answer}`
-          );
-        await msg.channel.send({ embeds: [winEmbed] }).catch(() => {});
-        guessGame = null;
-        return;
-      }
-    }
-  }
-
-  // ─────────────────────────────────────────────
   // OWNER-ONLY DOT COMMANDS
   // ─────────────────────────────────────────────
   if (/^\.serverlist$/i.test(txt)) {
