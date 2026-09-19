@@ -216,19 +216,36 @@ async function hasPrinceStatus(userId) {
 // Check if user has Server Tag (guild-specific avatar = server identity/profile)
 function hasServerTag(member) {
   if (!member) return false;
-  // Check 1: Server Tag adopted flag (bit 23 = Server Tag badge)
-  const flags = member.flags?.bitfield || 0;
-  if (typeof flags === "bigint") {
-    if (flags & (1n << 23n)) return true;
-  } else {
-    if (flags & (1 << 23)) return true;
-  }
-  // Check 2: Guild-specific avatar set (server profile picture)
-  if (member.avatar) return true;
-  // Check 3: User profile has guild member tag
+  
+  // Method 1: Check via flags enum name (most reliable if discord.js supports it)
   try {
-    if (member.userProfile?.guildMemberProfile?.tag) return true;
+    if (member.flags?.has && member.flags.has("ServerTag")) return true;
   } catch {}
+  
+  // Method 2: Check flag bit 23 (Server Tag adopted)
+  const flags = member.flags?.bitfield || 0;
+  try {
+    if (typeof flags === "bigint") {
+      if (flags & (1n << 23n)) return true;
+    } else if (typeof flags === "number") {
+      if (flags & (1 << 23)) return true;
+    }
+  } catch {}
+  
+  // Method 3: Check raw bitfield string/number
+  try {
+    const flagNum = Number(flags);
+    if (!isNaN(flagNum) && (flagNum & 8388608)) return true; // 1 << 23 = 8388608
+  } catch {}
+  
+  // Method 4: Guild-specific avatar set (server profile picture = adopted identity)
+  if (member.avatar) return true;
+  
+  // Method 5: Check if member has any guild-specific profile data
+  try {
+    if (member.userProfile?.guildMemberProfile) return true;
+  } catch {}
+  
   return false;
 }
 // Check if guild supports Server Tag feature
@@ -264,8 +281,11 @@ async function syncPrinceRole(member) {
     const hasStatus = memberHasPrinceStatus(member);
     const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
     const flags = member.flags?.bitfield || 0;
-    const flagBit = typeof flags === "bigint" ? !!(flags & (1n << 23n)) : !!(flags & (1 << 23));
-    console.log(`👑 Check ${member.user.tag}: flagBit23=${flagBit} avatar=${!!member.avatar} hasStatus=${hasStatus} hasRole=${hasRole}`);
+    const flagBit23 = typeof flags === "bigint" ? !!(flags & (1n << 23n)) : !!(Number(flags) & 8388608);
+    const hasFlagEnum = member.flags?.has ? member.flags.has("ServerTag") : "n/a";
+    const hasGuildAvatar = !!member.avatar;
+    const hasGuildProfile = !!(member.userProfile?.guildMemberProfile);
+    console.log(`👑 Check ${member.user.tag}: flagEnum=${hasFlagEnum} flagBit23=${flagBit23} rawFlags=${flags} avatar=${hasGuildAvatar} profile=${hasGuildProfile} → hasStatus=${hasStatus} hasRole=${hasRole}`);
     if (hasStatus && !hasRole) {
       await member.roles.add(PRINCE_ROLE_ID, "Prince status detected").catch(() => {});
       console.log(`👑 + Prince role: ${member.user.tag}`);
@@ -1035,16 +1055,15 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   if (!newMember || newMember.guild.id !== GUILD_ID) return;
   if (newMember.user.bot) return;
-  // Trigger sync on ANY relevant change:
-  // - Server Tag flag changed
-  // - Guild avatar changed  
-  // - Nickname changed
-  // - Any profile update
-  const oldFlags = oldMember?.flags?.bitfield || 0;
-  const newFlags = newMember.flags?.bitfield || 0;
-  if (oldFlags !== newFlags || 
-      oldMember?.avatar !== newMember.avatar || 
-      oldMember?.nickname !== newMember.nickname) {
+  // Trigger on ANY member change — Server Tag adoption can change various properties
+  // Force a fresh fetch to get the absolute latest data
+  try {
+    const freshMember = await newMember.guild.members.fetch(newMember.id, { force: true });
+    console.log(`🔄 guildMemberUpdate triggered for ${freshMember.user.tag} — checking...`);
+    await syncPrinceRole(freshMember);
+  } catch (e) {
+    console.error("❌ guildMemberUpdate fetch failed:", e.message);
+    // Fallback: try with the member we have
     await syncPrinceRole(newMember);
   }
 });
