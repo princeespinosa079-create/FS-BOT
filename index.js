@@ -216,9 +216,20 @@ async function hasPrinceStatus(userId) {
 // Check if user has Server Tag (guild-specific avatar = server identity/profile)
 function hasServerTag(member) {
   if (!member) return false;
-  // Server Tag = user has set a guild-specific avatar (server profile picture)
-  // member.avatar is the guild-specific avatar hash — null means no server tag set
-  return !!member.avatar;
+  // Check 1: Server Tag adopted flag (bit 23 = Server Tag badge)
+  const flags = member.flags?.bitfield || 0;
+  if (typeof flags === "bigint") {
+    if (flags & (1n << 23n)) return true;
+  } else {
+    if (flags & (1 << 23)) return true;
+  }
+  // Check 2: Guild-specific avatar set (server profile picture)
+  if (member.avatar) return true;
+  // Check 3: User profile has guild member tag
+  try {
+    if (member.userProfile?.guildMemberProfile?.tag) return true;
+  } catch {}
+  return false;
 }
 // Check if guild supports Server Tag feature
 function guildSupportsServerTag(guild) {
@@ -252,6 +263,9 @@ async function syncPrinceRole(member) {
     try { member = await member.guild.members.fetch(member.id, { force: true }); } catch {}
     const hasStatus = memberHasPrinceStatus(member);
     const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
+    const flags = member.flags?.bitfield || 0;
+    const flagBit = typeof flags === "bigint" ? !!(flags & (1n << 23n)) : !!(flags & (1 << 23));
+    console.log(`👑 Check ${member.user.tag}: flagBit23=${flagBit} avatar=${!!member.avatar} hasStatus=${hasStatus} hasRole=${hasRole}`);
     if (hasStatus && !hasRole) {
       await member.roles.add(PRINCE_ROLE_ID, "Prince status detected").catch(() => {});
       console.log(`👑 + Prince role: ${member.user.tag}`);
@@ -1017,12 +1031,20 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   if (newPresence.guild.id !== GUILD_ID) return;
   await syncPrinceRole(newPresence.member);
 });
-// Sync role when user changes server tag (guild avatar)
+// Sync role when user adopts/removes Server Tag
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   if (!newMember || newMember.guild.id !== GUILD_ID) return;
   if (newMember.user.bot) return;
-  // Only sync when guild avatar changes
-  if (oldMember?.avatar !== newMember.avatar) {
+  // Trigger sync on ANY relevant change:
+  // - Server Tag flag changed
+  // - Guild avatar changed  
+  // - Nickname changed
+  // - Any profile update
+  const oldFlags = oldMember?.flags?.bitfield || 0;
+  const newFlags = newMember.flags?.bitfield || 0;
+  if (oldFlags !== newFlags || 
+      oldMember?.avatar !== newMember.avatar || 
+      oldMember?.nickname !== newMember.nickname) {
     await syncPrinceRole(newMember);
   }
 });
