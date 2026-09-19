@@ -970,7 +970,8 @@ const commands = [
       .setRequired(true)
       .addChoices(
         { name: "With Embed", value: "good" },
-        { name: "No Embed", value: "none" }
+        { name: "No Embed", value: "none" },
+        { name: "V2 Embed", value: "v2" }
       ))
     .addStringOption(o => o
       .setName("title")
@@ -1351,6 +1352,20 @@ client.on("interactionCreate", async interaction => {
       }
       if (type === "none") {
         await targetChannel.send({ content: text });
+      } else if (type === "v2") {
+        // V2 Embed — component-based format, uses your text as content
+        const v2Components = [
+          {
+            type: 17,
+            components: [
+              { type: 10, content: text }
+            ],
+            accent_color: REGULAR_COLOR
+          }
+        ];
+        await targetChannel.send({
+          components: v2Components
+        });
       } else {
         const embed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
@@ -2032,9 +2047,51 @@ client.on("messageCreate", async msg => {
     const loadingMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
     
     try {
-      const res = await fetch(scriptUrl);
+      let res = await fetch(scriptUrl);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const content = await res.text();
+      let content = await res.text();
+      
+      // Special handling for orrxl4-protector.com — extract real content from HTML
+      if (/orrxl4-protector\.com/i.test(scriptUrl)) {
+        // Try to find the real URL in the HTML
+        const realUrlMatch = content.match(/(?:window\.location|location\.href|src|href)\s*=\s*["']([^"']*pastefy[^"']*)["']/i)
+          || content.match(/https?:\/\/[^"']*pastefy[^"']*/i)
+          || content.match(/https?:\/\/[^"']*\.lua/i)
+          || content.match(/data:text\/plain;base64,([A-Za-z0-9+/=]+)/i);
+        
+        if (realUrlMatch) {
+          if (realUrlMatch[1] && realUrlMatch[0].startsWith('data:')) {
+            // Base64 encoded content
+            content = Buffer.from(realUrlMatch[1], 'base64').toString('utf8');
+          } else {
+            const realUrl = realUrlMatch[1] || realUrlMatch[0];
+            try {
+              const realRes = await fetch(realUrl);
+              if (realRes.ok) {
+                const realText = await realRes.text();
+                // Only use if it looks like actual code (not HTML)
+                if (!realText.trim().startsWith('<!DOCTYPE') && !realText.trim().startsWith('<html')) {
+                  content = realText;
+                  scriptUrl = realUrl;
+                }
+              }
+            } catch {}
+          }
+        } else {
+          // Try to extract any raw text/code from between pre/script tags
+          const codeMatch = content.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i)
+            || content.match(/<code[^>]*>([\s\S]*?)<\/code>/i)
+            || content.match(/<textarea[^>]*>([\s\S]*?)<\/textarea>/i);
+          if (codeMatch) {
+            content = codeMatch[1]
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&amp;/g, '&')
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'");
+          }
+        }
+      }
       
       // 20 random letters filename
       const randChars = "abcdefghijklmnopqrstuvwxyz";
