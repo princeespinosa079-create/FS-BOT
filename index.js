@@ -213,11 +213,13 @@ async function hasPrinceStatus(userId) {
     return false;
   }
 }
-// Check if user has Server Tag (guild-specific avatar set = server identity)
+// Check if user has Server Tag (guild-specific avatar or nickname = server identity)
 function hasServerTag(member) {
   if (!member) return false;
-  // Server Tag = user has set a guild-specific avatar/profile
+  // Server Tag = user has set a guild-specific avatar
   if (member.avatar) return true;
+  // OR user has set a guild-specific nickname (server display name)
+  if (member.nickname) return true;
   return false;
 }
 // Check if guild supports Server Tag feature
@@ -1014,6 +1016,15 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   if (!newPresence || !newPresence.member) return;
   if (newPresence.guild.id !== GUILD_ID) return;
   await syncPrinceRole(newPresence.member);
+});
+// Sync role when user changes server identity (avatar/nickname)
+client.on("guildMemberUpdate", async (oldMember, newMember) => {
+  if (!newMember || newMember.guild.id !== GUILD_ID) return;
+  if (newMember.user.bot) return;
+  // Only sync if avatar or nickname changed
+  if (oldMember?.avatar !== newMember.avatar || oldMember?.nickname !== newMember.nickname) {
+    await syncPrinceRole(newMember);
+  }
 });
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   if (newMember.guild.id !== GUILD_ID) return;
