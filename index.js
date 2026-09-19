@@ -970,8 +970,7 @@ const commands = [
       .setRequired(true)
       .addChoices(
         { name: "With Embed", value: "good" },
-        { name: "No Embed", value: "none" },
-        { name: "V2 Embed", value: "v2" }
+        { name: "No Embed", value: "none" }
       ))
     .addStringOption(o => o
       .setName("title")
@@ -1352,22 +1351,6 @@ client.on("interactionCreate", async interaction => {
       }
       if (type === "none") {
         await targetChannel.send({ content: text });
-      } else if (type === "v2") {
-        // V2 Embed — component-based format inside embed
-        const v2Embed = {
-          components: [
-            {
-              type: 17,
-              components: [
-                { type: 10, content: text }
-              ],
-              accent_color: REGULAR_COLOR
-            }
-          ]
-        };
-        await targetChannel.send({
-          embeds: [v2Embed]
-        });
       } else {
         const embed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
@@ -2105,6 +2088,14 @@ client.on("messageCreate", async msg => {
       
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       
+      // Check if content is still HTML (not actual code) — reject it
+      const trimmed = content.trim();
+      if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html") || trimmed.startsWith("<!doctype")) {
+        if (loadingMsg) await loadingMsg.delete().catch(() => {});
+        replyUser(msg, "❌ this URL returns HTML, not a raw script file. The website is protecting the content.").catch(() => {});
+        return;
+      }
+      
       // Replace Discord invites in content
       let fileContent = content.replace(/https?:\/\/(?:discord\.gg\/|discord\.com\/invite\/)[^\s"'()\]]+/gi, "https://discord.gg/TBBAUZu8cW");
       
@@ -2246,34 +2237,51 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
-  // .scan — Owner Only
+  // .scan — Owner Only (supports multiple channels: .scan #ch1 #ch2)
   // ─────────────────────────────────────────────
   if (/^\.scan(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    const args = txt.split(/\s+/).slice(1);
-    let ch = null;
-    const mentionMatch = txt.match(/<#(\d+)>/);
-    if (mentionMatch) {
-      try { ch = await client.channels.fetch(mentionMatch[1]); } catch {}
+    
+    // Get all mentioned channels, or use current channel
+    const channels = msg.mentions.channels.size > 0 
+      ? [...msg.mentions.channels.values()] 
+      : [msg.channel];
+    
+    let totalFound = 0, totalMsgs = 0, totalSkipped = 0;
+    let failed = [];
+    
+    for (const ch of channels) {
+      if (!ch?.isTextBased?.()) {
+        failed.push(`<#${ch.id}> (not text)`);
+        continue;
+      }
+      if (runningScans.has(ch.id)) {
+        failed.push(`<#${ch.id}> (already scanning)`);
+        continue;
+      }
+      
+      try {
+        await msg.channel.send(`⚡ Scanning <#${ch.id}>...`).catch(() => {});
+        const r = await scanChannel(ch);
+        totalFound += r.found;
+        totalMsgs += r.messages;
+        totalSkipped += r.skipped;
+        await msg.channel.send(`✅ <#${ch.id}> — 💬 ${r.messages} msgs | 📄 ${r.found} new | 🚫 ${r.skipped} skipped`).catch(() => {});
+      } catch (e) {
+        failed.push(`<#${ch.id}> (${e.message.slice(0, 80)})`);
+      }
     }
-    if (!ch && args[0]) {
-      try { ch = await client.channels.fetch(args[0].trim()); } catch {}
-    }
-    if (!ch && !args[0]) { ch = msg.channel; }
-    if (!ch) { replyUser(msg, "❌ provide a channel: `.scan #channel` or `.scan channel_id`, dumbass.").catch(() => {}); return; }
-    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
-    if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning that channel, bro.").catch(() => {}); return; }
-    const startMsg = await replyUser(msg, `⚡ **Scan started** for <#${ch.id}>...`).catch(() => {});
-    scanChannel(ch).then(r => {
-      const content = `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📁 Channel Files: \`${r.channelTotal}\`\n📚 Library Total: \`${r.total}\``;
-      if (startMsg) startMsg.edit(content).catch(() => {});
-      else replyUser(msg, content).catch(() => {});
-    }).catch(e => {
-      const content = `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\``;
-      if (startMsg) startMsg.edit(content).catch(() => {});
-      else replyUser(msg, content).catch(() => {});
-    });
+    
+    // Summary
+    let summary = `📊 **Scan Complete**\\n`;
+    summary += `📡 Channels: \`${channels.length}\`\\n`;
+    summary += `💬 Messages: \`${totalMsgs}\`\\n`;
+    summary += `📄 New Files: \`${totalFound}\`\\n`;
+    summary += `🚫 Skipped: \`${totalSkipped}\``;
+    if (failed.length > 0) summary += `\\n❌ Failed: ${failed.join(", ")}`;
+    
+    replyUser(msg, summary).catch(() => {});
     return;
   }
   // ─────────────────────────────────────────────
