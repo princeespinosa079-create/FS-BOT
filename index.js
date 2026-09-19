@@ -1353,18 +1353,20 @@ client.on("interactionCreate", async interaction => {
       if (type === "none") {
         await targetChannel.send({ content: text });
       } else if (type === "v2") {
-        // V2 Embed — component-based format, uses your text as content
-        const v2Components = [
-          {
-            type: 17,
-            components: [
-              { type: 10, content: text }
-            ],
-            accent_color: REGULAR_COLOR
-          }
-        ];
+        // V2 Embed — component-based format inside embed
+        const v2Embed = {
+          components: [
+            {
+              type: 17,
+              components: [
+                { type: 10, content: text }
+              ],
+              accent_color: REGULAR_COLOR
+            }
+          ]
+        };
         await targetChannel.send({
-          components: v2Components
+          embeds: [v2Embed]
         });
       } else {
         const embed = new EmbedBuilder()
