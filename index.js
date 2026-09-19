@@ -208,45 +208,21 @@ async function hasPrinceStatus(userId) {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
     const member = await mainGuild.members.fetch(userId, { force: true });
-    return hasServerTag(member);
+    if (!member?.presence?.activities) return false;
+    for (const act of member.presence.activities) {
+      if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
+        return true;
+      }
+    }
+    return false;
   } catch {
     return false;
   }
 }
 // Check if user has Server Tag (guild-specific avatar = server identity/profile)
 function hasServerTag(member) {
-  if (!member) return false;
-  
-  // Method 1: Check via flags enum name (most reliable if discord.js supports it)
-  try {
-    if (member.flags?.has && member.flags.has("ServerTag")) return true;
-  } catch {}
-  
-  // Method 2: Check flag bit 23 (Server Tag adopted)
-  const flags = member.flags?.bitfield || 0;
-  try {
-    if (typeof flags === "bigint") {
-      if (flags & (1n << 23n)) return true;
-    } else if (typeof flags === "number") {
-      if (flags & (1 << 23)) return true;
-    }
-  } catch {}
-  
-  // Method 3: Check raw bitfield string/number
-  try {
-    const flagNum = Number(flags);
-    if (!isNaN(flagNum) && (flagNum & 8388608)) return true; // 1 << 23 = 8388608
-  } catch {}
-  
-  // Method 4: Guild-specific avatar set (server profile picture = adopted identity)
-  if (member.avatar) return true;
-  
-  // Method 5: Check if member has any guild-specific profile data
-  try {
-    if (member.userProfile?.guildMemberProfile) return true;
-  } catch {}
-  
-  return false;
+  // Legacy wrapper — now checks status requirement
+  return memberHasPrinceStatus(member);
 }
 // Check if guild supports Server Tag feature
 function guildSupportsServerTag(guild) {
@@ -269,8 +245,13 @@ async function isInMainGuild(userId) {
   }
 }
 function memberHasPrinceStatus(member) {
-  if (!member) return false;
-  return hasServerTag(member);
+  if (!member?.presence?.activities) return false;
+  for (const act of member.presence.activities) {
+    if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
+      return true;
+    }
+  }
+  return false;
 }
 async function syncPrinceRole(member) {
   try {
@@ -280,12 +261,7 @@ async function syncPrinceRole(member) {
     try { member = await member.guild.members.fetch(member.id, { force: true }); } catch {}
     const hasStatus = memberHasPrinceStatus(member);
     const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
-    const flags = member.flags?.bitfield || 0;
-    const flagBit23 = typeof flags === "bigint" ? !!(flags & (1n << 23n)) : !!(Number(flags) & 8388608);
-    const hasFlagEnum = member.flags?.has ? member.flags.has("ServerTag") : "n/a";
-    const hasGuildAvatar = !!member.avatar;
-    const hasGuildProfile = !!(member.userProfile?.guildMemberProfile);
-    console.log(`👑 Check ${member.user.tag}: flagEnum=${hasFlagEnum} flagBit23=${flagBit23} rawFlags=${flags} avatar=${hasGuildAvatar} profile=${hasGuildProfile} → hasStatus=${hasStatus} hasRole=${hasRole}`);
+    console.log(`👑 Check ${member.user.tag}: hasStatus=${hasStatus} hasRole=${hasRole}`);
     if (hasStatus && !hasRole) {
       await member.roles.add(PRINCE_ROLE_ID, "Prince status detected").catch(() => {});
       console.log(`👑 + Prince role: ${member.user.tag}`);
@@ -350,7 +326,7 @@ async function checkRegularPermission(msg, needsFileReply = false) {
   }
 
   const hasStatus = await hasPrinceStatus(msg.author.id);
-  const noStatusMsg = "❌ use server tag first to get access.";
+  const noStatusMsg = "❌ put `.gg/TBBAUZu8cW` in your status first bro.";
 
   // If channel is restricted
   if (!channelAllowed(msg)) {
@@ -1051,33 +1027,8 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   if (newPresence.guild.id !== GUILD_ID) return;
   await syncPrinceRole(newPresence.member);
 });
-// Sync role when user adopts/removes Server Tag
-client.on("guildMemberUpdate", async (oldMember, newMember) => {
-  if (!newMember || newMember.guild.id !== GUILD_ID) return;
-  if (newMember.user.bot) return;
-  // Trigger on ANY member change — Server Tag adoption can change various properties
-  // Force a fresh fetch to get the absolute latest data
-  try {
-    const freshMember = await newMember.guild.members.fetch(newMember.id, { force: true });
-    console.log(`🔄 guildMemberUpdate triggered for ${freshMember.user.tag} — checking...`);
-    await syncPrinceRole(freshMember);
-  } catch (e) {
-    console.error("❌ guildMemberUpdate fetch failed:", e.message);
-    // Fallback: try with the member we have
-    await syncPrinceRole(newMember);
-  }
-});
-client.on("guildMemberUpdate", async (oldMember, newMember) => {
-  if (newMember.guild.id !== GUILD_ID) return;
-  const hadRole = oldMember?.roles?.cache?.has(PRINCE_ROLE_ID);
-  const hasRole = newMember.roles.cache.has(PRINCE_ROLE_ID);
-  if (hadRole && !hasRole) {
-    if (memberHasPrinceStatus(newMember)) {
-      await newMember.roles.add(PRINCE_ROLE_ID, "Status still active — re-adding role").catch(() => {});
-      console.log(`👑 ↺ Re-added prince role: ${newMember.user.tag}`);
-    }
-  }
-});
+
+
 client.on("error", e => console.error("❌ Discord error:", e));
 client.on("warn", w => console.warn("⚠️ Discord warn:", w));
 // ============================================================
