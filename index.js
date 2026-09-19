@@ -208,12 +208,6 @@ async function hasPrinceStatus(userId) {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
     const member = await mainGuild.members.fetch(userId, { force: true });
-    if (!member?.presence?.activities) return hasServerTag(member);
-    for (const act of member.presence.activities) {
-      if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
-        return true;
-      }
-    }
     return hasServerTag(member);
   } catch {
     return false;
@@ -248,14 +242,7 @@ async function isInMainGuild(userId) {
 }
 function memberHasPrinceStatus(member) {
   if (!member) return false;
-  if (hasServerTag(member)) return true;
-  if (!member?.presence?.activities) return false;
-  for (const act of member.presence.activities) {
-    if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
-      return true;
-    }
-  }
-  return false;
+  return hasServerTag(member);
 }
 async function syncPrinceRole(member) {
   try {
@@ -327,10 +314,7 @@ async function checkRegularPermission(msg, needsFileReply = false) {
   }
 
   const hasStatus = await hasPrinceStatus(msg.author.id);
-  const tagSupported = msg.guild ? guildSupportsServerTag(msg.guild) : false;
-  const noStatusMsg = tagSupported
-    ? "❌ put `.gg/TBBAUZu8cW` in your status or use the server tag."
-    : "❌ put `.gg/TBBAUZu8cW` in your status first bro.";
+  const noStatusMsg = "❌ use server tag first to get access.";
 
   // If channel is restricted
   if (!channelAllowed(msg)) {
@@ -2267,7 +2251,7 @@ client.on("messageCreate", async msg => {
         totalFound += r.found;
         totalMsgs += r.messages;
         totalSkipped += r.skipped;
-        await msg.channel.send(`✅ <#${ch.id}> — 💬 ${r.messages} msgs | 📄 ${r.found} new | 🚫 ${r.skipped} skipped`).catch(() => {});
+        await msg.channel.send(`✅ <#${ch.id}> — 💬 ${r.messages} msgs | 📄 ${r.found} new | 🚫 ${r.skipped} skipped | 📁 Total File: ${r.total}`).catch(() => {});
       } catch (e) {
         failed.push(`<#${ch.id}> (${e.message.slice(0, 80)})`);
       }
@@ -2279,6 +2263,7 @@ client.on("messageCreate", async msg => {
     summary += `💬 Messages: \`${totalMsgs}\`\\n`;
     summary += `📄 New Files: \`${totalFound}\`\\n`;
     summary += `🚫 Skipped: \`${totalSkipped}\``;
+    summary += `\\n📁 Library Total: \`${library.files.length}\``;
     if (failed.length > 0) summary += `\\n❌ Failed: ${failed.join(", ")}`;
     
     replyUser(msg, summary).catch(() => {});
