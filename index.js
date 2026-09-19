@@ -213,14 +213,12 @@ async function hasPrinceStatus(userId) {
     return false;
   }
 }
-// Check if user has Server Tag (guild-specific avatar or nickname = server identity)
+// Check if user has Server Tag (guild-specific avatar = server identity/profile)
 function hasServerTag(member) {
   if (!member) return false;
-  // Server Tag = user has set a guild-specific avatar
-  if (member.avatar) return true;
-  // OR user has set a guild-specific nickname (server display name)
-  if (member.nickname) return true;
-  return false;
+  // Server Tag = user has set a guild-specific avatar (server profile picture)
+  // member.avatar is the guild-specific avatar hash — null means no server tag set
+  return !!member.avatar;
 }
 // Check if guild supports Server Tag feature
 function guildSupportsServerTag(guild) {
@@ -250,6 +248,8 @@ async function syncPrinceRole(member) {
   try {
     if (!member || member.guild.id !== GUILD_ID) return;
     if (member.user.bot) return;
+    // Force-fetch to get latest server avatar data (no stale cache)
+    try { member = await member.guild.members.fetch(member.id, { force: true }); } catch {}
     const hasStatus = memberHasPrinceStatus(member);
     const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
     if (hasStatus && !hasRole) {
@@ -1017,12 +1017,12 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   if (newPresence.guild.id !== GUILD_ID) return;
   await syncPrinceRole(newPresence.member);
 });
-// Sync role when user changes server identity (avatar/nickname)
+// Sync role when user changes server tag (guild avatar)
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   if (!newMember || newMember.guild.id !== GUILD_ID) return;
   if (newMember.user.bot) return;
-  // Only sync if avatar or nickname changed
-  if (oldMember?.avatar !== newMember.avatar || oldMember?.nickname !== newMember.nickname) {
+  // Only sync when guild avatar changes
+  if (oldMember?.avatar !== newMember.avatar) {
     await syncPrinceRole(newMember);
   }
 });
@@ -1768,7 +1768,7 @@ client.on("messageCreate", async msg => {
     const loadingEmbed = new EmbedBuilder()
       .setColor(getEmbedColor(isBuyerUser))
       .setTitle("Deleting Webhook URL...")
-      .setDescription("⏳ Processing...")
+      .setDescription("⏳ Cleaning & fixing...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
 
@@ -2099,13 +2099,27 @@ client.on("messageCreate", async msg => {
       // Build preview embed like .rename
       const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
       const foundUrls = content.match(urlRegex) || [];
-      const allLines = fileContent.split("\n");
-      const previewLines = allLines.slice(0, 5);
-      let previewText = previewLines.join("\n");
-      if (allLines.length > 5) previewText += "\n...";
-      if (previewText.length > 3000) previewText = previewText.slice(0, 3000) + "\n...";
-      
-      const detection = detectObfuscator(fileContent);
+        const allLines = cleaned.split("\n");
+        // Limit preview to MAX 50 words (or 5 lines, whichever comes first)
+        let previewWords = [];
+        let wordCount = 0;
+        let lineCount = 0;
+        for (const line of allLines) {
+          if (lineCount >= 5 || wordCount >= 50) break;
+          const words = line.trim().split(/\s+/).filter(Boolean);
+          for (const w of words) {
+            if (wordCount >= 50) break;
+            previewWords.push(w);
+            wordCount++;
+          }
+          previewWords.push("\n");
+          lineCount++;
+        }
+        let previewText = previewWords.join(" ").replace(/ \n /g, "\n").trim();
+        if (previewText.endsWith("\n")) previewText = previewText.slice(0, -1);
+        if (wordCount >= 50 || lineCount >= 5) previewText += "\n...";
+        // Safety truncation
+        if (previewText.length > 1000) previewText = previewText.slice(0, 1000) + "\n...";
       const detectText = detection.confidence > 0
         ? `**Detect: ${detection.name} (${detection.confidence}%)**`
         : `**Detect: Unknown**`;
@@ -2361,8 +2375,8 @@ client.on("messageCreate", async msg => {
     const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
     const workingEmbed = new EmbedBuilder()
       .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Processing File")
-      .setDescription("⏳ Processing...")
+      .setTitle("Renaming...")
+      .setDescription("⏳ Cleaning & fixing...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
     const delay = isBuyerUser ? 0 : 10000;
@@ -2393,11 +2407,26 @@ client.on("messageCreate", async msg => {
         const finalOutput = cleaned;
         
         const allLines = cleaned.split("\n");
-        const previewLines = allLines.slice(0, 5);
-        let previewText = previewLines.join("\n");
-        if (allLines.length > 5) previewText += "\n...";
+        // Limit preview to MAX 50 words (or 5 lines, whichever comes first)
+        let previewWords = [];
+        let wordCount = 0;
+        let lineCount = 0;
+        for (const line of allLines) {
+          if (lineCount >= 5 || wordCount >= 50) break;
+          const words = line.trim().split(/\s+/).filter(Boolean);
+          for (const w of words) {
+            if (wordCount >= 50) break;
+            previewWords.push(w);
+            wordCount++;
+          }
+          previewWords.push("\n");
+          lineCount++;
+        }
+        let previewText = previewWords.join(" ").replace(/ \n /g, "\n").trim();
+        if (previewText.endsWith("\n")) previewText = previewText.slice(0, -1);
+        if (wordCount >= 50 || lineCount >= 5) previewText += "\n...";
         // Safety truncation
-        if (previewText.length > 3000) previewText = previewText.slice(0, 3000) + "\n...";
+        if (previewText.length > 1000) previewText = previewText.slice(0, 1000) + "\n...";
         
         // Build description with URL section if links found
         let description = `\`\`\`lua\n${previewText}\n\`\`\``;
