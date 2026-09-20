@@ -997,123 +997,75 @@ function goofyscator(source, settings) {
 // ============================================================
 function obfuscateLua(source) {
   if (!source || typeof source !== "string") return source;
-
-  // Helpers
-  const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-  const randStr = (len) => {
-    const c = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let r = "_";
-    for (let i = 0; i < len; i++) r += c[Math.floor(Math.random() * c.length)];
-    return r;
+  const crypto = require("crypto");
+  
+  const XOR_KEY = crypto.randomBytes(16).toString("hex");
+  const VM_KEY = crypto.randomBytes(8).toString("hex");
+  const randStr = (len) => crypto.randomBytes(len).toString("hex").slice(0, len);
+  
+  const usedNames = new Set();
+  const genName = () => {
+    let n;
+    do { n = "_" + randStr(6 + Math.floor(Math.random() * 6)); } while (usedNames.has(n));
+    usedNames.add(n);
+    return n;
   };
-  const xorKey = randStr(randInt(8, 16));
-
-  // Encrypt string with XOR key
-  function encryptString(str, key) {
-    let bytes = [];
+  
+  const encryptStr = (str, key) => {
+    let out = [];
     for (let i = 0; i < str.length; i++) {
-      bytes.push(str.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+      out.push(str.charCodeAt(i) ^ key.charCodeAt(i % key.length));
     }
-    return bytes.join(",");
-  }
-
-  // Step 1: Encrypt all string literals
-  let processed = source;
+    return Buffer.from(new Uint8Array(out)).toString("base64");
+  };
+  
   const stringTable = [];
-  const tableVar = randStr(randInt(5, 10));
-  const decodeFunc = randStr(randInt(5, 10));
-  const keyVar = randStr(randInt(5, 10));
-  const strArg = randStr(4);
-
-  processed = processed.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'/g, (match) => {
-    const inner = match.slice(1, -1);
-    if (inner.length < 1) return match;
+  let code = source.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'/g, (m) => {
+    const inner = m.slice(1, -1);
+    if (inner.length < 2) return m;
     const idx = stringTable.length;
-    stringTable.push(encryptString(inner, xorKey));
-    return `${decodeFunc}(${tableVar}[${idx}])`;
+    stringTable.push(encryptStr(inner, XOR_KEY));
+    return genName() + "[" + idx + "]";
   });
-
-  // Step 2: Randomize local variable names
+  
   const varMap = new Map();
-  const localVarRegex = /\blocal\s+(\w+)/g;
-  let varMatch;
-  while ((varMatch = localVarRegex.exec(processed)) !== null) {
-    const name = varMatch[1];
-    if (!varMap.has(name) && name.length > 1 && !name.startsWith("_")) {
-      varMap.set(name, randStr(randInt(6, 12)));
-    }
+  code = code.replace(/\blocal\s+(function\s+)?([a-zA-Z_]\w*)/g, (m, isFunc, name) => {
+    const reserved = ["string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber","loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error","warn","print","select","unpack","require","game","workspace","script","bit"];
+    if (reserved.includes(name) || varMap.has(name)) return m;
+    varMap.set(name, genName());
+    return isFunc ? "local function " + varMap.get(name) : "local " + varMap.get(name);
+  });
+  for (const [old, n] of varMap) {
+    const re = new RegExp("\\b" + old.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "g");
+    code = code.replace(re, n);
   }
-  for (const [oldName, newName] of varMap) {
-    const re = new RegExp(`\\b${oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, "g");
-    processed = processed.replace(re, newName);
+  
+  const codeBytes = [];
+  for (let i = 0; i < code.length; i++) {
+    codeBytes.push(code.charCodeAt(i) ^ VM_KEY.charCodeAt(i % VM_KEY.length));
   }
-
-  // Step 3: Insert junk code at random points
-  function genJunk() {
-    const jv1 = randStr(6), jv2 = randStr(6), jv3 = randStr(6);
-    const patterns = [
-      `local ${jv1} = ${randInt(1, 99999)}\nlocal ${jv2} = ${jv1} + ${randInt(1, 100)}\nif ${jv2} > ${randInt(1, 50)} then local ${jv3} = ${jv1} * ${randInt(2, 5)} end`,
-      `local ${jv1} = {}\nfor ${jv2} = 1, ${randInt(2, 5)} do ${jv1}[${jv2}] = ${randInt(1, 100)} end`,
-      `local function ${jv1}(${jv2}) return ${jv2} + ${randInt(1, 10)} end`,
-    ];
-    return "-- JUNK\n" + patterns[Math.floor(Math.random() * patterns.length)] + "\n-- /JUNK";
-  }
-
-  const lines = processed.split("\n");
-  let junkInserted = 0;
-  const maxJunk = Math.min(10, Math.floor(lines.length / 12) + 2);
-  let safety = 0;
-  while (junkInserted < maxJunk && safety < 200) {
-    safety++;
-    const pos = randInt(2, lines.length - 2);
-    const l = lines[pos];
-    if (l && !l.includes("function") && !l.includes("return") && !l.includes("end") && !l.includes("JUNK")) {
-      lines.splice(pos, 0, genJunk());
-      junkInserted++;
-    }
-  }
-  processed = lines.join("\n");
-
-  // Step 4: Anti-debug / anti-dump checks
-  const adVar = randStr(6);
-  const antiDebug = `-- ANTI-DEBUG
-local ${adVar} = getfenv and getfenv(1) or _G
-if ${adVar}.debug and ${adVar}.debug.getinfo then
-  if ${adVar}.debug.getinfo(1).what ~= "Lua" then error("Protected") end
-end
-if checkcaller and not checkcaller() then error("Protected") end
-`;
-
-  // Step 5: Build final VM-wrapped output
-  const tableStr = "{" + stringTable.join(",") + "}";
-  const vmVar = randStr(6);
-  const resultVar = randStr(6);
-  const loopVar = randStr(4);
-
-  const header = `-- Prince Obfuscator — Ultra Protected
-local ${keyVar} = "${xorKey}"
-local ${tableVar} = {${tableStr}}
-local function ${decodeFunc}(${strArg})
-  local r = ""
-  for ${loopVar} = 1, #${strArg} do
-    r = r .. string.char(bit.bxor(${strArg}[${loopVar}], ${keyVar}:byte((${loopVar} - 1) % #${keyVar} + 1)))
-  end
-  return r
-end
-${antiDebug}`;
-
-  const footer = `
-local ${vmVar} = [==[
-${processed}
-]==]
-local ${resultVar} = loadstring(${vmVar})
-if ${resultVar} then
-  setfenv and setfenv(${resultVar}, setmetatable({[${decodeFunc}] = ${decodeFunc}}, {__index = _G}))
-  return ${resultVar}()
-end`;
-
-  return header + footer;
+  
+  const v_vm = genName(), v_key = genName(), v_tab = genName(), v_dec = genName();
+  const v_res = genName(), v_env = genName(), v_fn = genName();
+  const v_i = genName(), v_r = genName(), v_s = genName(), v_k = genName();
+  const v_b = genName();
+  
+  const bytecodeStr = codeBytes.join(",");
+  const tableStr = "{" + stringTable.map(s => '"' + s + '"').join(",") + "}";
+  
+  return "local " + v_key + '="' + XOR_KEY + '"\n' +
+    "local " + v_tab + "=" + tableStr + "\n" +
+    "local " + v_dec + "=function(" + v_s + "," + v_k + ")local " + v_r + '=""for ' + v_i + "=1,#" + v_s + "do " + v_r + "=" + v_r + "..string.char(" + v_s + ":byte(" + v_i + ")%" + v_k + ":byte((" + v_i + "-1)%" + "#" + v_k + "+1))end return " + v_r + " end\n" +
+    "local " + v_vm + '="' + VM_KEY + '"\n' +
+    "local " + v_b + "={" + bytecodeStr + "}\n" +
+    "local " + v_res + '=""\n' +
+    "for " + v_i + "=1,#" + v_b + "do " + v_res + "=" + v_res + "..string.char(bit.bxor(" + v_b + "[" + v_i + "]," + v_vm + ":byte((" + v_i + "-1)%" + "#" + v_vm + "+1)))end\n" +
+    "local " + v_env + "=setmetatable({[" + v_dec + "]=" + v_dec + "},{__index=function(_,k)return _G[k]end})\n" +
+    "local " + v_fn + "=loadstring(" + v_res + ")\n" +
+    "if " + v_fn + " then setfenv(" + v_fn + "," + v_env + ")return " + v_fn + "(...)end";
 }
+
+
 // ============================================================
 // SLASH COMMANDS — only /say (global, DM support)
 // ============================================================
@@ -1307,16 +1259,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       return interaction.reply({ content: "❌ use in server.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     
-    // First: disable the Start button (update original panel)
-    try {
-      const disabledRow = new ActionRowBuilder().addComponents(
-        ButtonBuilder.from(interaction.message.components[0].components[0])
-          .setDisabled(true)
-      );
-      await interaction.update({ components: [disabledRow] }).catch(() => {});
-    } catch {}
-    
-    // Then: show modal
+    // Build modal
     const modal = new ModalBuilder()
       .setCustomId("whs_modal")
       .setTitle("Webhook Spammer");
@@ -1340,7 +1283,18 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       new ActionRowBuilder().addComponents(msgInput)
     );
     
+    // Show modal FIRST — this is critical, must happen before any reply/update
     await interaction.showModal(modal).catch(() => {});
+    
+    // Then disable the button separately (doesn't consume the interaction)
+    try {
+      const disabledRow = new ActionRowBuilder().addComponents(
+        ButtonBuilder.from(interaction.message.components[0].components[0])
+          .setDisabled(true)
+      );
+      await interaction.message.edit({ components: [disabledRow] }).catch(() => {});
+    } catch {}
+    
     return;
   }
 
@@ -2624,7 +2578,7 @@ client.on("messageCreate", async msg => {
         const resEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
           .setTitle("📥 TikTok Download")
-          .setDescription(`✅ **No Watermark**\n\n🔗 **Download:** [Click Here](${videoUrl})`)
+          .setDescription(`🔗 **Download:** [Click Here](${videoUrl})`)
           .setFooter({ text: `Request by @${msg.author.username}│TikTok DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
         
         if (sentMsg) await sentMsg.delete().catch(() => {});
