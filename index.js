@@ -1306,6 +1306,17 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     if (!interaction.member) {
       return interaction.reply({ content: "❌ use in server.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
+    
+    // First: disable the Start button (update original panel)
+    try {
+      const disabledRow = new ActionRowBuilder().addComponents(
+        ButtonBuilder.from(interaction.message.components[0].components[0])
+          .setDisabled(true)
+      );
+      await interaction.update({ components: [disabledRow] }).catch(() => {});
+    } catch {}
+    
+    // Then: show modal
     const modal = new ModalBuilder()
       .setCustomId("whp_modal")
       .setTitle("Webhook Spammer");
@@ -1314,15 +1325,14 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       .setCustomId("whp_url")
       .setLabel("Webhook URL")
       .setStyle(TextInputStyle.Short)
-      .setPlaceholder("https://discord.com/api/webhooks/...")
+      .setPlaceholder("The Webhook URL...")
       .setRequired(true);
     
     const msgInput = new TextInputBuilder()
       .setCustomId("whp_message")
       .setLabel("Spam Message")
       .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("@everyone https://discord.gg/...")
-      .setValue("@everyone https://discord.gg/TBBAUZu8cW")
+      .setPlaceholder("Your message...")
       .setRequired(true);
     
     modal.addComponents(
@@ -1375,12 +1385,11 @@ client.on("interactionCreate", async interaction => {
     
     await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
     
-    const spamMessages = [spamMsg, spamMsg, spamMsg + " @everyone", spamMsg + " @here"];
     let sent = 0, failed = 0;
     const maxMessages = 200;
     
     for (let i = 0; i < maxMessages; i++) {
-      const contentMsg = spamMessages[Math.floor(Math.random() * spamMessages.length)];
+      const contentMsg = spamMsg;
       try {
         const res = await fetch(webhookUrl, {
           method: "POST",
@@ -1411,7 +1420,13 @@ client.on("interactionCreate", async interaction => {
         .setStyle(ButtonStyle.Danger)
     );
     
-    await interaction.editReply({ embeds: [resultEmbed], components: [cancelRow] }).catch(() => {});
+    // Use followUp to ensure components show properly
+    await interaction.deleteReply().catch(() => {});
+    await interaction.followUp({ 
+      embeds: [resultEmbed], 
+      components: [cancelRow], 
+      flags: MessageFlags.Ephemeral 
+    }).catch(() => {});
     return;
   }
   if (interaction.customId !== "robux_modal") return;
