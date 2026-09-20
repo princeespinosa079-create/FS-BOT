@@ -1301,8 +1301,8 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     paginationMenus.set(uid, menu);
     return;
   }
-  // ─── WHP START BUTTON ───
-  if (interaction.customId === "whp_start") {
+  // ─── WHS START BUTTON ───
+  if (interaction.customId === "whs_start") {
     if (!interaction.member) {
       return interaction.reply({ content: "❌ use in server.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
@@ -1318,18 +1318,18 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     
     // Then: show modal
     const modal = new ModalBuilder()
-      .setCustomId("whp_modal")
+      .setCustomId("whs_modal")
       .setTitle("Webhook Spammer");
     
     const urlInput = new TextInputBuilder()
-      .setCustomId("whp_url")
+      .setCustomId("whs_url")
       .setLabel("Webhook URL")
       .setStyle(TextInputStyle.Short)
       .setPlaceholder("The Webhook URL...")
       .setRequired(true);
     
     const msgInput = new TextInputBuilder()
-      .setCustomId("whp_message")
+      .setCustomId("whs_message")
       .setLabel("Spam Message")
       .setStyle(TextInputStyle.Paragraph)
       .setPlaceholder("Your message...")
@@ -1372,9 +1372,9 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isModalSubmit()) return;
-  if (interaction.customId === "whp_modal") {
-    const webhookUrl = interaction.fields.getTextInputValue("whp_url");
-    const spamMsg = interaction.fields.getTextInputValue("whp_message");
+  if (interaction.customId === "whs_modal") {
+    const webhookUrl = interaction.fields.getTextInputValue("whs_url");
+    const spamMsg = interaction.fields.getTextInputValue("whs_message");
     const avatarURL = interaction.user.displayAvatarURL({ dynamic: true, size: 128 });
     
     // Quick webhook validation
@@ -1411,11 +1411,11 @@ client.on("interactionCreate", async interaction => {
       .setColor(0x2B2D31)
       .setTitle("Webhook Raid Complete")
       .setDescription(`✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n🌐 **Status:** Done`)
-      .setFooter({ text: `Request by @${interaction.user.username}│Webhook Spammer.`, iconURL: avatarURL });
+      .setFooter({ text: `Request by @${interaction.user.username}│Webhook Spammer`, iconURL: avatarURL });
     
     const cancelRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("whp_cancel")
+        .setCustomId("whs_cancel")
         .setLabel("Cancel")
         .setStyle(ButtonStyle.Danger)
     );
@@ -1504,7 +1504,7 @@ client.on("interactionCreate", async interaction => {
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
-  if (interaction.customId === "whp_cancel") {
+  if (interaction.customId === "whs_cancel") {
     await interaction.message.delete().catch(() => {});
     return;
   }
@@ -2143,7 +2143,7 @@ client.on("messageCreate", async msg => {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "delwh", isBuyerUser);
+    const cd = checkCommandCooldown(msg.author.id, "whs", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     
     const arg = txt.split(/\s+/)[1]?.trim();
@@ -2196,9 +2196,9 @@ client.on("messageCreate", async msg => {
   // ─────────────────────────────────────────────
   // ─────────────────────────────────────────────
   // ─────────────────────────────────────────────
-  // .whp — Webhook Spammer (with Start button + modal)
+  // .whs — Webhook Spammer (with Start button + modal)
   // ─────────────────────────────────────────────
-  if (/^\.whp(?:\s|$)/i.test(txt)) {
+  if (/^\.whs(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
     
@@ -2208,7 +2208,7 @@ client.on("messageCreate", async msg => {
     
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("whp_start")
+        .setCustomId("whs_start")
         .setLabel("Start")
         .setStyle(ButtonStyle.Success)
     );
@@ -2491,8 +2491,8 @@ client.on("messageCreate", async msg => {
       .setDescription("⏳ Processing...")
       .setFooter({ text: timeFooter });
     const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-    const delay = isBuyerUser ? 0 : 10000;
-    setTimeout(async () => {
+    // NO DELAY — FAST response
+    (async () => {
       try {
         const res = await fetch(file.url);
         const text = await res.text();
@@ -2567,7 +2567,7 @@ client.on("messageCreate", async msg => {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
       }
-    }, delay);
+    })();
     return;
   }
   // .get
@@ -2593,6 +2593,51 @@ client.on("messageCreate", async msg => {
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "dl", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
+
+    // Check if TikTok URL — NO WATERMARK
+    if (/tiktok\.com|vm\.tiktok\.com/i.test(arg)) {
+      const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
+      try {
+        // Try cobalt.tools first (clean, no watermark)
+        let videoUrl = null;
+        try {
+          const apiRes = await fetch("https://api.cobalt.tools/api/json", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify({ url: arg })
+          });
+          const data = await apiRes.json();
+          if (data?.url) videoUrl = data.url;
+        } catch {}
+        
+        // Fallback: tikwm
+        if (!videoUrl) {
+          try {
+            const api2 = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(arg)}`);
+            const d2 = await api2.json();
+            if (d2?.data?.play) videoUrl = d2.data.play;
+          } catch {}
+        }
+        
+        if (!videoUrl) throw new Error("Failed to get video");
+        
+        const resEmbed = new EmbedBuilder()
+          .setColor(getEmbedColor(isBuyerUser))
+          .setTitle("📥 TikTok Download")
+          .setDescription(`✅ **No Watermark**\n\n🔗 **Download:** [Click Here](${videoUrl})`)
+          .setFooter({ text: `Request by @${msg.author.username}│TikTok DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
+        
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        await msg.channel.send({
+          content: `<@${msg.author.id}> **Here you go bro!**`,
+          embeds: [resEmbed]
+        }).catch(() => {});
+      } catch (e) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, `❌ failed: ${e.message.slice(0, 80)}`).catch(() => {});
+      }
+      return;
+    }
 
     // Check if input is a URL
     if (/^https?:\/\//i.test(arg) || /cdn\.discordapp\.com/i.test(arg) || /media\.discordapp\.net/i.test(arg)) {
