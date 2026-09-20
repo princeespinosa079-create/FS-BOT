@@ -137,6 +137,7 @@ const paginationMenus = new Map();
 const robuxTickets = new Map(); // channelId -> { userId, robloxUser, gamepass, checked, purchased }
 let robuxConfig = null; // { staffRoleId, categoryId, gamepass }
 const obfTemp = new Map(); // userId -> { source, fileName, isBuyerUser }
+const whsWebhookUrls = new Map(); // messageId -> webhookUrl
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
@@ -1053,7 +1054,8 @@ function obfuscateLua(source) {
   const bytecodeStr = codeBytes.join(",");
   const tableStr = "{" + stringTable.map(s => '"' + s + '"').join(",") + "}";
   
-  return "local " + v_key + '="' + XOR_KEY + '"\n' +
+  return "-- This file was generated using Prince Obfuscator\\n" +
+    "local " + v_key + '="' + XOR_KEY + '"\\n' +
     "local " + v_tab + "=" + tableStr + "\n" +
     "local " + v_dec + "=function(" + v_s + "," + v_k + ")local " + v_r + '=""for ' + v_i + "=1,#" + v_s + "do " + v_r + "=" + v_r + "..string.char(" + v_s + ":byte(" + v_i + ")%" + v_k + ":byte((" + v_i + "-1)%" + "#" + v_k + "+1))end return " + v_r + " end\n" +
     "local " + v_vm + '="' + VM_KEY + '"\n' +
@@ -1367,20 +1369,25 @@ client.on("interactionCreate", async interaction => {
       .setDescription(`✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n🌐 **Status:** Done`)
       .setFooter({ text: `Request by @${interaction.user.username}│Webhook Spammer`, iconURL: avatarURL });
     
-    const cancelRow = new ActionRowBuilder().addComponents(
+    const removeRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("whs_cancel")
-        .setLabel("Cancel")
+        .setCustomId("whs_remove")
+        .setLabel("Remove")
         .setStyle(ButtonStyle.Danger)
     );
     
     // Use followUp to ensure components show properly
-    await interaction.deleteReply().catch(() => {});
-    await interaction.followUp({ 
+    // Store webhook URL for Remove button handler
+    const resultMsg = await interaction.followUp({ 
       embeds: [resultEmbed], 
-      components: [cancelRow], 
+      components: [removeRow], 
       flags: MessageFlags.Ephemeral 
     }).catch(() => {});
+    if (resultMsg) {
+      whsWebhookUrls.set(resultMsg.id, webhookUrl);
+      // Auto-cleanup after 1 hour
+      setTimeout(() => whsWebhookUrls.delete(resultMsg.id), 60 * 60 * 1000);
+    }
     return;
   }
   if (interaction.customId !== "robux_modal") return;
@@ -1458,9 +1465,16 @@ client.on("interactionCreate", async interaction => {
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
-  if (interaction.customId === "whs_cancel") {
+  if (interaction.customId === "whs_remove") {
+    const webhookUrl = whsWebhookUrls.get(interaction.message.id);
+    if (webhookUrl) {
+      try {
+        await fetch(webhookUrl, { method: "DELETE" });
+      } catch {}
+      whsWebhookUrls.delete(interaction.message.id);
+    }
     await interaction.message.delete().catch(() => {});
-    return;
+    return interaction.reply({ content: "✅ Webhook removed.", flags: MessageFlags.Ephemeral }).catch(() => {});
   }
   if (interaction.customId === "robux_close") {
     const ticket = robuxTickets.get(interaction.channel.id);
