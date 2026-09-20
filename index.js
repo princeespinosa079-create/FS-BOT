@@ -2074,6 +2074,13 @@ client.on("messageCreate", async msg => {
       let failed = 0;
       const maxMessages = 200;
       
+      // Quick check if webhook exists first
+      const probeRes = await fetch(webhookUrl, { method: "GET" }).catch(() => null);
+      if (!probeRes || probeRes.status === 404) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        return replyUser(msg, "❌ Not Found.").catch(() => {});
+      }
+      
       for (let i = 0; i < maxMessages; i++) {
         const msgContent = spamMessages[Math.floor(Math.random() * spamMessages.length)];
         try {
@@ -2087,8 +2094,8 @@ client.on("messageCreate", async msg => {
           } else if (res.status === 429) {
             try {
               const rlData = await res.json();
-              const wait = (rlData.retry_after || 1) * 1000;
-              await new Promise(r => setTimeout(r, Math.min(wait, 3000)));
+              const wait = (rlData.retry_after || 0.5) * 1000;
+              await new Promise(r => setTimeout(r, Math.min(wait, 1000)));
             } catch {}
           } else {
             failed++;
@@ -2096,7 +2103,8 @@ client.on("messageCreate", async msg => {
         } catch {
           failed++;
         }
-        await new Promise(r => setTimeout(r, 150));
+        // SUPER FAST: minimal delay
+        await new Promise(r => setTimeout(r, 30));
       }
       
       if (sentMsg) await sentMsg.delete().catch(() => {});
@@ -2456,7 +2464,7 @@ client.on("messageCreate", async msg => {
           .setColor(getEmbedColor(isBuyerUser))
           .setTitle("File Preview")
           .setDescription(description)
-          .setFooter({ text: `Requested by @${msg.author.username} │ Prince Rename`, iconURL: avatarURL });
+          .setFooter({ text: `pfp photo Requested by @${msg.author.username} │ Clean & fixed`, iconURL: avatarURL });
         const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput), { name: outputName });
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
