@@ -853,10 +853,10 @@ function cleanLuaScript(text) {
   if (!text || typeof text !== "string") return text;
   let cleaned = text;
 
-  // ─── STEP 0: Replace ALL Discord invites with official ───
+  // STEP 0: Replace ALL Discord invites with official
   cleaned = cleaned.replace(/discord\.(gg|com\/invite)\/[a-zA-Z0-9_-]+/gi, "https://discord.gg/TBBAUZu8cW");
 
-  // ─── STEP 1: Remove IP grabbers & malicious patterns ───
+  // STEP 1: Remove IP grabbers & malicious patterns
   const grabberPatterns = [
     /https?:\/\/(www\.)?(nipiscan|iplogger|grabify|spiderip|blasze|pornhub|discord\.media|bit\.ly|tinyurl|is\.gd|t\.co|ow\.ly|rb\.gy|cutt\.ly|bc\.vc|shrt\.co|v\.gd|adf\.ly|linkvertise)\S+/gi,
     /fetch\s*\(\s*["']https?:\/\/(ip-api|icanhazip|ifconfig|ipify|whatismyip|ipinfo|ipgeolocation|freegeoip)/gi,
@@ -868,17 +868,17 @@ function cleanLuaScript(text) {
     cleaned = cleaned.split("\n").filter(line => !p.test(line)).join("\n");
   }
 
-  // ─── STEP 2: Remove multi-line comments ───
+  // STEP 2: Remove multi-line comments
   cleaned = cleaned.replace(/--\[\[[\s\S]*?\]\]/g, "");
 
-  // ─── STEP 3: Remove single-line comments (KEEP lines with Discord invites) ───
+  // STEP 3: Remove single-line comments (KEEP lines with Discord invites)
   cleaned = cleaned.split("\n").map(line => {
     if (/discord\.gg|discord\.com\/invite/i.test(line)) return line;
     const inStr = { s: false, d: false };
     let cutAt = -1;
     for (let i = 0; i < line.length - 1; i++) {
       const c = line[i], n = line[i+1];
-      if (c === "\\") { i++; continue; }
+      if (c === '\\' && i+1 < line.length) { i++; continue; }
       if (c === '"' && !inStr.s) inStr.d = !inStr.d;
       if (c === "'" && !inStr.d) inStr.s = !inStr.s;
       if (!inStr.s && !inStr.d && c === '-' && n === '-') { cutAt = i; break; }
@@ -886,32 +886,25 @@ function cleanLuaScript(text) {
     return cutAt >= 0 ? line.slice(0, cutAt).trimEnd() : line;
   }).join("\n");
 
-  // ─── STEP 4: Replace standalone print/warn lines ───
+  // STEP 4: Replace standalone print/warn lines
   cleaned = cleaned.replace(/^\s*(print|warn)\s*\([^)]*\)\s*;?\s*$/gm, 'print("prince is the best")');
 
-  // ─── STEP 5: Remove other URLs (EXCEPT Discord invites & catbox.moe) ───
+  // STEP 5: Remove other URLs (EXCEPT Discord invites & catbox.moe)
   cleaned = cleaned.split("\n").map(line => {
     if (/discord\.gg|discord\.com\/invite|files\.catbox\.moe/i.test(line)) return line;
     return line.replace(/https?:\/\/[^\s"'()\]]+/gi, "");
   }).join("\n");
 
-  // ─── STEP 6: IMPROVE READABILITY — Fix compressed code ───
-  // Split statements that are on one line (e.g., print("a")print("b") → separate lines)
-  // Fix common patterns: end-of-statement followed by new statement
+  // STEP 6: IMPROVE READABILITY — split compressed code onto proper lines
   let formatted = cleaned;
-
-  // Add newlines after closing statements that are followed by new keywords
-  // Pattern: )(keyword → )
-keyword
+  // Split after ) when followed by Lua keyword
   formatted = formatted.replace(/\)(local|function|if|for|while|repeat|return|break|print|warn|error|pcall|xpcall)/g, ")\n$1");
-
-  // Pattern: end followed by keyword (for nested blocks)
+  // Split after end when followed by keyword
   formatted = formatted.replace(/end(\s*)(local|function|if|for|while|repeat|return|print|warn)/g, "end\n$2");
-
-  // Pattern: ; followed by keyword without newline
+  // Split after ; when followed by keyword
   formatted = formatted.replace(/;(\s*)(local|function|if|for|while|repeat|return|print|warn|error)/g, ";\n$2");
 
-  // ─── STEP 7: Smart indentation ───
+  // STEP 7: Smart indentation
   const indented = [];
   let indent = 0;
   const indentStr = "  ";
@@ -919,17 +912,16 @@ keyword
     let line = rawLine.trim();
     if (!line) { indented.push(""); continue; }
 
-    // Decrease indent for closing lines
     const isClosing = /^(end|else|elseif|until|})/.test(line);
     if (isClosing) indent = Math.max(0, indent - 1);
 
     indented.push(indentStr.repeat(indent) + line);
 
-    // Increase indent for opening lines
+    // Count opens and closes
     const opens = (line.match(/\b(then|do|repeat|function)\b/g) || []).length;
     const closes = (line.match(/\b(end|until)\b/g) || []).length;
-    // Handle single-line if/for/while without end
-    if (/\bif\b.*\bthen\b.*\bend\b/.test(line)) { /* single line, no indent change */ }
+    // Don't change indent for single-line constructs
+    if (/\bif\b.*\bthen\b.*\bend\b/.test(line)) { /* single line */ }
     else if (/\bfor\b.*\bdo\b.*\bend\b/.test(line)) { /* single line */ }
     else if (/\bwhile\b.*\bdo\b.*\bend\b/.test(line)) { /* single line */ }
     else {
@@ -937,6 +929,26 @@ keyword
       if (indent < 0) indent = 0;
     }
   }
+  cleaned = indented.join("\n");
+
+  // STEP 8: Collapse excessive blank lines
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+
+  // STEP 9: Trim trailing whitespace per line, preserve indent
+  cleaned = cleaned.split("\n").map(line => {
+    const m = line.match(/^(\s*)(.*?)\s*$/);
+    return m ? (m[1] + m[2]) : line.trimEnd();
+  }).join("\n");
+
+  // STEP 10: Remove leading blank lines
+  cleaned = cleaned.replace(/^\s*\n+/, "");
+
+  // STEP 11: Ensure single trailing newline
+  cleaned = cleaned.replace(/\n+\s*$/, "\n");
+
+  return cleaned;
+}
+
   cleaned = indented.join("\n");
 
   // ─── STEP 8: Collapse excessive blank lines (max 2) ───
@@ -955,7 +967,6 @@ keyword
   cleaned = cleaned.replace(/\n+\s*$/, "\n");
 
   return cleaned;
-}
 
 
 // ============================================================
@@ -2790,11 +2801,7 @@ client.on("messageCreate", async msg => {
     if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
     const freshUrl = await getFreshUrl(file);
     const fileUrl = freshUrl || file.url;
-    const embed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Download Link")
-      .setDescription(`**File:** \`${file.filename}\`\n**ID:** \`${file.id}\`\n\n🔗 **Direct Link:**\n${fileUrl}`)
-      .setFooter({ text: `Requested by @${msg.author.username}` });
+    const fileAttachment = { attachment: fileUrl, name: file.filename || "file.lua" };
     
     // Buyers get green Rename button
     if (isBuyerUser) {
@@ -2803,21 +2810,27 @@ client.on("messageCreate", async msg => {
         .setLabel("Rename")
         .setStyle(ButtonStyle.Success);
       const row = new ActionRowBuilder().addComponents(renameBtn);
-      const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+      const sent = await msg.channel.send({
+        content: `<@${msg.author.id}> **Here is the file twin!**`,
+        files: [fileAttachment],
+        components: [row]
+      }).catch(() => {});
       if (sent) {
         renameButtons.set(sent.id, {
           fileId: file.id,
           authorId: msg.author.id,
           createdAt: Date.now()
         });
-        // Auto-expire after 2 minutes
         setTimeout(() => {
           renameButtons.delete(sent.id);
           sent.edit({ components: [] }).catch(() => {});
         }, 2 * 60 * 1000);
       }
     } else {
-      replyUser(msg, { embeds: [embed] }).catch(() => {});
+      replyUser(msg, {
+        content: `<@${msg.author.id}> **Here is the file twin!**`,
+        files: [fileAttachment]
+      }).catch(() => {});
     }
     return;
   }
