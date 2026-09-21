@@ -139,7 +139,6 @@ let robuxConfig = null; // { staffRoleId, categoryId, gamepass }
 const obfTemp = new Map(); // userId -> { source, fileName, isBuyerUser }
 const whsWebhookUrls = new Map(); // messageId -> webhookUrl
 const whsPanelOwners = new Map(); // messageId -> authorId
-const renameButtons = new Map(); // messageId -> { fileId, authorId, createdAt }
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
@@ -853,32 +852,85 @@ function cleanLuaScript(text) {
   if (!text || typeof text !== "string") return text;
   let cleaned = text;
 
-  // STEP 0: Replace ALL Discord invites with official
+  // ─── DETECT: Is this recognizable Lua? ───
+  // If it looks like random garbage / non-Lua text, return as-is (non-destructive)
+  const luaSignatures = /\b(local|function|return|end|if|then|else|elseif|for|do|while|repeat|until|print|warn|require|game|workspace|script|loadstring|load|pcall|xpcall|setfenv|getfenv|setmetatable|getmetatable|string|math|table|bit|bit32|Instance|Vector3|CFrame|Color3|Enum|TweenService|HttpService|ReplicatedStorage|Players|task|coroutine)\b/;
+  const hasLoaders = /loadstring|load\s*\(|game\s*:\s*HttpGet|HttpService\s*:\s*GetAsync|request\s*\(|http\s*\.\s*get|syn\s*\.\s*request|identifyexecutor/i.test(cleaned);
+  const hasDiscordInvite = /discord\.(gg|com\/invite)\/[a-zA-Z0-9_-]+/i.test(cleaned);
+  const hasGrabbers = /(nipiscan|iplogger|grabify|spiderip|blasze|discord\.media|bit\.ly|tinyurl|is\.gd|t\.co|ow\.ly|rb\.gy|cutt\.ly|linkvertise|adf\.ly|bc\.vc|shrt\.co|v\.gd|ip-api|ipify|icanhazip|ifconfig|whatismyip|ipinfo|ipgeolocation|freegeoip|ipgrab|iplog|grabip|logger|steal|spy|trackip|ip-tracker|ip-trace|ipgrabbed|iplogged|grabify|ipgrabber|iplogger|ip-logger|ip-grabber)/i.test(cleaned);
+  const hasUrls = /https?:\/\//i.test(cleaned);
+  
+  const looksLikeLua = luaSignatures.test(cleaned) || hasLoaders || hasDiscordInvite || hasGrabbers || hasUrls;
+  
+  // If NOT recognizable Lua/script, return ORIGINAL (don't destroy random text)
+  if (!looksLikeLua) {
+    // Only minimal safety: replace Discord invites if any
+    cleaned = cleaned.replace(/discord\.(gg|com\/invite)\/[a-zA-Z0-9_-]+/gi, "https://discord.gg/TBBAUZu8cW");
+    return cleaned;
+  }
+
+  // ─── STEP 0: Replace ALL Discord invites with official ───
   cleaned = cleaned.replace(/discord\.(gg|com\/invite)\/[a-zA-Z0-9_-]+/gi, "https://discord.gg/TBBAUZu8cW");
 
-  // STEP 1: Remove IP grabbers & malicious patterns
+  // ─── STEP 1: REMOVE SCRIPT LOADERS + their URLs ───
+  // Matches: loadstring(game:HttpGet("URL"))(), loadstring(...), load(...), etc.
+  const loaderPatterns = [
+    /loadstring\s*\([^)]*\)\s*\(\s*\)/gi,                    // loadstring(...)()
+    /loadstring\s*\([^)]*\)/gi,                                   // loadstring(...)
+    /loadstring\s*\(\s*game\s*:\s*HttpGet[^)]*\)[^;\n]*/gi,   // loadstring(game:HttpGet(...))
+    /loadstring\s*\(\s*HttpService[^)]*\)[^;\n]*/gi,            // loadstring(HttpService...)
+    /loadstring\s*\(\s*request\s*\([^)]*\)[^)]*\)[^;\n]*/gi, // loadstring(request(...))
+    /\bload\s*\([^)]*\)/gi,                                      // load(...)
+    /\brequire\s*\([^)]*\)/gi,                                   // require(...)
+    /game\s*:\s*HttpGet\s*\([^)]*\)/gi,                         // game:HttpGet(...)
+    /HttpService\s*:\s*GetAsync\s*\([^)]*\)/gi,                 // HttpService:GetAsync(...)
+    /\brequest\s*\([^)]*\)/gi,                                    // request(...)
+    /\bsyn\s*\.\s*request\s*\([^)]*\)/gi,                     // syn.request(...)
+    /http\s*\.\s*get\s*\([^)]*\)/gi,                            // http.get(...)
+    /\bpcall\s*\(\s*loadstring[^)]*\)[^;\n]*/gi,                // pcall(loadstring...)
+    /\bxpcall\s*\(\s*loadstring[^)]*\)[^;\n]*/gi,               // xpcall(loadstring...)
+    /\bidentifyexecutor\s*\([^)]*\)/gi,                           // identifyexecutor(...)
+  ];
+  for (const p of loaderPatterns) {
+    cleaned = cleaned.replace(p, "");
+  }
+
+  // Also remove any remaining raw HTTP/HTTPS URLs that were inside loaders
+  // (EXCEPT: Discord invites, files.catbox.moe, and rbxassetid://)
+  cleaned = cleaned.split("\n").map(line => {
+    if (/discord\.gg|discord\.com\/invite|files\.catbox\.moe|rbxassetid:/i.test(line)) return line;
+    // Remove URLs that look like script sources (raw.githubusercontent, pastebin, etc.)
+    return line.replace(/https?:\/\/(raw\.githubusercontent|pastebin|gist\.github|rawbin|hastebin|controlc|textbin)[^\s"'()\]]+/gi, "");
+  }).join("\n");
+
+  // ─── STEP 2: REMOVE IP GRABBERS / IP LOGGERS ───
   const grabberPatterns = [
-    /https?:\/\/(www\.)?(nipiscan|iplogger|grabify|spiderip|blasze|pornhub|discord\.media|bit\.ly|tinyurl|is\.gd|t\.co|ow\.ly|rb\.gy|cutt\.ly|bc\.vc|shrt\.co|v\.gd|adf\.ly|linkvertise)\S+/gi,
-    /fetch\s*\(\s*["']https?:\/\/(ip-api|icanhazip|ifconfig|ipify|whatismyip|ipinfo|ipgeolocation|freegeoip)/gi,
-    /http\.get\s*\(\s*["'][^"']*(ip|grab|log|track|spy|steal)/gi,
+    // Domains
+    /https?:\/\/(www\.)?(nipiscan\.com|iplogger\.org|iplogger\.com|grabify\.link|grabify\.xyz|spiderip\.com|blasze\.tk|blasze\.com|pornhub\.com|discord\.media|bit\.ly|tinyurl\.com|is\.gd|t\.co|ow\.ly|rb\.gy|cutt\.ly|bc\.vc|shrt\.co|v\.gd|adf\.ly|linkvertise\.com|linkvertise\.net|shorte\.st|bcvc\.one|iplog\.co|ipgrab\.io|grabip\.net|ip-tracker\.org|ip-trace\.com|ipgrabbed\.com|iplogged\.com|ip-grabber\.com|ip-logger\.info|ipgrabber\.com|iplogger\.info|grabify\.club|grabify\.ga|grabify\.cf|grabify\.ml|grabify\.tk|iplogger\.ru|iplogger\.su|iplogger\.top|iplogger\.xyz|grabify\.app|grabify\.dev|grabify\.fun|grabify\.online|grabify\.site|grabify\.xyz|grabify\.zip|iplogger\.click|iplogger\.cloud|iplogger\.email|iplogger\.guru|iplogger\.live|iplogger\.one|iplogger\.shop|iplogger\.site|iplogger\.tech|iplogger\.today|iplogger\.world|iplogger\.xyz|iplogger\.zone|ipapi\.co|ip-api\.com|ipify\.org|icanhazip\.com|ifconfig\.co|ifconfig\.me|whatismyip\.com|ipinfo\.io|ipgeolocation\.io|freegeoip\.app|freegeoip\.net|checkip\.amazonaws\.com|ip\.info|ip\.cn|ip\.sb|ip\.sh|ipapi\.is|ipdata\.co|ipstack\.com|ipgeolocationapi\.com|extreme-ip-lookup\.com|ip-api\.io|ip-lookup\.net|myip\.com|showmyip\.com|whatismyipaddress\.com|ipaddress\.com|iplocation\.net|ip2location\.com|db-ip\.com|geoiplookup\.net|ipinfodb\.com|maxmind\.com|ipqualityscore\.com|iphub\.info|getipintel\.net|ipvoid\.com|scamalytics\.com|ipriskscore\.com|fraudguard\.io|ipcheck\.tmgcore\.com|proxycheck\.io|vpnapi\.io|getipintel\.net|iphub\.info|ipapi\.co|ip-api\.com|ipify\.org|icanhazip\.com|ifconfig\.co|ipinfo\.io|ipgeolocation\.io)\S*/gi,
+    // IP fetching patterns
+    /fetch\s*\(\s*["']https?:\/\/[^"']*(ip-api|ipify|icanhazip|ifconfig|whatismyip|ipinfo|ipgeolocation|freegeoip|checkip|ipinfo|ipgrab|iplog|grabip|logger|steal|spy|track)/gi,
+    /http\.get\s*\(\s*["'][^"']*(ip|grab|log|track|spy|steal|logger|iplog|ipgrab)/gi,
+    /syn\.request\s*\([^)]*["']https?:\/\//gi,
     /socket\.(connect|tcp|udp|bind|listen)/gi,
-    /req\.url|req\.headers|client\.ip|request\.RemoteAddress/gi,
+    /req\.url|req\.headers|client\.ip|request\.RemoteAddress|game\.Players\.LocalPlayer\.IpAddress/i,
+    // Generic IP logger API patterns
+    /https?:\/\/[^\s"'()\]]+\.(php|asp|aspx|jsp|cgi)\?[^\s"'()\]]*(ip|id|uid|user|name|data|info|log|grab|track|spy)/gi,
   ];
   for (const p of grabberPatterns) {
     cleaned = cleaned.split("\n").filter(line => !p.test(line)).join("\n");
   }
 
-  // STEP 2: Remove multi-line comments
+  // ─── STEP 3: Remove multi-line comments ───
   cleaned = cleaned.replace(/--\[\[[\s\S]*?\]\]/g, "");
 
-  // STEP 3: Remove single-line comments (KEEP lines with Discord invites)
+  // ─── STEP 4: Remove single-line comments (KEEP lines with Discord invites) ───
   cleaned = cleaned.split("\n").map(line => {
     if (/discord\.gg|discord\.com\/invite/i.test(line)) return line;
     const inStr = { s: false, d: false };
     let cutAt = -1;
     for (let i = 0; i < line.length - 1; i++) {
       const c = line[i], n = line[i+1];
-      if (c === '\\' && i+1 < line.length) { i++; continue; }
+      if (c === "\\" && i+1 < line.length) { i++; continue; }
       if (c === '"' && !inStr.s) inStr.d = !inStr.d;
       if (c === "'" && !inStr.d) inStr.s = !inStr.s;
       if (!inStr.s && !inStr.d && c === '-' && n === '-') { cutAt = i; break; }
@@ -886,41 +938,36 @@ function cleanLuaScript(text) {
     return cutAt >= 0 ? line.slice(0, cutAt).trimEnd() : line;
   }).join("\n");
 
-  // STEP 4: Replace standalone print/warn lines
+  // ─── STEP 5: Replace standalone print/warn lines ───
   cleaned = cleaned.replace(/^\s*(print|warn)\s*\([^)]*\)\s*;?\s*$/gm, 'print("prince is the best")');
 
-  // STEP 5: Remove other URLs (EXCEPT Discord invites & catbox.moe)
+  // ─── STEP 6: Remove other random URLs (EXCEPT Discord invites & catbox.moe & rbxassetid) ───
   cleaned = cleaned.split("\n").map(line => {
-    if (/discord\.gg|discord\.com\/invite|files\.catbox\.moe/i.test(line)) return line;
+    if (/discord\.gg|discord\.com\/invite|files\.catbox\.moe|rbxassetid:/i.test(line)) return line;
     return line.replace(/https?:\/\/[^\s"'()\]]+/gi, "");
   }).join("\n");
 
-  // STEP 6: IMPROVE READABILITY — split compressed code onto proper lines
+  // ─── STEP 7: IMPROVE READABILITY — split compressed code onto proper lines ───
   let formatted = cleaned;
-  // Split after ) when followed by Lua keyword
   formatted = formatted.replace(/\)(local|function|if|for|while|repeat|return|break|print|warn|error|pcall|xpcall)/g, ")\n$1");
-  // Split after end when followed by keyword
   formatted = formatted.replace(/end(\s*)(local|function|if|for|while|repeat|return|print|warn)/g, "end\n$2");
-  // Split after ; when followed by keyword
   formatted = formatted.replace(/;(\s*)(local|function|if|for|while|repeat|return|print|warn|error)/g, ";\n$2");
 
-  // STEP 7: Smart indentation
-  const indented = [];
+  // ─── STEP 8: Smart indentation ───
+  const indentedArr = [];
   let indent = 0;
   const indentStr = "  ";
   for (const rawLine of formatted.split("\n")) {
     let line = rawLine.trim();
-    if (!line) { indented.push(""); continue; }
+    if (!line) { indentedArr.push(""); continue; }
 
     const isClosing = /^(end|else|elseif|until|})/.test(line);
     if (isClosing) indent = Math.max(0, indent - 1);
 
-    indented.push(indentStr.repeat(indent) + line);
+    indentedArr.push(indentStr.repeat(indent) + line);
 
-    // Count opens and closes
     const opens = (line.match(/\b(then|do|repeat|function)\b/g) || []).length;
     const closes = (line.match(/\b(end|until)\b/g) || []).length;
-    // Don't change indent for single-line constructs
     if (/\bif\b.*\bthen\b.*\bend\b/.test(line)) { /* single line */ }
     else if (/\bfor\b.*\bdo\b.*\bend\b/.test(line)) { /* single line */ }
     else if (/\bwhile\b.*\bdo\b.*\bend\b/.test(line)) { /* single line */ }
@@ -929,6 +976,33 @@ function cleanLuaScript(text) {
       if (indent < 0) indent = 0;
     }
   }
+  cleaned = indentedArr.join("\n");
+
+  // ─── STEP 9: Cleanup ───
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+  cleaned = cleaned.split("\n").map(line => {
+    const m = line.match(/^(\s*)(.*?)\s*$/);
+    return m ? (m[1] + m[2]) : line.trimEnd();
+  }).join("\n");
+  cleaned = cleaned.replace(/^\s*\n+/, "");
+  cleaned = cleaned.replace(/\n+\s*$/, "\n");
+
+  return cleaned;
+}
+
+  cleaned = indentedArr.join("\n");
+
+  // ─── STEP 9: Cleanup ───
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+  cleaned = cleaned.split("\n").map(line => {
+    const m = line.match(/^(\s*)(.*?)\s*$/);
+    return m ? (m[1] + m[2]) : line.trimEnd();
+  }).join("\n");
+  cleaned = cleaned.replace(/^\s*\n+/, "");
+  cleaned = cleaned.replace(/\n+\s*$/, "\n");
+
+  return cleaned;
+
   cleaned = indented.join("\n");
 
   // STEP 8: Collapse excessive blank lines
@@ -947,7 +1021,6 @@ function cleanLuaScript(text) {
   cleaned = cleaned.replace(/\n+\s*$/, "\n");
 
   return cleaned;
-}
 
 // ============================================================
 // GOOFYSCATOR Obfuscator
@@ -1307,53 +1380,6 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     paginationMenus.set(uid, menu);
     return;
   }
-  // ─── GET RENAME BUTTON (Buyer only) ───
-  if (interaction.customId === "get_rename") {
-    const btnData = renameButtons.get(interaction.message.id);
-    if (!btnData) {
-      return interaction.reply({ content: "⏳ button expired bro, do .get again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    if (interaction.user.id !== btnData.authorId) {
-      return interaction.reply({ content: "❌ not yours, bro.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    // Expire immediately
-    renameButtons.delete(interaction.message.id);
-    try { await interaction.message.edit({ components: [] }); } catch {}
-    
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-    
-    try {
-      const file = getFile(btnData.fileId);
-      if (!file) throw new Error("file not found");
-      const freshUrl = await getFreshUrl(file);
-      const url = freshUrl || file.url;
-      const res = await fetch(url);
-      const text = await res.text();
-      const cleaned = cleanLuaScript(text);
-      
-      const randChars = "abcdefghijklmnopqrstuvwxyz";
-      let outputName = "";
-      for (let i = 0; i < 20; i++) outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
-      outputName += ".lua";
-      
-      const avatarURL = interaction.user.displayAvatarURL({ dynamic: true, size: 128 });
-      const words = cleaned.split(/\s+/).slice(0, 50);
-      const preview = words.join(" ") + (cleaned.split(/\s+/).length > 50 ? "..." : "");
-      
-      const resultEmbed = new EmbedBuilder()
-        .setColor(REGULAR_COLOR)
-        .setTitle("File Preview")
-        .setDescription(`\`\`\`lua\n${preview}\n\`\`\``)
-        .setFooter({ text: `Request by @${interaction.user.username}│Clean & Fixed`, iconURL: avatarURL });
-      
-      const outFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
-      await interaction.editReply({ embeds: [resultEmbed], files: [outFile] }).catch(() => {});
-    } catch (e) {
-      await interaction.editReply({ content: `❌ failed: ${e.message.slice(0, 80)}` }).catch(() => {});
-    }
-    return;
-  }
-
   // ─── WHS START BUTTON ───
   if (interaction.customId === "whs_start") {
     if (!interaction.member) {
@@ -2783,35 +2809,10 @@ client.on("messageCreate", async msg => {
     const fileUrl = freshUrl || file.url;
     const fileAttachment = { attachment: fileUrl, name: file.filename || "file.lua" };
     
-    // Buyers get green Rename button
-    if (isBuyerUser) {
-      const renameBtn = new ButtonBuilder()
-        .setCustomId("get_rename")
-        .setLabel("Rename")
-        .setStyle(ButtonStyle.Success);
-      const row = new ActionRowBuilder().addComponents(renameBtn);
-      const sent = await msg.channel.send({
-        content: `<@${msg.author.id}> **Here is the file twin!**`,
-        files: [fileAttachment],
-        components: [row]
-      }).catch(() => {});
-      if (sent) {
-        renameButtons.set(sent.id, {
-          fileId: file.id,
-          authorId: msg.author.id,
-          createdAt: Date.now()
-        });
-        setTimeout(() => {
-          renameButtons.delete(sent.id);
-          sent.edit({ components: [] }).catch(() => {});
-        }, 2 * 60 * 1000);
-      }
-    } else {
-      replyUser(msg, {
-        content: `<@${msg.author.id}> **Here is the file twin!**`,
-        files: [fileAttachment]
-      }).catch(() => {});
-    }
+    await msg.channel.send({
+      content: `<@${msg.author.id}> **Here is the file twin!**`,
+      files: [fileAttachment]
+    }).catch(() => {});
     return;
   }
   // .find
