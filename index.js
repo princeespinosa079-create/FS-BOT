@@ -949,26 +949,6 @@ function cleanLuaScript(text) {
   return cleaned;
 }
 
-  cleaned = indented.join("\n");
-
-  // ─── STEP 8: Collapse excessive blank lines (max 2) ───
-  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
-
-  // ─── STEP 9: Trim trailing whitespace per line, preserve indent ───
-  cleaned = cleaned.split("\n").map(line => {
-    const m = line.match(/^(\s*)(.*?)\s*$/);
-    return m ? (m[1] + m[2]) : line.trimEnd();
-  }).join("\n");
-
-  // ─── STEP 10: Remove leading blank lines ───
-  cleaned = cleaned.replace(/^\s*\n+/, "");
-
-  // ─── STEP 11: Ensure single trailing newline ───
-  cleaned = cleaned.replace(/\n+\s*$/, "\n");
-
-  return cleaned;
-
-
 // ============================================================
 // GOOFYSCATOR Obfuscator
 // ============================================================
