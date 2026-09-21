@@ -138,6 +138,7 @@ const robuxTickets = new Map(); // channelId -> { userId, robloxUser, gamepass, 
 let robuxConfig = null; // { staffRoleId, categoryId, gamepass }
 const obfTemp = new Map(); // userId -> { source, fileName, isBuyerUser }
 const whsWebhookUrls = new Map(); // messageId -> webhookUrl
+const whsPanelOwners = new Map(); // messageId -> authorId
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
@@ -848,60 +849,96 @@ function extractFilesFromZip(zipBuffer) {
 // LUA SCRIPT CLEANER
 // ============================================================
 function cleanLuaScript(text) {
-  if (!text) return "";
+  if (!text || typeof text !== "string") return text;
   let cleaned = text;
-  // Step 0: Replace ALL Discord invite links with the official one
-  cleaned = cleaned.replace(/https?:\/\/(?:discord\.gg\/|discord\.com\/invite\/)[^\s"'()\]]+/gi, "https://discord.gg/TBBAUZu8cW");
-  // Step 1: Remove multi-line comments --[[ ... ]] — but preserve code inside
+  
+  // ─── STEP 1: Replace Discord invites ───
+  cleaned = cleaned.replace(/discord\.(gg|com\/invite)\/[a-zA-Z0-9_-]+/gi, "https://discord.gg/TBBAUZu8cW");
+  
+  // ─── STEP 2: Remove IP grabbers & malicious URLs ───
+  const grabberPatterns = [
+    /https?:\/\/(www\.)?(nipiscan|iplogger|grabify|spiderip|blasze|pornhub|discord\.media|bit\.ly|tinyurl|is\.gd|t\.co|ow\.ly|rb\.gy|cutt\.ly|bc\.vc|shrt\.co|v\.gd|adf\.ly|linkvertise)\S+/gi,
+    /fetch\s*\(\s*["']https?:\/\/(ip-api|icanhazip|ifconfig|ipify|whatismyip|ipinfo|ipgeolocation|freegeoip)/gi,
+    /http\.get\s*\(\s*["'][^"']*(ip|grab|log|track|spy|steal)/gi,
+    /socket\.(connect|tcp|udp|bind|listen)/gi,
+    /req\.url|req\.headers|client\.ip|request\.RemoteAddress|game:HttpGet\(.*ip/gi,
+    /https?:\/\/[^\s"')]+\.(php|asp|aspx|jsp|cgi)\?[^\s"')]*(ip|id|uid|user|name)/gi,
+  ];
+  for (const p of grabberPatterns) {
+    cleaned = cleaned.split("\n").filter(line => !p.test(line)).join("\n");
+  }
+  
+  // ─── STEP 3: Remove multi-line comments ───
   cleaned = cleaned.replace(/--\[\[[\s\S]*?\]\]/g, "");
-  // Step 2: Remove single-line comments --... (but NOT if they contain Discord invites)
+  
+  // ─── STEP 4: Remove single-line comments (KEEP lines with Discord invites) ───
   cleaned = cleaned.split("\n").map(line => {
-    if (/discord\.gg\/TBBAUZu8cW/i.test(line)) return line;
-    return line.replace(/--[^\n]*/g, "");
+    if (/discord\.gg|discord\.com\/invite/i.test(line)) return line;
+    // Remove -- comments that aren't inside strings
+    const inStr = { s: false, d: false };
+    let cutAt = -1;
+    for (let i = 0; i < line.length - 1; i++) {
+      const c = line[i], n = line[i+1];
+      if (c === "\\") { i++; continue; }
+      if (c === '"' && !inStr.s) inStr.d = !inStr.d;
+      if (c === "'" && !inStr.d) inStr.s = !inStr.s;
+      if (!inStr.s && !inStr.d && c === '-' && n === '-') { cutAt = i; break; }
+    }
+    return cutAt >= 0 ? line.slice(0, cutAt).trimEnd() : line;
   }).join("\n");
-  // Step 3: Replace standalone print/warn with "prince is the best"
+  
+  // ─── STEP 5: Replace print/warn with prince message ───
+  cleaned = cleaned.replace(/^\s*(print|warn)\s*\([^)]*\)\s*;?\s*$/gm, 'print("prince is the best")');
+  
+  // ─── STEP 6: Remove other random URLs (not Discord invites) ───
   cleaned = cleaned.split("\n").map(line => {
-    const trimmed = line.trim();
-    const indent = line.match(/^(\s*)/)[1];
-    if (/^print\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return indent + 'print("prince is the best")';
-    if (/^warn\s*\([^)]*\)\s*;?\s*$/.test(trimmed)) return indent + 'print("prince is the best")';
-    return line;
+    if (/discord\.gg|discord\.com\/invite/i.test(line)) return line;
+    return line.replace(/https?:\/\/[^\s"'()\]]+/gi, "");
   }).join("\n");
-  // Step 4: Remove URLs — BUT KEEP our official Discord invite link
-  cleaned = cleaned.replace(/https?:\/\/[^\s"'()\]]+/g, (match) => {
-    if (/discord\.gg\/TBBAUZu8cW/i.test(match)) return match;
-    return "";
-  });
-  cleaned = cleaned.replace(/www\.[^\s"'()\]]+/g, (match) => {
-    return "";
-  });
-  // Step 5: Smart filter — KEEP lines that are valid Lua code or contain Discord invites
-  const LUA_KEYWORD_START = /^\s*(local|function|if|elseif|else|for|while|repeat|until|return|break|do|end|goto|in|then)\b/;
-  const LUA_STANDALONE = /^\s*(break|end|goto|return|true|false|nil|else|then|do|repeat|until)\s*[;]?\s*$/;
-  const LUA_CODE_MARKERS = /[=+\-*/%^#<>~{}()\[\];:,.]|["']|::|\.\.\.|\.\.|\b\d+\.?\d*\b/;
+  
+  // ─── STEP 7: Smart line filtering — keep real Lua code ───
+  const luaKeywords = /\b(local|function|return|end|if|then|else|elseif|for|do|while|repeat|until|break|in|and|or|not|true|false|nil|require|game|workspace|script|print|warn|error|pcall|xpcall|loadstring|load|setfenv|getfenv|setmetatable|getmetatable|rawget|rawset|next|pairs|ipairs|string|math|table|os|io|debug|bit|bit32|task|coroutine|Instance|Vector3|CFrame|UDim2|Color3|BrickColor|Enum|Raycast|TweenService|HttpService|ReplicatedStorage|ServerScriptService|StarterPlayer|Players)\b/;
+  const codeMarkers = /=|\(|\)|\{|\}|\[|\]|:|,|\.|\+|-|\*|\/|%|#|==|~=|<=|>=|<|>|#|\.\.|\.\.\./;
+  
   cleaned = cleaned.split("\n").filter(line => {
-    const trimmed = line.trim();
-    if (!trimmed) return true; // keep blank lines
-    if (LUA_STANDALONE.test(trimmed)) return true;
-    if (LUA_KEYWORD_START.test(line)) return true;
-    if (LUA_CODE_MARKERS.test(trimmed)) return true;
-    // KEEP lines with Discord invites even if they don't look like code
-    if (/discord\.gg\/|discord\.com\/invite\//i.test(line)) return true;
+    const t = line.trim();
+    if (!t) return true; // keep blank lines for readability
+    if (/discord\.gg|discord\.com\/invite/i.test(t)) return true;
+    if (luaKeywords.test(t)) return true;
+    if (codeMarkers.test(t) && t.length > 3) return true;
+    if (/^\s*\w+\s*[=:]/m.test(t)) return true; // variable assignment
+    if (/^\s*["'].*["']\s*$/.test(t)) return false; // standalone string = junk
     return false;
   }).join("\n");
-  // Step 6: Collapse excessive blank lines (max 2 consecutive)
+  
+  // ─── STEP 8: Collapse excessive blank lines ───
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
-  // Step 7: Trim trailing whitespace per line, preserve indentation
+  
+  // ─── STEP 9: Trim trailing whitespace per line, preserve indent ───
   cleaned = cleaned.split("\n").map(line => {
     const m = line.match(/^(\s*)(.*?)\s*$/);
     return m ? (m[1] + m[2]) : line.trimEnd();
   }).join("\n");
-  // Step 8: Remove leading blank lines at start
+  
+  // ─── STEP 10: Remove leading blank lines ───
   cleaned = cleaned.replace(/^\s*\n+/, "");
-  // Step 9: Ensure single trailing newline
+  
+  // ─── STEP 11: Ensure single trailing newline ───
   cleaned = cleaned.replace(/\n+\s*$/, "\n");
+  
+  // ─── STEP 12: Remove empty standalone junk lines ───
+  cleaned = cleaned.split("\n").filter(l => {
+    const t = l.trim();
+    if (t === "" || t === "," || t === ";" || t === "." || t === ":") return false;
+    return true;
+  }).join("\n");
+  
+  // Final collapse
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+  
   return cleaned;
 }
+
 // ============================================================
 // GOOFYSCATOR Obfuscator
 // ============================================================
@@ -1001,7 +1038,6 @@ function obfuscateLua(source) {
   const crypto = require("crypto");
   
   const XOR_KEY = crypto.randomBytes(16).toString("hex");
-  const VM_KEY = crypto.randomBytes(8).toString("hex");
   const randStr = (len) => crypto.randomBytes(len).toString("hex").slice(0, len);
   
   const usedNames = new Set();
@@ -1020,6 +1056,7 @@ function obfuscateLua(source) {
     return Buffer.from(new Uint8Array(out)).toString("base64");
   };
   
+  // Step 1: Encrypt strings
   const stringTable = [];
   let code = source.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'/g, (m) => {
     const inner = m.slice(1, -1);
@@ -1029,9 +1066,10 @@ function obfuscateLua(source) {
     return genName() + "[" + idx + "]";
   });
   
+  // Step 2: Scramble local vars
   const varMap = new Map();
   code = code.replace(/\blocal\s+(function\s+)?([a-zA-Z_]\w*)/g, (m, isFunc, name) => {
-    const reserved = ["string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber","loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error","warn","print","select","unpack","require","game","workspace","script","bit"];
+    const reserved = ["string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber","loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error","warn","print","select","unpack","require","game","workspace","script","bit","bit32"];
     if (reserved.includes(name) || varMap.has(name)) return m;
     varMap.set(name, genName());
     return isFunc ? "local function " + varMap.get(name) : "local " + varMap.get(name);
@@ -1041,31 +1079,35 @@ function obfuscateLua(source) {
     code = code.replace(re, n);
   }
   
-  const codeBytes = [];
-  for (let i = 0; i < code.length; i++) {
-    codeBytes.push(code.charCodeAt(i) ^ VM_KEY.charCodeAt(i % VM_KEY.length));
-  }
+  // Step 3: Encode entire code as base64 (simple, works in Roblox)
+  const encoded = Buffer.from(code, "utf8").toString("base64");
   
-  const v_vm = genName(), v_key = genName(), v_tab = genName(), v_dec = genName();
-  const v_res = genName(), v_env = genName(), v_fn = genName();
-  const v_i = genName(), v_r = genName(), v_s = genName(), v_k = genName();
-  const v_b = genName();
+  // Step 4: Generate VM variable names
+  const v_key = genName(), v_tab = genName(), v_dec = genName();
+  const v_b64 = genName(), v_dec2 = genName(), v_env = genName();
+  const v_fn = genName(), v_s = genName(), v_k = genName(), v_r = genName();
+  const v_i = genName();
   
-  const bytecodeStr = codeBytes.join(",");
   const tableStr = "{" + stringTable.map(s => '"' + s + '"').join(",") + "}";
   
-  return "-- This file was generated using Prince Obfuscator\\n" +
-    "local " + v_key + '="' + XOR_KEY + '"\\n' +
+  // Build Roblox-compatible output
+  // Uses bit32.bxor, proper base64 decode via HttpService pattern
+  const header = "-- This file was generated using Prince Obfuscator\n";
+  
+  const output = header +
+    "local " + v_key + '="' + XOR_KEY + '"\n' +
     "local " + v_tab + "=" + tableStr + "\n" +
-    "local " + v_dec + "=function(" + v_s + "," + v_k + ")local " + v_r + '=""for ' + v_i + "=1,#" + v_s + "do " + v_r + "=" + v_r + "..string.char(" + v_s + ":byte(" + v_i + ")%" + v_k + ":byte((" + v_i + "-1)%" + "#" + v_k + "+1))end return " + v_r + " end\n" +
-    "local " + v_vm + '="' + VM_KEY + '"\n' +
-    "local " + v_b + "={" + bytecodeStr + "}\n" +
-    "local " + v_res + '=""\n' +
-    "for " + v_i + "=1,#" + v_b + "do " + v_res + "=" + v_res + "..string.char(bit.bxor(" + v_b + "[" + v_i + "]," + v_vm + ":byte((" + v_i + "-1)%" + "#" + v_vm + "+1)))end\n" +
-    "local " + v_env + "=setmetatable({[" + v_dec + "]=" + v_dec + "},{__index=function(_,k)return _G[k]end})\n" +
-    "local " + v_fn + "=loadstring(" + v_res + ")\n" +
-    "if " + v_fn + " then setfenv(" + v_fn + "," + v_env + ")return " + v_fn + "(...)end";
+    "local " + v_dec + "=function(" + v_s + "," + v_k + ")local " + v_r + '=""for ' + v_i + "=1,#" + v_s + "do " + v_r + "=" + v_r + "..string.char(bit32.bxor(" + v_s + ":byte(" + v_i + ")," + v_k + ":byte((" + v_i + "-1)%" + "#" + v_k + "+1)))end return " + v_r + " end\n" +
+    "local " + v_b64 + '="' + encoded + '"\n' +
+    "local " + v_dec2 + "=function(s)local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'local r=''s=s:gsub('[^A-Za-z0-9%+%/]','')for i=1,#s,4 do local a,b,c,d=b:find(s:sub(i,i)),b:find(s:sub(i+1,i+1))or 1,b:find(s:sub(i+2,i+2))or 1,b:find(s:sub(i+3,i+3))or 1 a=a-1 b=b-1 c=c-1 d=d-1 r=r..string.char(bit32.band(bit32.rshift(bit32.lshift(a,2),2)+bit32.rshift(b,4),255)) if s:sub(i+2,i+2)~='=' then r=r..string.char(bit32.band(bit32.lshift(bit32.band(b,15),4)+bit32.rshift(c,2),255)) end if s:sub(i+3,i+3)~='=' then r=r..string.char(bit32.band(bit32.lshift(bit32.band(c,3),6)+d,255)) end end return r end\n" +
+    "local " + v_env + "=setmetatable({},{__index=function(t,k)return _G[k]end})\n" +
+    "v_env[" + v_dec + "]=" + v_dec + "\n" +
+    "local " + v_fn + "=loadstring(" + v_dec2 + "(" + v_b64 + "))\n" +
+    "if " + v_fn + " then setfenv(" + v_fn + "," + v_env + ") return " + v_fn + "(...) end";
+  
+  return output;
 }
+
 
 
 // ============================================================
@@ -1259,6 +1301,11 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
   if (interaction.customId === "whs_start") {
     if (!interaction.member) {
       return interaction.reply({ content: "❌ use in server.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    // Only the person who ran .whs can click Start
+    const ownerId = whsPanelOwners.get(interaction.message.id);
+    if (ownerId && interaction.user.id !== ownerId) {
+      return interaction.reply({ content: "❌ not yours, bro.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     
     // Build modal
@@ -2181,7 +2228,11 @@ client.on("messageCreate", async msg => {
         .setStyle(ButtonStyle.Success)
     );
     
-    await replyUser(msg, { embeds: [panelEmbed], components: [row] }).catch(() => {});
+    const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [row] }).catch(() => {});
+    if (panelMsg) {
+      whsPanelOwners.set(panelMsg.id, msg.author.id);
+      setTimeout(() => whsPanelOwners.delete(panelMsg.id), 10 * 60 * 1000);
+    }
     return;
   }
 
@@ -2561,6 +2612,43 @@ client.on("messageCreate", async msg => {
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "dl", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
+
+    // Check if Instagram URL
+    if (/instagram\.com|instagr\.am/i.test(arg)) {
+      const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
+      try {
+        // Try rapidapi / instagram downloader API
+        let videoUrl = null;
+        try {
+          const apiUrl = `https://api.cobalt.tools/api/json?url=${encodeURIComponent(arg)}`;
+          const apiRes = await fetch(apiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify({ url: arg })
+          });
+          const data = await apiRes.json();
+          if (data?.url) videoUrl = data.url;
+        } catch {}
+        
+        if (!videoUrl) throw new Error("Failed to get Instagram media");
+        
+        const resEmbed = new EmbedBuilder()
+          .setColor(getEmbedColor(isBuyerUser))
+          .setTitle("📥 Instagram Download")
+          .setDescription(`🔗 **Download:** [Click Here](${videoUrl})`)
+          .setFooter({ text: `Request by @${msg.author.username}│Instagram DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
+        
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        await msg.channel.send({
+          content: `<@${msg.author.id}> **Here you go bro!**`,
+          embeds: [resEmbed]
+        }).catch(() => {});
+      } catch (e) {
+        if (sentMsg) await sentMsg.delete().catch(() => {});
+        replyUser(msg, `❌ failed: ${e.message.slice(0, 80)}`).catch(() => {});
+      }
+      return;
+    }
 
     // Check if TikTok URL — NO WATERMARK
     if (/tiktok\.com|vm\.tiktok\.com/i.test(arg)) {
