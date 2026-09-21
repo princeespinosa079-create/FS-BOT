@@ -849,132 +849,127 @@ function extractFilesFromZip(zipBuffer) {
 // LUA SCRIPT CLEANER
 // ============================================================
 function cleanLuaScript(text) {
-  if (!text || typeof text !== "string") return text;
-  let cleaned = text;
+  if (!text) return "";
+  if (typeof text !== "string") {
+    try { text = String(text); } catch { return ""; }
+  }
+  var trimmed = text.trim();
+  if (!trimmed) return text;
 
-  // ─── DETECT: Is this recognizable Lua? ───
-  // If it looks like random garbage / non-Lua text, return as-is (non-destructive)
-  const luaSignatures = /\b(local|function|return|end|if|then|else|elseif|for|do|while|repeat|until|print|warn|require|game|workspace|script|loadstring|load|pcall|xpcall|setfenv|getfenv|setmetatable|getmetatable|string|math|table|bit|bit32|Instance|Vector3|CFrame|Color3|Enum|TweenService|HttpService|ReplicatedStorage|Players|task|coroutine)\b/;
-  const hasLoaders = /loadstring|load\s*\(|game\s*:\s*HttpGet|HttpService\s*:\s*GetAsync|request\s*\(|http\s*\.\s*get|syn\s*\.\s*request|identifyexecutor/i.test(cleaned);
-  const hasDiscordInvite = /discord\.(gg|com\/invite)\/[a-zA-Z0-9_-]+/i.test(cleaned);
-  const hasGrabbers = /(nipiscan|iplogger|grabify|spiderip|blasze|discord\.media|bit\.ly|tinyurl|is\.gd|t\.co|ow\.ly|rb\.gy|cutt\.ly|linkvertise|adf\.ly|bc\.vc|shrt\.co|v\.gd|ip-api|ipify|icanhazip|ifconfig|whatismyip|ipinfo|ipgeolocation|freegeoip|ipgrab|iplog|grabip|logger|steal|spy|trackip|ip-tracker|ip-trace|ipgrabbed|iplogged|grabify|ipgrabber|iplogger|ip-logger|ip-grabber)/i.test(cleaned);
-  const hasUrls = /https?:\/\//i.test(cleaned);
-  
-  const looksLikeLua = luaSignatures.test(cleaned) || hasLoaders || hasDiscordInvite || hasGrabbers || hasUrls;
-  
-  // If NOT recognizable Lua/script, return ORIGINAL (don't destroy random text)
-  if (!looksLikeLua) {
-    // Only minimal safety: replace Discord invites if any
-    cleaned = cleaned.replace(/discord\.(gg|com\/invite)\/[a-zA-Z0-9_-]+/gi, "https://discord.gg/TBBAUZu8cW");
-    return cleaned;
+  var linesArr;
+  try { linesArr = trimmed.split(/\r?\n/); } catch { linesArr = [trimmed]; }
+  if (!linesArr || !linesArr.length) return text;
+
+  var cleaned = [];
+  var loaderDomains = ["raw.githubusercontent.com","pastebin.com","hastebin.com","paste.ee","cdn.discordapp.com/attachments","githubusercontent.com","gitlab.com","bitbucket.org","cdn.jsdelivr.net","unpkg.com","cdnjs.cloudflare.com","kekma.net","catbox.moe/file","litterbox.catbox.moe"];
+  var ipGrabberDomains = ["iplogger.org","grabify.link","nipiscan.com","spiderip.com","blasze.tk","ip-api.com","ipify.org","icanhazip.com","ifconfig.co","whatismyip.com","ipinfo.io","ipgeolocation.io","freegeoip.net","checkip.amazonaws.com","bit.ly","tinyurl.com","is.gd","t.co","ow.ly","rb.gy","cutt.ly","bc.vc","adf.ly","linkvertise.com","pornhub.com","discord.media","iplogger","grabify","logmyip","ipgrabber","stealip","ip-logger"];
+  var safeDiscord = /discord\.(gg|com\/invite)\//i;
+  var safeCatbox = /files\.catbox\.moe\//i;
+  var safeRbx = /rbxassetid:\/\/\d+/i;
+
+  function isSafeUrl(u) {
+    if (!u) return false;
+    try { return safeDiscord.test(u) || safeCatbox.test(u) || safeRbx.test(u); }
+    catch { return false; }
+  }
+  function hasDomain(arr, t) {
+    if (!t) return false;
+    for (var i = 0; i < arr.length; i++) { if (t.indexOf(arr[i]) !== -1) return true; }
+    return false;
   }
 
-  // ─── STEP 0: Replace ALL Discord invites with official ───
-  cleaned = cleaned.replace(/discord\.(gg|com\/invite)\/[a-zA-Z0-9_-]+/gi, "https://discord.gg/TBBAUZu8cW");
-
-  // ─── STEP 1: REMOVE SCRIPT LOADERS + their URLs ───
-  // Matches: loadstring(game:HttpGet("URL"))(), loadstring(...), load(...), etc.
-  const loaderPatterns = [
-    /loadstring\s*\([^)]*\)\s*\(\s*\)/gi,                    // loadstring(...)()
-    /loadstring\s*\([^)]*\)/gi,                                   // loadstring(...)
-    /loadstring\s*\(\s*game\s*:\s*HttpGet[^)]*\)[^;\n]*/gi,   // loadstring(game:HttpGet(...))
-    /loadstring\s*\(\s*HttpService[^)]*\)[^;\n]*/gi,            // loadstring(HttpService...)
-    /loadstring\s*\(\s*request\s*\([^)]*\)[^)]*\)[^;\n]*/gi, // loadstring(request(...))
-    /\bload\s*\([^)]*\)/gi,                                      // load(...)
-    /\brequire\s*\([^)]*\)/gi,                                   // require(...)
-    /game\s*:\s*HttpGet\s*\([^)]*\)/gi,                         // game:HttpGet(...)
-    /HttpService\s*:\s*GetAsync\s*\([^)]*\)/gi,                 // HttpService:GetAsync(...)
-    /\brequest\s*\([^)]*\)/gi,                                    // request(...)
-    /\bsyn\s*\.\s*request\s*\([^)]*\)/gi,                     // syn.request(...)
-    /http\s*\.\s*get\s*\([^)]*\)/gi,                            // http.get(...)
-    /\bpcall\s*\(\s*loadstring[^)]*\)[^;\n]*/gi,                // pcall(loadstring...)
-    /\bxpcall\s*\(\s*loadstring[^)]*\)[^;\n]*/gi,               // xpcall(loadstring...)
-    /\bidentifyexecutor\s*\([^)]*\)/gi,                           // identifyexecutor(...)
+  var loaderPatterns = [
+    /loadstring\s*\([^)]*\)/gi,
+    /game\s*:\s*HttpGet\s*\([^)]*\)/gi,
+    /HttpService\s*:\s*GetAsync\s*\([^)]*\)/gi,
+    /syn\s*\.\s*request\s*\([^)]*\)/gi,
+    /http\s*\.\s*get\s*\([^)]*\)/gi,
+    /pcall\s*\(\s*loadstring[^)]*\)/gi,
+    /xpcall\s*\(\s*loadstring[^)]*\)/gi,
+    /identifyexecutor\s*\([^)]*\)/gi,
+    /load\s*\([^)]+\)/gi,
+    /require\s*\(\s*["']https?:\/\/[^"']+["']\s*\)/gi,
+    /socket\s*\.\s*(connect|tcp|udp)\s*\(/gi
   ];
-  for (const p of loaderPatterns) {
-    cleaned = cleaned.replace(p, "");
+
+  var hasLua = false;
+  var luaKw = ["local","function","if ","then","end","return","for ","while","repeat","until","do ","print","game","workspace","script","loadstring"];
+
+  for (var li = 0; li < linesArr.length; li++) {
+    var raw = linesArr[li];
+    if (raw === null || raw === undefined) continue;
+    var t = String(raw).trim();
+    if (!t) { cleaned.push(""); continue; }
+
+    for (var ki = 0; ki < luaKw.length; ki++) {
+      if (t.indexOf(luaKw[ki]) !== -1) { hasLua = true; break; }
+    }
+
+    if (t.indexOf("--") === 0 && t.indexOf("print") === -1 && t.indexOf("loadstring") === -1) continue;
+
+    for (var pi = 0; pi < loaderPatterns.length; pi++) {
+      try { t = t.replace(loaderPatterns[pi], ""); } catch {}
+    }
+
+    try {
+      t = t.replace(/https?:\/\/[^\s"'<>]+/gi, function(url) {
+        if (!url) return "";
+        if (isSafeUrl(url)) return url;
+        if (hasDomain(loaderDomains, url) || hasDomain(ipGrabberDomains, url)) return "";
+        return url;
+      });
+    } catch {}
+
+    try {
+      var pum = t.match(/^["']?(https?:\/\/[^"']+)["']?\s*;?\s*$/i);
+      if (pum && pum[1]) {
+        var pu = pum[1];
+        if (!isSafeUrl(pu) && (hasDomain(loaderDomains, pu) || hasDomain(ipGrabberDomains, pu) || /\.(lua|txt|luac|js|json)$/i.test(pu) || /script|load|src|code/i.test(pu))) continue;
+      }
+    } catch {}
+
+    try {
+      t = t.replace(/^\s*(print|warn)\s*\([^)]*\)\s*;?\s*$/gm, 'print("prince is the best")');
+    } catch {}
+
+    try {
+      t = t.replace(/discord\.(gg|com\/invite)\/[a-zA-Z0-9-]+/gi, "https://discord.gg/TBBAUZu8cW");
+    } catch {}
+
+    if (!t.trim()) continue;
+    cleaned.push(t);
   }
 
-  // Also remove any remaining raw HTTP/HTTPS URLs that were inside loaders
-  // (EXCEPT: Discord invites, files.catbox.moe, and rbxassetid://)
-  cleaned = cleaned.split("\n").map(line => {
-    if (/discord\.gg|discord\.com\/invite|files\.catbox\.moe|rbxassetid:/i.test(line)) return line;
-    // Remove URLs that look like script sources (raw.githubusercontent, pastebin, etc.)
-    return line.replace(/https?:\/\/(raw\.githubusercontent|pastebin|gist\.github|rawbin|hastebin|controlc|textbin)[^\s"'()\]]+/gi, "");
-  }).join("\n");
-
-  // ─── STEP 2: REMOVE IP GRABBERS / IP LOGGERS ───
-  const grabberPatterns = [
-    // Domains
-    /https?:\/\/(www\.)?(nipiscan\.com|iplogger\.org|iplogger\.com|grabify\.link|grabify\.xyz|spiderip\.com|blasze\.tk|blasze\.com|pornhub\.com|discord\.media|bit\.ly|tinyurl\.com|is\.gd|t\.co|ow\.ly|rb\.gy|cutt\.ly|bc\.vc|shrt\.co|v\.gd|adf\.ly|linkvertise\.com|linkvertise\.net|shorte\.st|bcvc\.one|iplog\.co|ipgrab\.io|grabip\.net|ip-tracker\.org|ip-trace\.com|ipgrabbed\.com|iplogged\.com|ip-grabber\.com|ip-logger\.info|ipgrabber\.com|iplogger\.info|grabify\.club|grabify\.ga|grabify\.cf|grabify\.ml|grabify\.tk|iplogger\.ru|iplogger\.su|iplogger\.top|iplogger\.xyz|grabify\.app|grabify\.dev|grabify\.fun|grabify\.online|grabify\.site|grabify\.xyz|grabify\.zip|iplogger\.click|iplogger\.cloud|iplogger\.email|iplogger\.guru|iplogger\.live|iplogger\.one|iplogger\.shop|iplogger\.site|iplogger\.tech|iplogger\.today|iplogger\.world|iplogger\.xyz|iplogger\.zone|ipapi\.co|ip-api\.com|ipify\.org|icanhazip\.com|ifconfig\.co|ifconfig\.me|whatismyip\.com|ipinfo\.io|ipgeolocation\.io|freegeoip\.app|freegeoip\.net|checkip\.amazonaws\.com|ip\.info|ip\.cn|ip\.sb|ip\.sh|ipapi\.is|ipdata\.co|ipstack\.com|ipgeolocationapi\.com|extreme-ip-lookup\.com|ip-api\.io|ip-lookup\.net|myip\.com|showmyip\.com|whatismyipaddress\.com|ipaddress\.com|iplocation\.net|ip2location\.com|db-ip\.com|geoiplookup\.net|ipinfodb\.com|maxmind\.com|ipqualityscore\.com|iphub\.info|getipintel\.net|ipvoid\.com|scamalytics\.com|ipriskscore\.com|fraudguard\.io|ipcheck\.tmgcore\.com|proxycheck\.io|vpnapi\.io|getipintel\.net|iphub\.info|ipapi\.co|ip-api\.com|ipify\.org|icanhazip\.com|ifconfig\.co|ipinfo\.io|ipgeolocation\.io)\S*/gi,
-    // IP fetching patterns
-    /fetch\s*\(\s*["']https?:\/\/[^"']*(ip-api|ipify|icanhazip|ifconfig|whatismyip|ipinfo|ipgeolocation|freegeoip|checkip|ipinfo|ipgrab|iplog|grabip|logger|steal|spy|track)/gi,
-    /http\.get\s*\(\s*["'][^"']*(ip|grab|log|track|spy|steal|logger|iplog|ipgrab)/gi,
-    /syn\.request\s*\([^)]*["']https?:\/\//gi,
-    /socket\.(connect|tcp|udp|bind|listen)/gi,
-    /req\.url|req\.headers|client\.ip|request\.RemoteAddress|game\.Players\.LocalPlayer\.IpAddress/i,
-    // Generic IP logger API patterns
-    /https?:\/\/[^\s"'()\]]+\.(php|asp|aspx|jsp|cgi)\?[^\s"'()\]]*(ip|id|uid|user|name|data|info|log|grab|track|spy)/gi,
-  ];
-  for (const p of grabberPatterns) {
-    cleaned = cleaned.split("\n").filter(line => !p.test(line)).join("\n");
+  if (!hasLua) {
+    try {
+      var cc = cleaned.filter(function(l) { return l && l.trim(); }).length;
+      var oc = linesArr.filter(function(l) { return l && String(l).trim(); }).length;
+      if (cc === oc) return text;
+    } catch { return text; }
   }
 
-  // ─── STEP 3: Remove multi-line comments ───
-  cleaned = cleaned.replace(/--\[\[[\s\S]*?\]\]/g, "");
-
-  // ─── STEP 4: Remove single-line comments (KEEP lines with Discord invites) ───
-  cleaned = cleaned.split("\n").map(line => {
-    if (/discord\.gg|discord\.com\/invite/i.test(line)) return line;
-    const inStr = { s: false, d: false };
-    let cutAt = -1;
-    for (let i = 0; i < line.length - 1; i++) {
-      const c = line[i], n = line[i+1];
-      if (c === "\\" && i+1 < line.length) { i++; continue; }
-      if (c === '"' && !inStr.s) inStr.d = !inStr.d;
-      if (c === "'" && !inStr.d) inStr.s = !inStr.s;
-      if (!inStr.s && !inStr.d && c === '-' && n === '-') { cutAt = i; break; }
+  try {
+    var indented = [];
+    var indent = 0;
+    for (var ci = 0; ci < cleaned.length; ci++) {
+      var cl = cleaned[ci];
+      if (!cl) { indented.push(""); continue; }
+      var t2 = cl.trim();
+      if (!t2) { indented.push(""); continue; }
+      var decr = 0;
+      if (/^(end|until)/i.test(t2)) decr = 1;
+      if (/^else\s*$/i.test(t2) || /^elseif\s+/i.test(t2)) decr = 1;
+      indent = Math.max(0, indent - decr);
+      indented.push("  ".repeat(indent) + t2);
+      var incr = 0;
+      if (/\b(then|do|repeat|function)\b/i.test(t2) && !/\bend\b/i.test(t2)) incr = 1;
+      if (decr && /\bthen\b/i.test(t2)) incr = 1;
+      indent = Math.max(0, indent + incr);
     }
-    return cutAt >= 0 ? line.slice(0, cutAt).trimEnd() : line;
-  }).join("\n");
-
-  // ─── STEP 5: Replace standalone print/warn lines ───
-  cleaned = cleaned.replace(/^\s*(print|warn)\s*\([^)]*\)\s*;?\s*$/gm, 'print("prince is the best")');
-
-  // ─── STEP 6: Remove other random URLs (EXCEPT Discord invites & catbox.moe & rbxassetid) ───
-  cleaned = cleaned.split("\n").map(line => {
-    if (/discord\.gg|discord\.com\/invite|files\.catbox\.moe|rbxassetid:/i.test(line)) return line;
-    return line.replace(/https?:\/\/[^\s"'()\]]+/gi, "");
-  }).join("\n");
-
-  // ─── STEP 7: IMPROVE READABILITY — split compressed code onto proper lines ───
-  let formatted = cleaned;
-  formatted = formatted.replace(/\)(local|function|if|for|while|repeat|return|break|print|warn|error|pcall|xpcall)/g, ")\n$1");
-  formatted = formatted.replace(/end(\s*)(local|function|if|for|while|repeat|return|print|warn)/g, "end\n$2");
-  formatted = formatted.replace(/;(\s*)(local|function|if|for|while|repeat|return|print|warn|error)/g, ";\n$2");
-
-  // ─── STEP 8: Smart indentation ───
-  const indentedArr = [];
-  let indent = 0;
-  const indentStr = "  ";
-  for (const rawLine of formatted.split("\n")) {
-    let line = rawLine.trim();
-    if (!line) { indentedArr.push(""); continue; }
-
-    const isClosing = /^(end|else|elseif|until|})/.test(line);
-    if (isClosing) indent = Math.max(0, indent - 1);
-
-    indentedArr.push(indentStr.repeat(indent) + line);
-
-    const opens = (line.match(/\b(then|do|repeat|function)\b/g) || []).length;
-    const closes = (line.match(/\b(end|until)\b/g) || []).length;
-    if (/\bif\b.*\bthen\b.*\bend\b/.test(line)) { /* single line */ }
-    else if (/\bfor\b.*\bdo\b.*\bend\b/.test(line)) { /* single line */ }
-    else if (/\bwhile\b.*\bdo\b.*\bend\b/.test(line)) { /* single line */ }
-    else {
-      indent += opens - closes;
-      if (indent < 0) indent = 0;
-    }
+    var result = indented.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    return result || text;
+  } catch {
+    return cleaned.join("\n") || text;
   }
 }
 
