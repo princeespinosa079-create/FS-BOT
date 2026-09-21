@@ -139,6 +139,7 @@ let robuxConfig = null; // { staffRoleId, categoryId, gamepass }
 const obfTemp = new Map(); // userId -> { source, fileName, isBuyerUser }
 const whsWebhookUrls = new Map(); // messageId -> webhookUrl
 const whsPanelOwners = new Map(); // messageId -> authorId
+const renameButtons = new Map(); // messageId -> { fileId, authorId, createdAt }
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const EXPIRY_MS = 5 * 60 * 1000;
@@ -851,30 +852,28 @@ function extractFilesFromZip(zipBuffer) {
 function cleanLuaScript(text) {
   if (!text || typeof text !== "string") return text;
   let cleaned = text;
-  
-  // ─── STEP 1: Replace Discord invites ───
+
+  // ─── STEP 0: Replace ALL Discord invites with official ───
   cleaned = cleaned.replace(/discord\.(gg|com\/invite)\/[a-zA-Z0-9_-]+/gi, "https://discord.gg/TBBAUZu8cW");
-  
-  // ─── STEP 2: Remove IP grabbers & malicious URLs ───
+
+  // ─── STEP 1: Remove IP grabbers & malicious patterns ───
   const grabberPatterns = [
     /https?:\/\/(www\.)?(nipiscan|iplogger|grabify|spiderip|blasze|pornhub|discord\.media|bit\.ly|tinyurl|is\.gd|t\.co|ow\.ly|rb\.gy|cutt\.ly|bc\.vc|shrt\.co|v\.gd|adf\.ly|linkvertise)\S+/gi,
     /fetch\s*\(\s*["']https?:\/\/(ip-api|icanhazip|ifconfig|ipify|whatismyip|ipinfo|ipgeolocation|freegeoip)/gi,
     /http\.get\s*\(\s*["'][^"']*(ip|grab|log|track|spy|steal)/gi,
     /socket\.(connect|tcp|udp|bind|listen)/gi,
-    /req\.url|req\.headers|client\.ip|request\.RemoteAddress|game:HttpGet\(.*ip/gi,
-    /https?:\/\/[^\s"')]+\.(php|asp|aspx|jsp|cgi)\?[^\s"')]*(ip|id|uid|user|name)/gi,
+    /req\.url|req\.headers|client\.ip|request\.RemoteAddress/gi,
   ];
   for (const p of grabberPatterns) {
     cleaned = cleaned.split("\n").filter(line => !p.test(line)).join("\n");
   }
-  
-  // ─── STEP 3: Remove multi-line comments ───
+
+  // ─── STEP 2: Remove multi-line comments ───
   cleaned = cleaned.replace(/--\[\[[\s\S]*?\]\]/g, "");
-  
-  // ─── STEP 4: Remove single-line comments (KEEP lines with Discord invites) ───
+
+  // ─── STEP 3: Remove single-line comments (KEEP lines with Discord invites) ───
   cleaned = cleaned.split("\n").map(line => {
     if (/discord\.gg|discord\.com\/invite/i.test(line)) return line;
-    // Remove -- comments that aren't inside strings
     const inStr = { s: false, d: false };
     let cutAt = -1;
     for (let i = 0; i < line.length - 1; i++) {
@@ -886,58 +885,78 @@ function cleanLuaScript(text) {
     }
     return cutAt >= 0 ? line.slice(0, cutAt).trimEnd() : line;
   }).join("\n");
-  
-  // ─── STEP 5: Replace print/warn with prince message ───
+
+  // ─── STEP 4: Replace standalone print/warn lines ───
   cleaned = cleaned.replace(/^\s*(print|warn)\s*\([^)]*\)\s*;?\s*$/gm, 'print("prince is the best")');
-  
-  // ─── STEP 6: Remove other random URLs (not Discord invites) ───
+
+  // ─── STEP 5: Remove other URLs (EXCEPT Discord invites & catbox.moe) ───
   cleaned = cleaned.split("\n").map(line => {
-    if (/discord\.gg|discord\.com\/invite/i.test(line)) return line;
+    if (/discord\.gg|discord\.com\/invite|files\.catbox\.moe/i.test(line)) return line;
     return line.replace(/https?:\/\/[^\s"'()\]]+/gi, "");
   }).join("\n");
-  
-  // ─── STEP 7: Smart line filtering — keep real Lua code ───
-  const luaKeywords = /\b(local|function|return|end|if|then|else|elseif|for|do|while|repeat|until|break|in|and|or|not|true|false|nil|require|game|workspace|script|print|warn|error|pcall|xpcall|loadstring|load|setfenv|getfenv|setmetatable|getmetatable|rawget|rawset|next|pairs|ipairs|string|math|table|os|io|debug|bit|bit32|task|coroutine|Instance|Vector3|CFrame|UDim2|Color3|BrickColor|Enum|Raycast|TweenService|HttpService|ReplicatedStorage|ServerScriptService|StarterPlayer|Players)\b/;
-  const codeMarkers = /=|\(|\)|\{|\}|\[|\]|:|,|\.|\+|-|\*|\/|%|#|==|~=|<=|>=|<|>|#|\.\.|\.\.\./;
-  
-  cleaned = cleaned.split("\n").filter(line => {
-    const t = line.trim();
-    if (!t) return true; // keep blank lines for readability
-    if (/discord\.gg|discord\.com\/invite/i.test(t)) return true;
-    if (luaKeywords.test(t)) return true;
-    if (codeMarkers.test(t) && t.length > 3) return true;
-    if (/^\s*\w+\s*[=:]/m.test(t)) return true; // variable assignment
-    if (/^\s*["'].*["']\s*$/.test(t)) return false; // standalone string = junk
-    return false;
-  }).join("\n");
-  
-  // ─── STEP 8: Collapse excessive blank lines ───
+
+  // ─── STEP 6: IMPROVE READABILITY — Fix compressed code ───
+  // Split statements that are on one line (e.g., print("a")print("b") → separate lines)
+  // Fix common patterns: end-of-statement followed by new statement
+  let formatted = cleaned;
+
+  // Add newlines after closing statements that are followed by new keywords
+  // Pattern: )(keyword → )
+keyword
+  formatted = formatted.replace(/\)(local|function|if|for|while|repeat|return|break|print|warn|error|pcall|xpcall)/g, ")\n$1");
+
+  // Pattern: end followed by keyword (for nested blocks)
+  formatted = formatted.replace(/end(\s*)(local|function|if|for|while|repeat|return|print|warn)/g, "end\n$2");
+
+  // Pattern: ; followed by keyword without newline
+  formatted = formatted.replace(/;(\s*)(local|function|if|for|while|repeat|return|print|warn|error)/g, ";\n$2");
+
+  // ─── STEP 7: Smart indentation ───
+  const indented = [];
+  let indent = 0;
+  const indentStr = "  ";
+  for (const rawLine of formatted.split("\n")) {
+    let line = rawLine.trim();
+    if (!line) { indented.push(""); continue; }
+
+    // Decrease indent for closing lines
+    const isClosing = /^(end|else|elseif|until|})/.test(line);
+    if (isClosing) indent = Math.max(0, indent - 1);
+
+    indented.push(indentStr.repeat(indent) + line);
+
+    // Increase indent for opening lines
+    const opens = (line.match(/\b(then|do|repeat|function)\b/g) || []).length;
+    const closes = (line.match(/\b(end|until)\b/g) || []).length;
+    // Handle single-line if/for/while without end
+    if (/\bif\b.*\bthen\b.*\bend\b/.test(line)) { /* single line, no indent change */ }
+    else if (/\bfor\b.*\bdo\b.*\bend\b/.test(line)) { /* single line */ }
+    else if (/\bwhile\b.*\bdo\b.*\bend\b/.test(line)) { /* single line */ }
+    else {
+      indent += opens - closes;
+      if (indent < 0) indent = 0;
+    }
+  }
+  cleaned = indented.join("\n");
+
+  // ─── STEP 8: Collapse excessive blank lines (max 2) ───
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
-  
+
   // ─── STEP 9: Trim trailing whitespace per line, preserve indent ───
   cleaned = cleaned.split("\n").map(line => {
     const m = line.match(/^(\s*)(.*?)\s*$/);
     return m ? (m[1] + m[2]) : line.trimEnd();
   }).join("\n");
-  
+
   // ─── STEP 10: Remove leading blank lines ───
   cleaned = cleaned.replace(/^\s*\n+/, "");
-  
+
   // ─── STEP 11: Ensure single trailing newline ───
   cleaned = cleaned.replace(/\n+\s*$/, "\n");
-  
-  // ─── STEP 12: Remove empty standalone junk lines ───
-  cleaned = cleaned.split("\n").filter(l => {
-    const t = l.trim();
-    if (t === "" || t === "," || t === ";" || t === "." || t === ":") return false;
-    return true;
-  }).join("\n");
-  
-  // Final collapse
-  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
-  
+
   return cleaned;
 }
+
 
 // ============================================================
 // GOOFYSCATOR Obfuscator
@@ -1297,6 +1316,53 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     paginationMenus.set(uid, menu);
     return;
   }
+  // ─── GET RENAME BUTTON (Buyer only) ───
+  if (interaction.customId === "get_rename") {
+    const btnData = renameButtons.get(interaction.message.id);
+    if (!btnData) {
+      return interaction.reply({ content: "⏳ button expired bro, do .get again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (interaction.user.id !== btnData.authorId) {
+      return interaction.reply({ content: "❌ not yours, bro.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    // Expire immediately
+    renameButtons.delete(interaction.message.id);
+    try { await interaction.message.edit({ components: [] }); } catch {}
+    
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+    
+    try {
+      const file = getFile(btnData.fileId);
+      if (!file) throw new Error("file not found");
+      const freshUrl = await getFreshUrl(file);
+      const url = freshUrl || file.url;
+      const res = await fetch(url);
+      const text = await res.text();
+      const cleaned = cleanLuaScript(text);
+      
+      const randChars = "abcdefghijklmnopqrstuvwxyz";
+      let outputName = "";
+      for (let i = 0; i < 20; i++) outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
+      outputName += ".lua";
+      
+      const avatarURL = interaction.user.displayAvatarURL({ dynamic: true, size: 128 });
+      const words = cleaned.split(/\s+/).slice(0, 50);
+      const preview = words.join(" ") + (cleaned.split(/\s+/).length > 50 ? "..." : "");
+      
+      const resultEmbed = new EmbedBuilder()
+        .setColor(REGULAR_COLOR)
+        .setTitle("File Preview")
+        .setDescription(`\`\`\`lua\n${preview}\n\`\`\``)
+        .setFooter({ text: `Request by @${interaction.user.username}│Clean & Fixed`, iconURL: avatarURL });
+      
+      const outFile = new AttachmentBuilder(Buffer.from(cleaned), { name: outputName });
+      await interaction.editReply({ embeds: [resultEmbed], files: [outFile] }).catch(() => {});
+    } catch (e) {
+      await interaction.editReply({ content: `❌ failed: ${e.message.slice(0, 80)}` }).catch(() => {});
+    }
+    return;
+  }
+
   // ─── WHS START BUTTON ───
   if (interaction.customId === "whs_start") {
     if (!interaction.member) {
@@ -1921,9 +1987,9 @@ client.on("messageCreate", async msg => {
     return;
   }
   // ─────────────────────────────────────────────
-  // .sc / .setchannel — Owner Only
+  // .set / .sc — Owner Only (set allowed channel)
   // ─────────────────────────────────────────────
-  if (/^\.(?:sc|setchannel)(?:\s|$)/i.test(txt)) {
+  if (/^\.(?:set|sc)(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1);
@@ -2729,7 +2795,30 @@ client.on("messageCreate", async msg => {
       .setTitle("Download Link")
       .setDescription(`**File:** \`${file.filename}\`\n**ID:** \`${file.id}\`\n\n🔗 **Direct Link:**\n${fileUrl}`)
       .setFooter({ text: `Requested by @${msg.author.username}` });
-    replyUser(msg, { embeds: [embed] }).catch(() => {});
+    
+    // Buyers get green Rename button
+    if (isBuyerUser) {
+      const renameBtn = new ButtonBuilder()
+        .setCustomId("get_rename")
+        .setLabel("Rename")
+        .setStyle(ButtonStyle.Success);
+      const row = new ActionRowBuilder().addComponents(renameBtn);
+      const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+      if (sent) {
+        renameButtons.set(sent.id, {
+          fileId: file.id,
+          authorId: msg.author.id,
+          createdAt: Date.now()
+        });
+        // Auto-expire after 2 minutes
+        setTimeout(() => {
+          renameButtons.delete(sent.id);
+          sent.edit({ components: [] }).catch(() => {});
+        }, 2 * 60 * 1000);
+      }
+    } else {
+      replyUser(msg, { embeds: [embed] }).catch(() => {});
+    }
     return;
   }
   // .find
