@@ -2652,29 +2652,39 @@ client.on("messageCreate", async msg => {
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
 
     // Check if Instagram URL
-    if (/instagram\.com|instagr\.am/i.test(arg)) {
+    if (/instagram\.com|instagr\.am|ig\.me/i.test(arg)) {
       const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
       try {
-        // Try rapidapi / instagram downloader API
-        let videoUrl = null;
+        let downloadUrl = null;
+        let mediaType = "Media";
         try {
-          const apiUrl = `https://api.cobalt.tools/api/json?url=${encodeURIComponent(arg)}`;
-          const apiRes = await fetch(apiUrl, {
+          const apiRes = await fetch("https://api.cobalt.tools/api/json", {
             method: "POST",
             headers: { "Content-Type": "application/json", "Accept": "application/json" },
             body: JSON.stringify({ url: arg })
           });
+          if (!apiRes.ok) throw new Error("API " + apiRes.status);
           const data = await apiRes.json();
-          if (data?.url) videoUrl = data.url;
+          
+          if (data?.url) {
+            downloadUrl = data.url;
+            mediaType = data.audio ? "Audio" : "Video/Photo";
+          } else if (data?.audio) {
+            downloadUrl = data.audio;
+            mediaType = "Audio";
+          } else if (data?.picker && Array.isArray(data.picker) && data.picker.length > 0) {
+            downloadUrl = data.picker[0].url;
+            mediaType = "Photo (1/" + data.picker.length + ")";
+          }
         } catch {}
         
-        if (!videoUrl) throw new Error("Failed to get Instagram media");
+        if (!downloadUrl) throw new Error("Failed to get Instagram media");
         
         const resEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
           .setTitle("📥 Instagram Download")
-          .setDescription(`🔗 **Download:** [Click Here](${videoUrl})`)
-          .setFooter({ text: `Request by @${msg.author.username}│Instagram DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
+          .setDescription("**Type:** " + mediaType + "\n🔗 **Download:** [Click Here](" + downloadUrl + ")")
+          .setFooter({ text: "Request by @" + msg.author.username + "│Instagram DL", iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
         
         if (sentMsg) await sentMsg.delete().catch(() => {});
         await msg.channel.send({
@@ -2683,7 +2693,7 @@ client.on("messageCreate", async msg => {
         }).catch(() => {});
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ failed: ${e.message.slice(0, 80)}`).catch(() => {});
+        replyUser(msg, "❌ failed — link may be private, expired, or not a post/reel.").catch(() => {});
       }
       return;
     }
