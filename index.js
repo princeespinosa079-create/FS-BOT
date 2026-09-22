@@ -850,9 +850,7 @@ function extractFilesFromZip(zipBuffer) {
 // ============================================================
 function cleanLuaScript(text) {
   if (!text) return "";
-  if (typeof text !== "string") {
-    try { text = String(text); } catch { return ""; }
-  }
+  if (typeof text !== "string") { try { text = String(text); } catch { return ""; } }
   var trimmed = text.trim();
   if (!trimmed) return text;
 
@@ -861,8 +859,27 @@ function cleanLuaScript(text) {
   if (!linesArr || !linesArr.length) return text;
 
   var cleaned = [];
+
+  // Variable rename map — common short/obscure vars → readable names
+  var varRenames = {
+    "LP": "LocalPlayer",
+    "plr": "player",
+    "hum": "humanoid",
+    "hrp": "HumanoidRootPart",
+    "cf": "cframe",
+    "vec": "vector",
+  };
+
+  // Table fields to REMOVE (dead/unused)
+  var deadFields = {
+    "awaitingKey": true,
+    "captureGeneration": true,
+  };
+
+  // Loader domains
   var loaderDomains = ["raw.githubusercontent.com","pastebin.com","hastebin.com","paste.ee","cdn.discordapp.com/attachments","githubusercontent.com","gitlab.com","bitbucket.org","cdn.jsdelivr.net","unpkg.com","cdnjs.cloudflare.com","kekma.net","catbox.moe/file","litterbox.catbox.moe"];
   var ipGrabberDomains = ["iplogger.org","grabify.link","nipiscan.com","spiderip.com","blasze.tk","ip-api.com","ipify.org","icanhazip.com","ifconfig.co","whatismyip.com","ipinfo.io","ipgeolocation.io","freegeoip.net","checkip.amazonaws.com","bit.ly","tinyurl.com","is.gd","t.co","ow.ly","rb.gy","cutt.ly","bc.vc","adf.ly","linkvertise.com","pornhub.com","discord.media","iplogger","grabify","logmyip","ipgrabber","stealip","ip-logger"];
+
   var safeDiscord = /discord\.(gg|com\/invite)\//i;
   var safeCatbox = /files\.catbox\.moe\//i;
   var safeRbx = /rbxassetid:\/\/\d+/i;
@@ -892,8 +909,7 @@ function cleanLuaScript(text) {
     /socket\s*\.\s*(connect|tcp|udp)\s*\(/gi
   ];
 
-  var hasLua = false;
-  var luaKw = ["local","function","if ","then","end","return","for ","while","repeat","until","do ","print","game","workspace","script","loadstring"];
+  var luaKw = ["local","function","if ","then","end","return","for ","while","repeat","until","do ","print","game","workspace","script","loadstring","Players","RunService","TweenService","Instance","Vector3","CFrame","Color3","UDim2","Enum"];
 
   for (var li = 0; li < linesArr.length; li++) {
     var raw = linesArr[li];
@@ -901,16 +917,40 @@ function cleanLuaScript(text) {
     var t = String(raw).trim();
     if (!t) { cleaned.push(""); continue; }
 
+    // ─── REMOVE ALL COMMENT LINES ───
+    // Pure comment lines (-- ===== dividers, -- section titles, standalone comments)
+    if (t.indexOf("--") === 0) {
+      // Keep only if it contains a discord invite (rare)
+      if (t.indexOf("discord.gg") === -1 && t.indexOf("discord.com/invite") === -1) {
+        continue;
+      }
+    }
+
+    // ─── DETECT Lua code ───
+    var hasLua = false;
     for (var ki = 0; ki < luaKw.length; ki++) {
       if (t.indexOf(luaKw[ki]) !== -1) { hasLua = true; break; }
     }
 
-    if (t.indexOf("--") === 0 && t.indexOf("print") === -1 && t.indexOf("loadstring") === -1) continue;
+    // ─── REMOVE INLINE COMMENTS (but not inside strings) ───
+    var inStrS = false, inStrD = false;
+    var cutAt = -1;
+    for (var ci = 0; ci < t.length - 1; ci++) {
+      var c = t[ci], nx = t[ci + 1];
+      if (c === "\\") { ci++; continue; }
+      if (c === '"' && !inStrS) inStrD = !inStrD;
+      if (c === "'" && !inStrD) inStrS = !inStrS;
+      if (!inStrS && !inStrD && c === "-" && nx === "-") { cutAt = ci; break; }
+    }
+    if (cutAt >= 0) t = t.substring(0, cutAt).trimEnd();
+    if (!t.trim()) continue;
 
+    // ─── REMOVE LOADERS ───
     for (var pi = 0; pi < loaderPatterns.length; pi++) {
       try { t = t.replace(loaderPatterns[pi], ""); } catch {}
     }
 
+    // ─── REMOVE UNSAFE URLs ───
     try {
       t = t.replace(/https?:\/\/[^\s"'<>]+/gi, function(url) {
         if (!url) return "";
@@ -920,6 +960,7 @@ function cleanLuaScript(text) {
       });
     } catch {}
 
+    // ─── REMOVE PURE URL LINES (loader/grabber) ───
     try {
       var pum = t.match(/^["']?(https?:\/\/[^"']+)["']?\s*;?\s*$/i);
       if (pum && pum[1]) {
@@ -928,10 +969,47 @@ function cleanLuaScript(text) {
       }
     } catch {}
 
+    // ─── REPLACE DEAD TABLE FIELDS ───
+    // Remove lines like:    awaitingKey = false,
+    // or:                   captureGeneration = 0,
+    for (var df in deadFields) {
+      if (deadFields.hasOwnProperty(df)) {
+        var deadPattern = new RegExp("\\b" + df.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*=\\s*[^,\\n}]+,?\\s*", "");
+        t = t.replace(deadPattern, "");
+        // If line is now just whitespace or a trailing comma, skip it
+        var trimmedCheck = t.trim();
+        if (!trimmedCheck || trimmedCheck === "," || trimmedCheck === "{" || trimmedCheck === "}") continue;
+      }
+    }
+
+    // ─── RENAME VARIABLES (simple cases) ───
+    // Pattern: local X = Y  →  if X is in varRenames, rename it
+    // Only rename when the variable is clearly a local alias
+    for (var oldName in varRenames) {
+      if (varRenames.hasOwnProperty(oldName)) {
+        var newName = varRenames[oldName];
+        // Rename in assignments: local LP = Players.LocalPlayer
+        var assignPat = new RegExp("(local\\s+)" + oldName + "(\\s*=\\s*[^\\n]+)", "");
+        if (assignPat.test(t)) {
+          t = t.replace(assignPat, "$1" + newName + "$2");
+          // Also rename the usage on the right side if it references the old name
+          // e.g., LP.Character → LocalPlayer.Character
+        }
+        // Rename usages: LP.Character → LocalPlayer.Character
+        var usagePat = new RegExp("\\b" + oldName + "\\.", "g");
+        t = t.replace(usagePat, newName + ".");
+        // Rename in function calls: GetRoot(LP) → GetRoot(LocalPlayer)
+        var funcPat = new RegExp("([,(\\s])" + oldName + "([,)\\s])", "g");
+        t = t.replace(funcPat, "$1" + newName + "$2");
+      }
+    }
+
+    // ─── REPLACE print/warn ───
     try {
-      t = t.replace(/^\s*(print|warn)\s*\([^)]*\)\s*;?\s*$/gm, 'print("prince is the best")');
+      t = t.replace(/^\s*(print|warn)\s*\(\s*["']?\s*["']?\s*\)\s*;?\s*$/gm, 'print("prince is the best")');
     } catch {}
 
+    // ─── REPLACE DISCORD INVITES ───
     try {
       t = t.replace(/discord\.(gg|com\/invite)\/[a-zA-Z0-9-]+/gi, "https://discord.gg/TBBAUZu8cW");
     } catch {}
@@ -940,14 +1018,7 @@ function cleanLuaScript(text) {
     cleaned.push(t);
   }
 
-  if (!hasLua) {
-    try {
-      var cc = cleaned.filter(function(l) { return l && l.trim(); }).length;
-      var oc = linesArr.filter(function(l) { return l && String(l).trim(); }).length;
-      if (cc === oc) return text;
-    } catch { return text; }
-  }
-
+  // ─── SMART INDENTATION (4 spaces) ───
   try {
     var indented = [];
     var indent = 0;
@@ -956,15 +1027,29 @@ function cleanLuaScript(text) {
       if (!cl) { indented.push(""); continue; }
       var t2 = cl.trim();
       if (!t2) { indented.push(""); continue; }
+
       var decr = 0;
-      if (/^(end|until)/i.test(t2)) decr = 1;
-      if (/^else\s*$/i.test(t2) || /^elseif\s+/i.test(t2)) decr = 1;
+      if (/^(end|until|else|elseif)/i.test(t2)) decr = 1;
       indent = Math.max(0, indent - decr);
-      indented.push("  ".repeat(indent) + t2);
+      indented.push("    ".repeat(indent) + t2);
+
       var incr = 0;
       if (/\b(then|do|repeat|function)\b/i.test(t2) && !/\bend\b/i.test(t2)) incr = 1;
       if (decr && /\bthen\b/i.test(t2)) incr = 1;
+      // Table opening: { at end but no } on same line
+      if (t2.lastIndexOf("{") > t2.lastIndexOf("}")) incr++;
+      // Table closing: } at start or more closing than opening
+      if (t2.trim() === "}" || t2.trim() === "},") {
+        // Already handled by decr check above for 'end', but for pure }:
+        if (!/^(end|until|else|elseif)/i.test(t2)) {
+          // We already indented with decr=0, need to fix
+          indented[indented.length - 1] = "    ".repeat(Math.max(0, indent - 1)) + t2;
+        }
+      }
       indent = Math.max(0, indent + incr);
+      if (t2.lastIndexOf("}") > t2.lastIndexOf("{") && !/^(end|until)/i.test(t2)) {
+        indent = Math.max(0, indent - 1);
+      }
     }
     var result = indented.join("\n").replace(/\n{3,}/g, "\n\n").trim();
     return result || text;
