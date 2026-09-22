@@ -861,7 +861,12 @@ function cleanLuaScript(text) {
   var scriptName = detectScriptName(linesArr);
   var cleaned = [];
 
-  var varRenames = { LP: "LocalPlayer" };
+  // Rename LONG → SHORT aliases (only variables, NOT property names after dots)
+  var varRenames = {
+    "LocalPlayer": "LP",
+    "HumanoidRootPart": "HRP",
+  };
+
   var deadFields = { awaitingKey: true, captureGeneration: true };
   var loaderDomains = ["raw.githubusercontent.com","pastebin.com","hastebin.com","paste.ee","cdn.discordapp.com/attachments","githubusercontent.com","gitlab.com","bitbucket.org","cdn.jsdelivr.net","unpkg.com","cdnjs.cloudflare.com","kekma.net"];
   var ipGrabberDomains = ["iplogger.org","grabify.link","nipiscan.com","spiderip.com","blasze.tk","ip-api.com","ipify.org","icanhazip.com","ifconfig.co","bit.ly","tinyurl.com","is.gd","t.co","ow.ly","rb.gy","cutt.ly","adf.ly","linkvertise.com","pornhub.com","discord.media","iplogger","grabify"];
@@ -882,6 +887,8 @@ function cleanLuaScript(text) {
   }
 
   var loaderPatterns = [
+    /loadstring\s*\([^)]*\)\s*\(\s*\)/gi,
+    /loadstring\s*\([^)]*\)\s*\(\s*[^)]*\)/gi,
     /loadstring\s*\([^)]*\)/gi,
     /game\s*:\s*HttpGet\s*\([^)]*\)/gi,
     /HttpService\s*:\s*GetAsync\s*\([^)]*\)/gi,
@@ -891,7 +898,8 @@ function cleanLuaScript(text) {
     /xpcall\s*\(\s*loadstring[^)]*\)/gi,
     /identifyexecutor\s*\([^)]*\)/gi,
     /load\s*\([^)]+\)/gi,
-    /require\s*\(\s*["']https?:\/\/[^"']+["']\s*\)/gi
+    /require\s*\(\s*["']https?:\/\/[^"']+["']\s*\)/gi,
+    /\)\s*\(\s*\)/g,
   ];
 
   var luaKw = ["local","function","if ","then","end","return","for ","while","repeat","until","do ","print","game","workspace","script","loadstring","Players","Instance","Vector3","CFrame","Color3","UDim2","Enum"];
@@ -918,7 +926,7 @@ function cleanLuaScript(text) {
     var cutAt = -1;
     for (var ci = 0; ci < t.length - 1; ci++) {
       var c = t.charAt(ci), nx = t.charAt(ci + 1);
-      if (c === "\\" && inStrS || inStrD) { ci++; continue; }
+      if (c === "\\" && (inStrS || inStrD)) { ci++; continue; }
       if (c === '"' && !inStrS) inStrD = !inStrD;
       if (c === "'" && !inStrD) inStrS = !inStrS;
       if (!inStrS && !inStrD && c === "-" && nx === "-") { cutAt = ci; break; }
@@ -926,10 +934,13 @@ function cleanLuaScript(text) {
     if (cutAt >= 0) t = t.substring(0, cutAt).trimEnd();
     if (!t.trim()) continue;
 
-    // Remove loaders
+    // ─── REMOVE SCRIPT LOADERS ───
     for (var pi = 0; pi < loaderPatterns.length; pi++) {
       try { t = t.replace(loaderPatterns[pi], ""); } catch {}
     }
+    t = t.trim();
+    if (!t || t.length < 3) continue;
+    if (/^[\s();,{}]+$/.test(t)) continue;
 
     // Remove unsafe URLs
     try {
@@ -940,6 +951,8 @@ function cleanLuaScript(text) {
         return url;
       });
     } catch {}
+    t = t.trim();
+    if (!t) continue;
 
     // Remove pure URL lines
     try {
@@ -960,20 +973,26 @@ function cleanLuaScript(text) {
       }
     }
 
-    // Rename LP → LocalPlayer only
-    for (var oldName in varRenames) {
-      if (varRenames.hasOwnProperty(oldName)) {
-        var nn = varRenames[oldName];
-        t = t.replace(new RegExp("(local\\s+)" + oldName + "(\\s*=\\s*[^\\n]+)", ""), "$1" + nn + "$2");
-        t = t.replace(new RegExp("\\b" + oldName + "\\.", "g"), nn + ".");
-        t = t.replace(new RegExp("([,(\\s])" + oldName + "([,)\\s])", "g"), "$1" + nn + "$2");
+    // ─── RENAME LONG → SHORT (variables only, NOT after dots) ───
+    for (var longName in varRenames) {
+      if (varRenames.hasOwnProperty(longName)) {
+        var sn = varRenames[longName];
+        // local LocalPlayer = ... → local LP = ...
+        t = t.replace(new RegExp("(local\\s+)" + longName + "(?=\\s*=)", "g"), "$1" + sn);
+        // LocalPlayer.Character → LP.Character (but NOT Players.LocalPlayer)
+        // Use negative lookbehind: not preceded by a dot
+        t = t.replace(new RegExp("(?<!\\.)\\b" + longName + "\\.", "g"), sn + ".");
+        // In function args: (LocalPlayer) → (LP)
+        t = t.replace(new RegExp("([,(\\s=:])" + longName + "([,)\\s])", "g"), "$1" + sn + "$2");
+        // Alone at end of line or before operators
+        t = t.replace(new RegExp("(?<!\\.)\\b" + longName + "\\b(?=\\s*[+\\-*/%<>=~&|^])", "g"), sn);
       }
     }
 
-    // REMOVE print/warn entirely
+    // ─── PRINT/WARN → "prince is goat" ───
     try {
-      if (/^\s*(print|warn)\s*\([^)]*\)\s*;?\s*$/.test(t)) continue;
-      t = t.replace(/\b(print|warn)\s*\([^)]*\)\s*;?\s*/g, "");
+      t = t.replace(/\bprint\s*\([^)]*\)/g, 'print("prince is goat")');
+      t = t.replace(/\bwarn\s*\([^)]*\)/g, 'print("prince is goat")');
     } catch {}
 
     // Replace Discord invites
