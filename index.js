@@ -1,6 +1,7 @@
 const {
   Client,
   GatewayIntentBits,
+  Partials,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -125,12 +126,12 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.DirectMessages
+    GatewayIntentBits.GuildPresences,
   ],
-  partials: ["CHANNEL", "MESSAGE"]
+  partials: [Partials.Channel],
 });
 const runningScans = new Set();
 const paginationMenus = new Map();
@@ -858,37 +859,18 @@ function cleanLuaScript(text) {
   try { linesArr = trimmed.split(/\r?\n/); } catch { linesArr = [trimmed]; }
   if (!linesArr || !linesArr.length) return text;
 
-  var scriptName = detectScriptName(linesArr);
   var cleaned = [];
 
-  // Rename LONG → SHORT aliases (only variables, NOT property names after dots)
-  var varRenames = {
-    "LocalPlayer": "LP",
-    "HumanoidRootPart": "HRP",
-  };
-
-  var deadFields = { awaitingKey: true, captureGeneration: true };
-  var loaderDomains = ["raw.githubusercontent.com","pastebin.com","hastebin.com","paste.ee","cdn.discordapp.com/attachments","githubusercontent.com","gitlab.com","bitbucket.org","cdn.jsdelivr.net","unpkg.com","cdnjs.cloudflare.com","kekma.net"];
-  var ipGrabberDomains = ["iplogger.org","grabify.link","nipiscan.com","spiderip.com","blasze.tk","ip-api.com","ipify.org","icanhazip.com","ifconfig.co","bit.ly","tinyurl.com","is.gd","t.co","ow.ly","rb.gy","cutt.ly","adf.ly","linkvertise.com","pornhub.com","discord.media","iplogger","grabify"];
-
-  var safeDiscord = /discord\.(gg|com\/invite)\//i;
-  var safeCatbox = /files\.catbox\.moe\//i;
-  var safeRbx = /rbxassetid:\/\/\d+/i;
-
-  function isSafeUrl(u) {
-    if (!u) return false;
-    try { return safeDiscord.test(u) || safeCatbox.test(u) || safeRbx.test(u); }
-    catch { return false; }
-  }
-  function hasDomain(arr, t) {
-    if (!t) return false;
-    for (var i = 0; i < arr.length; i++) { if (t.indexOf(arr[i]) !== -1) return true; }
+  function isSafeUrl(text) {
+    if (!text) return false;
+    try { if (/discord\.(gg|com\/invite)\//i.test(text)) return true; } catch {}
+    try { if (/files\.catbox\.moe\//i.test(text)) return true; } catch {}
+    try { if (/rbxassetid:\/\/\d+/i.test(text)) return true; } catch {}
     return false;
   }
 
   var loaderPatterns = [
     /loadstring\s*\([^)]*\)\s*\(\s*\)/gi,
-    /loadstring\s*\([^)]*\)\s*\(\s*[^)]*\)/gi,
     /loadstring\s*\([^)]*\)/gi,
     /game\s*:\s*HttpGet\s*\([^)]*\)/gi,
     /HttpService\s*:\s*GetAsync\s*\([^)]*\)/gi,
@@ -898,11 +880,7 @@ function cleanLuaScript(text) {
     /xpcall\s*\(\s*loadstring[^)]*\)/gi,
     /identifyexecutor\s*\([^)]*\)/gi,
     /load\s*\([^)]+\)/gi,
-    /require\s*\(\s*["']https?:\/\/[^"']+["']\s*\)/gi,
-    /\)\s*\(\s*\)/g,
   ];
-
-  var luaKw = ["local","function","if ","then","end","return","for ","while","repeat","until","do ","print","game","workspace","script","loadstring","Players","Instance","Vector3","CFrame","Color3","UDim2","Enum"];
 
   for (var li = 0; li < linesArr.length; li++) {
     var raw = linesArr[li];
@@ -910,18 +888,16 @@ function cleanLuaScript(text) {
     var t = String(raw).trim();
     if (!t) { cleaned.push(""); continue; }
 
-    // Remove all comment lines
+    // 1. DELETE comment lines entirely
     if (t.indexOf("--") === 0) {
-      if (t.indexOf("discord.gg") === -1 && t.indexOf("discord.com/invite") === -1) continue;
+      if (!isSafeUrl(t)) continue;
     }
 
-    // Detect Lua
-    var hasLua = false;
-    for (var ki = 0; ki < luaKw.length; ki++) {
-      if (t.indexOf(luaKw[ki]) !== -1) { hasLua = true; break; }
-    }
+    // 2. DELETE entire line if contains URL (not safe)
+    var hasUrl = /https?:\/\//.test(t);
+    if (hasUrl && !isSafeUrl(t)) continue;
 
-    // Remove inline comments (not inside strings)
+    // 3. Remove inline comments (not inside strings)
     var inStrS = false, inStrD = false;
     var cutAt = -1;
     for (var ci = 0; ci < t.length - 1; ci++) {
@@ -934,7 +910,7 @@ function cleanLuaScript(text) {
     if (cutAt >= 0) t = t.substring(0, cutAt).trimEnd();
     if (!t.trim()) continue;
 
-    // ─── REMOVE SCRIPT LOADERS ───
+    // 4. Remove script loaders
     for (var pi = 0; pi < loaderPatterns.length; pi++) {
       try { t = t.replace(loaderPatterns[pi], ""); } catch {}
     }
@@ -942,77 +918,19 @@ function cleanLuaScript(text) {
     if (!t || t.length < 3) continue;
     if (/^[\s();,{}]+$/.test(t)) continue;
 
-    // Remove unsafe URLs
+    // 5. Replace Discord invites
     try {
-      t = t.replace(/https?:\/\/[^\s"'<>]+/gi, function(url) {
-        if (!url) return "";
-        if (isSafeUrl(url)) return url;
-        if (hasDomain(loaderDomains, url) || hasDomain(ipGrabberDomains, url)) return "";
-        return url;
-      });
-    } catch {}
-    t = t.trim();
-    if (!t) continue;
-
-    // Remove pure URL lines
-    try {
-      var pum = t.match(/^["']?(https?:\/\/[^"']+)["']?\s*;?\s*$/i);
-      if (pum && pum[1]) {
-        var pu = pum[1];
-        if (!isSafeUrl(pu) && (hasDomain(loaderDomains, pu) || hasDomain(ipGrabberDomains, pu) || /\.(lua|txt|luac|js|json)$/i.test(pu) || /script|load|src|code/i.test(pu))) continue;
-      }
-    } catch {}
-
-    // Remove dead table fields
-    for (var df in deadFields) {
-      if (deadFields.hasOwnProperty(df)) {
-        var dp = new RegExp("\\b" + df + "\\s*=\\s*[^,\\n}]+,?\\s*", "");
-        t = t.replace(dp, "");
-        var tc = t.trim();
-        if (!tc || tc === "," || tc === "{" || tc === "}") continue;
-      }
-    }
-
-    // ─── RENAME LONG → SHORT (variables only, NOT after dots) ───
-    for (var longName in varRenames) {
-      if (varRenames.hasOwnProperty(longName)) {
-        var sn = varRenames[longName];
-        // local LocalPlayer = ... → local LP = ...
-        t = t.replace(new RegExp("(local\\s+)" + longName + "(?=\\s*=)", "g"), "$1" + sn);
-        // LocalPlayer.Character → LP.Character (but NOT Players.LocalPlayer)
-        // Use negative lookbehind: not preceded by a dot
-        t = t.replace(new RegExp("(?<!\\.)\\b" + longName + "\\.", "g"), sn + ".");
-        // In function args: (LocalPlayer) → (LP)
-        t = t.replace(new RegExp("([,(\\s=:])" + longName + "([,)\\s])", "g"), "$1" + sn + "$2");
-        // Alone at end of line or before operators
-        t = t.replace(new RegExp("(?<!\\.)\\b" + longName + "\\b(?=\\s*[+\\-*/%<>=~&|^])", "g"), sn);
-      }
-    }
-
-    // ─── PRINT/WARN → "prince is goat" ───
-    try {
-      t = t.replace(/\bprint\s*\([^)]*\)/g, 'print("prince is goat")');
-      t = t.replace(/\bwarn\s*\([^)]*\)/g, 'print("prince is goat")');
-    } catch {}
-
-    // Replace Discord invites
-    try {
-      t = t.replace(/discord\.(gg|com\/invite)\/[a-zA-Z0-9-]+/gi, "https://discord.gg/TBBAUZu8cW");
+      t = t.replace(/(https?:\/\/)?discord\.(gg|com\/invite)\/[a-zA-Z0-9-]+/gi, "https://discord.gg/TBBAUZu8cW");
     } catch {}
 
     if (!t.trim()) continue;
     cleaned.push(t);
   }
 
-  // Add header
-  if (scriptName) cleaned.unshift("-- " + scriptName);
-  else cleaned.unshift("-- UNKNOWN");
-
   // Smart indentation (4 spaces)
   try {
     var indented = [];
     var indent = 0;
-    var openBr, closeBr;
     for (var ci = 0; ci < cleaned.length; ci++) {
       var cl = cleaned[ci];
       if (!cl) { indented.push(""); continue; }
@@ -1027,8 +945,8 @@ function cleanLuaScript(text) {
       var incr = 0;
       if (/\b(then|do|repeat|function)\b/i.test(t2) && !/\bend\b/i.test(t2)) incr = 1;
       if (decr && /\bthen\b/i.test(t2)) incr = 1;
-      openBr = (t2.match(/{/g) || []).length;
-      closeBr = (t2.match(/}/g) || []).length;
+      var openBr = (t2.match(/{/g) || []).length;
+      var closeBr = (t2.match(/}/g) || []).length;
       if (!/^(end|until|else|elseif)\b/i.test(t2)) {
         if (openBr > closeBr) incr += (openBr - closeBr);
         if (closeBr > openBr) indent = Math.max(0, indent - (closeBr - openBr));
@@ -1036,34 +954,11 @@ function cleanLuaScript(text) {
       indent = Math.max(0, indent + incr);
     }
     var result = indented.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-    return result || text;
+    if (result) return result;
+    return cleaned.join("\n").trim() || "";
   } catch {
-    return cleaned.join("\n") || text;
+    return cleaned.join("\n").trim() || "";
   }
-}
-
-function detectScriptName(linesArr) {
-  if (!linesArr || !linesArr.length) return null;
-  var text = linesArr.join("\n");
-  var m;
-  m = text.match(/\.Name\s*=\s*["']([^"']+(?:Hub|Gui|Script|UI|Panel|Menu|System|Manager|Loader|Core))[^"']*["']/i);
-  if (m) return cleanName(m[1]);
-  m = text.match(/\.Text\s*=\s*["']([^"']{2,40})["']/i);
-  if (m && m[1].length >= 2 && !/^[0-9.]+$/.test(m[1])) return cleanName(m[1]);
-  m = text.match(/local\s+(\w+)\s*=\s*Instance\.new\s*\(\s*["']ScreenGui["']/i);
-  if (m) return cleanName(m[1]);
-  m = text.match(/\.Name\s*=\s*["']([^"']{3,30})["']/);
-  if (m) return cleanName(m[1]);
-  return null;
-}
-
-function cleanName(name) {
-  if (!name) return null;
-  name = name.replace(/Gui$|Hub$|Script$|UI$|Panel$|Menu$|System$|Manager$|Loader$|Core$/i, "");
-  name = name.replace(/([a-z])([A-Z])/g, "$1 $2");
-  name = name.replace(/[_-]/g, " ").trim().replace(/\s+/g, " ");
-  if (name.length <= 2) return name.toUpperCase();
-  return name.charAt(0).toUpperCase() + name.slice(1) || null;
 }
 
 
