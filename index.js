@@ -885,7 +885,8 @@ function cleanLuaScript(text) {
   for (var li = 0; li < linesArr.length; li++) {
     var raw = linesArr[li];
     if (raw === null || raw === undefined) continue;
-    var t = String(raw).trim();
+    var originalLine = String(raw);
+    var t = originalLine.trim();
     if (!t) { cleaned.push(""); continue; }
 
     // 1. DELETE comment lines entirely
@@ -894,71 +895,41 @@ function cleanLuaScript(text) {
     }
 
     // 2. DELETE entire line if contains URL (not safe)
-    var hasUrl = /https?:\/\//.test(t);
-    if (hasUrl && !isSafeUrl(t)) continue;
+    if (/https?:\/\//.test(t) && !isSafeUrl(t)) continue;
 
-    // 3. Remove inline comments (not inside strings)
+    // 3. Remove inline comments (not inside strings) — preserve original indent
     var inStrS = false, inStrD = false;
     var cutAt = -1;
-    for (var ci = 0; ci < t.length - 1; ci++) {
-      var c = t.charAt(ci), nx = t.charAt(ci + 1);
+    for (var ci = 0; ci < originalLine.length - 1; ci++) {
+      var c = originalLine.charAt(ci), nx = originalLine.charAt(ci + 1);
       if (c === "\\" && (inStrS || inStrD)) { ci++; continue; }
       if (c === '"' && !inStrS) inStrD = !inStrD;
       if (c === "'" && !inStrD) inStrS = !inStrS;
       if (!inStrS && !inStrD && c === "-" && nx === "-") { cutAt = ci; break; }
     }
-    if (cutAt >= 0) t = t.substring(0, cutAt).trimEnd();
-    if (!t.trim()) continue;
+    var lineToKeep = originalLine;
+    if (cutAt >= 0) lineToKeep = originalLine.substring(0, cutAt).replace(/\s+$/, "");
+    if (!lineToKeep.trim()) continue;
 
-    // 4. Remove script loaders
+    // 4. Remove script loaders from the line
     for (var pi = 0; pi < loaderPatterns.length; pi++) {
-      try { t = t.replace(loaderPatterns[pi], ""); } catch {}
+      try { lineToKeep = lineToKeep.replace(loaderPatterns[pi], ""); } catch {}
     }
-    t = t.trim();
-    if (!t || t.length < 3) continue;
-    if (/^[\s();,{}]+$/.test(t)) continue;
+    if (!lineToKeep.trim() || lineToKeep.trim().length < 3) continue;
+    if (/^[\s();,{}]+$/.test(lineToKeep.trim())) continue;
 
     // 5. Replace Discord invites
     try {
-      t = t.replace(/(https?:\/\/)?discord\.(gg|com\/invite)\/[a-zA-Z0-9-]+/gi, "https://discord.gg/TBBAUZu8cW");
+      lineToKeep = lineToKeep.replace(/(https?:\/\/)?discord\.(gg|com\/invite)\/[a-zA-Z0-9-]+/gi, "https://discord.gg/TBBAUZu8cW");
     } catch {}
 
-    if (!t.trim()) continue;
-    cleaned.push(t);
+    if (!lineToKeep.trim()) continue;
+    cleaned.push(lineToKeep);
   }
 
-  // Smart indentation (4 spaces)
-  try {
-    var indented = [];
-    var indent = 0;
-    for (var ci = 0; ci < cleaned.length; ci++) {
-      var cl = cleaned[ci];
-      if (!cl) { indented.push(""); continue; }
-      var t2 = cl.trim();
-      if (!t2) { indented.push(""); continue; }
-
-      var decr = 0;
-      if (/^(end|until|else|elseif)\b/i.test(t2)) decr = 1;
-      indent = Math.max(0, indent - decr);
-      indented.push("    ".repeat(indent) + t2);
-
-      var incr = 0;
-      if (/\b(then|do|repeat|function)\b/i.test(t2) && !/\bend\b/i.test(t2)) incr = 1;
-      if (decr && /\bthen\b/i.test(t2)) incr = 1;
-      var openBr = (t2.match(/{/g) || []).length;
-      var closeBr = (t2.match(/}/g) || []).length;
-      if (!/^(end|until|else|elseif)\b/i.test(t2)) {
-        if (openBr > closeBr) incr += (openBr - closeBr);
-        if (closeBr > openBr) indent = Math.max(0, indent - (closeBr - openBr));
-      }
-      indent = Math.max(0, indent + incr);
-    }
-    var result = indented.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-    if (result) return result;
-    return cleaned.join("\n").trim() || "";
-  } catch {
-    return cleaned.join("\n").trim() || "";
-  }
+  // Return with original indentation preserved — NO re-indenting (prevents size explosion)
+  var result = cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return result || "";
 }
 
 
