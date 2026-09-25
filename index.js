@@ -861,6 +861,27 @@ function cleanLuaScript(text) {
 
   var cleaned = [];
 
+  // IP logger / grabber domains — ONLY these get lines deleted
+  var ipGrabberDomains = [
+    "iplogger.org","iplogger.com","grabify.link","grabify.xyz","nipiscan.com",
+    "spiderip.com","blasze.tk","blasze.com","ip-api.com","ipify.org",
+    "icanhazip.com","ifconfig.co","ifconfig.me","whatismyip.com","ipinfo.io",
+    "ipgeolocation.io","freegeoip.net","freegeoip.app","checkip.amazonaws.com",
+    "bit.ly","tinyurl.com","is.gd","t.co","ow.ly","rb.gy","cutt.ly",
+    "bc.vc","adf.ly","linkvertise.com","shorte.st","bcvc.one",
+    "pornhub.com","discord.media","iplogger","grabify","logmyip","ipgrabber",
+    "stealip","ip-logger","ipgrab","iplog","logger","grabip","trackip",
+    "ip-tracker","ip-trace","ipgrabbed","iplogged","ip-logger","ip-grabber"
+  ];
+
+  function isGrabber(text) {
+    if (!text) return false;
+    for (var i = 0; i < ipGrabberDomains.length; i++) {
+      if (text.indexOf(ipGrabberDomains[i]) !== -1) return true;
+    }
+    return false;
+  }
+
   function isSafeUrl(text) {
     if (!text) return false;
     try { if (/discord\.(gg|com\/invite)\//i.test(text)) return true; } catch {}
@@ -869,6 +890,7 @@ function cleanLuaScript(text) {
     return false;
   }
 
+  // Script loader patterns
   var loaderPatterns = [
     /loadstring\s*\([^)]*\)\s*\(\s*\)/gi,
     /loadstring\s*\([^)]*\)/gi,
@@ -880,7 +902,34 @@ function cleanLuaScript(text) {
     /xpcall\s*\(\s*loadstring[^)]*\)/gi,
     /identifyexecutor\s*\([^)]*\)/gi,
     /load\s*\([^)]+\)/gi,
+    /require\s*\(\s*["']https?:\/\/[^"']+["']\s*\)/gi,
+    /socket\s*\.\s*(connect|tcp|udp)\s*\(/gi,
   ];
+
+  function hasLoader(text) {
+    if (!text) return false;
+    for (var i = 0; i < loaderPatterns.length; i++) {
+      try { if (loaderPatterns[i].test(text)) return true; } catch {}
+    }
+    return false;
+  }
+
+  // Lua keywords to detect if line is actual Lua code
+  var luaKw = ["local","function","if","then","end","return","for","while","repeat","until","do","print","warn","game","workspace","script","Players","Instance","Vector3","CFrame","Color3","UDim2","Enum","task","spawn","pcall","xpcall","require","loadstring","getgenv","gethui","hookfunction","hookmetamethod","getrawmetatable","setreadonly","getnamecallmethod","getconnections","firesignal","fireclickdetector","getobjects","isnetworkowner","setclipboard","writefile","readfile","listfiles","isfolder","makefolder","delfolder","delfile","loadfile","dofile"];
+
+  function isLuaLine(text) {
+    if (!text) return false;
+    for (var i = 0; i < luaKw.length; i++) {
+      if (text.indexOf(luaKw[i]) !== -1) return true;
+    }
+    // Also check for common Lua patterns
+    if (/=|==|~=|<=|>=|<|>/.test(text)) return true;
+    if (/\(|\)|\{|\}/.test(text)) return true;
+    if (/local\s+\w+/.test(text)) return true;
+    if (/function\s*\(/.test(text)) return true;
+    if (/:\w+\(/.test(text)) return true;
+    return false;
+  }
 
   for (var li = 0; li < linesArr.length; li++) {
     var raw = linesArr[li];
@@ -889,15 +938,28 @@ function cleanLuaScript(text) {
     var t = originalLine.trim();
     if (!t) { cleaned.push(""); continue; }
 
-    // 1. DELETE comment lines entirely
+    // 1. DELETE comment lines (keep if safe discord invite)
     if (t.indexOf("--") === 0) {
       if (!isSafeUrl(t)) continue;
     }
 
-    // 2. DELETE entire line if contains URL (not safe)
-    if (/https?:\/\//.test(t) && !isSafeUrl(t)) continue;
+    // 2. DELETE line if it's an IP logger/grabber
+    if (isGrabber(t)) continue;
 
-    // 3. Remove inline comments (not inside strings) — preserve original indent
+    // 3. DELETE line if it's a script loader
+    if (hasLoader(t)) continue;
+
+    // 4. DELETE scrambled/garbage lines that aren't Lua (short random strings)
+    if (!isLuaLine(t) && t.length > 3) {
+      // Check if it's just random garbage (no spaces, high entropy)
+      if (!/\s/.test(t) && t.length > 20 && !/^https?:\/\//.test(t)) {
+        // Long unbroken string with no spaces = likely garbage/scramble
+        // But keep if it's a string literal or safe URL
+        if (!isSafeUrl(t) && !/^["'].*["']$/.test(t)) continue;
+      }
+    }
+
+    // 5. Remove inline comments (preserve indent)
     var inStrS = false, inStrD = false;
     var cutAt = -1;
     for (var ci = 0; ci < originalLine.length - 1; ci++) {
@@ -911,14 +973,20 @@ function cleanLuaScript(text) {
     if (cutAt >= 0) lineToKeep = originalLine.substring(0, cutAt).replace(/\s+$/, "");
     if (!lineToKeep.trim()) continue;
 
-    // 4. Remove script loaders from the line
+    // 6. Remove any remaining loader code inline
     for (var pi = 0; pi < loaderPatterns.length; pi++) {
       try { lineToKeep = lineToKeep.replace(loaderPatterns[pi], ""); } catch {}
     }
     if (!lineToKeep.trim() || lineToKeep.trim().length < 3) continue;
     if (/^[\s();,{}]+$/.test(lineToKeep.trim())) continue;
 
-    // 5. Replace Discord invites
+    // 7. Change ALL print/warn to "leak by" message
+    try {
+      lineToKeep = lineToKeep.replace(/\bprint\s*\([^)]*\)/g, 'print("leak by https://discord.gg/TBBAUZu8cW")');
+      lineToKeep = lineToKeep.replace(/\bwarn\s*\([^)]*\)/g, 'print("leak by https://discord.gg/TBBAUZu8cW")');
+    } catch {}
+
+    // 8. Replace Discord invites
     try {
       lineToKeep = lineToKeep.replace(/(https?:\/\/)?discord\.(gg|com\/invite)\/[a-zA-Z0-9-]+/gi, "https://discord.gg/TBBAUZu8cW");
     } catch {}
@@ -927,7 +995,6 @@ function cleanLuaScript(text) {
     cleaned.push(lineToKeep);
   }
 
-  // Return with original indentation preserved — NO re-indenting (prevents size explosion)
   var result = cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   return result || "";
 }
@@ -2492,7 +2559,7 @@ client.on("messageCreate", async msg => {
         attachments = [...allAttachmentsOf(refMsg)];
       } catch {}
     }
-    if (!attachments.length) { replyUser(msg, "❌ bruh, upload file or reply to a file so i can fix it.").catch(() => {}); return; }
+    if (!attachments.length) { replyUser(msg, "❌ bruh, upload file or reply to a file.").catch(() => {}); return; }
     const file = attachments[0];
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
@@ -2742,7 +2809,7 @@ client.on("messageCreate", async msg => {
     const query = txt.slice(5).trim();
     if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
     const results = findFiles(query);
-    if (!results.length) { replyUser(msg, "❌ no matching file name for that, dumbass.").catch(() => {}); return; }
+    if (!results.length) { replyUser(msg, "❌ no found for that, dumbass.").catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "find", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
