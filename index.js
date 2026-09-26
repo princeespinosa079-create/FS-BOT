@@ -287,9 +287,10 @@ async function isBuyer(userId, member) {
     return false;
   }
 }
-function channelAllowed(target) {
+function channelAllowed(msg) {
   if (!config.allowedChannelId) return true;
-  return target.channelId === config.allowedChannelId;
+  const chId = (msg.channel && msg.channel.id) ? msg.channel.id : msg.channelId;
+  return String(chId) === String(config.allowedChannelId);
 }
 async function hasPrinceStatus(userId) {
   try {
@@ -552,11 +553,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
 
-  const hasStatus = await hasPrinceStatus(msg.author.id);
-  if (!hasStatus) {
-    return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro.", isBuyer: false };
-  }
-
+  // Status requirement removed — channel restriction is enough for regular users
   if (needsFileReply && !isReplyingToFile(msg)) {
     return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass.", isBuyer: false };
   }
