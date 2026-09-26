@@ -1,4 +1,4 @@
-const {
+"const {
   Client,
   GatewayIntentBits,
   Partials,
@@ -63,7 +63,8 @@ function writeJSON(file, data) {
       fs.fsyncSync(fd);
       fs.closeSync(fd);
     } catch {}
-    fs.renameSync(tmp, file);
+    fs
+  .renameSync(tmp, file);
     // Verify file was written correctly
     const verify = JSON.parse(fs.readFileSync(file, "utf8"));
     if (Array.isArray(data?.files) && Array.isArray(verify?.files)) {
@@ -122,2761 +123,3062 @@ function checkCommandCooldown(userId, cmd, isBuyerUser) {
 // ============================================================
 // DISCORD CLIENT
 // ============================================================
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildPresences,
-  ],
-  partials: [Partials.Channel],
-});
-const runningScans = new Set();
-const paginationMenus = new Map();
-const robuxTickets = new Map(); // channelId -> { userId, robloxUser, gamepass, checked, purchased }
-let robuxConfig = null; // { staffRoleId, categoryId, gamepass }
-const obfTemp = new Map(); // userId -> { source, fileName, isBuyerUser }
-const whsWebhookUrls = new Map(); // messageId -> webhookUrl
-const whsPanelOwners = new Map(); // messageId -> authorId
-const altListMenus = new Map();
-const extractCarouselMenus = new Map();
-const EXPIRY_MS = 5 * 60 * 1000;
-let isReady = false;
-let lastReady = Date.now();
-let registering = false;
-let reconnecting = false;
-// ============================================================
-// BASIC HELPERS
-// ============================================================
-const saveLibrary = () => writeJSON(LIBRARY_FILE, library);
-const saveConfig = () => writeJSON(CONFIG_FILE, config);
-function isOwner(userId) {
-  return userId === OWNER_ID;
+
+// === PROMETHEUS DEOBFUSCATOR BUNDLE ===
+// Prometheus Deobfuscator — bundled
+const __modules = {};
+const __cache = {};
+function __require(name) {
+  if (__cache[name]) return __cache[name].exports;
+  const mod = { exports: {} };
+  __cache[name] = mod;
+  __modules[name](mod, mod.exports, __require);
+  return mod.exports;
 }
-async function isBuyer(userId, member) {
-  const uid = userId || member?.id;
-  if (!uid) return false;
-  if (uid === OWNER_ID) return true;
-  // Fast path: local guild member check
-  if (member?.roles?.cache?.has(BUYER_ROLE_ID)) {
-    console.log(`👑 isBuyer: ${uid} → YES (local member)`);
-    return true;
+
+__modules["src/beautify/callbacks.js"] = function(module, exports, require) {
+'use strict';
+
+const { Kind } = require("src/lua/ast.js");
+const { walk, transform } = require("src/lua/walk.js");
+const { isLocalBinding } = require("src/lua/scope.js");
+const { bare } = require("src/util/flow.js");
+const copies = require("src/beautify/copies.js");
+const M = require("src/beautify/moves.js");
+
+function closureOf(statement) {
+  const declared = copies.declaredFunction(statement);
+  if (declared) return declared;
+  const plain = M.plainDeclaration(statement);
+  if (!plain) return null;
+  const value = bare(plain.value);
+  if (!value || value.kind !== Kind.Function) return null;
+  return { binding: plain.binding, name: plain.name, value };
+}
+
+function declaredIn(root) {
+  const own = new Set();
+  const note = (binding) => { if (binding) own.add(binding); };
+  walk(root, {
+    enter(node) {
+      for (const binding of node.bindings || []) note(binding);
+      if (node.kind === Kind.LocalFunction || node.kind === Kind.NumericFor) note(node.binding);
+      return undefined;
+    },
+  });
+  return own;
+}
+
+function capturesSafe(value, counts) {
+  const own = declaredIn(value);
+  for (const binding of M.readsWithin(value)) {
+    if (own.has(binding)) continue;
+    const text = binding.name;
+    if (!text) return false;
+    if (isLocalBinding(binding) ? !M.unshadowed(counts, text) : counts.has(text)) return false;
   }
-  // Main guild fetch
-  try {
-    let mainGuild = client.guilds.cache.get(GUILD_ID);
-    if (!mainGuild) {
-      console.log(`👑 isBuyer: fetching guild ${GUILD_ID}...`);
-      mainGuild = await client.guilds.fetch(GUILD_ID);
-    }
-    if (!mainGuild) {
-      console.warn(`⚠️ isBuyer: main guild not found`);
-      return false;
-    }
-    // Fetch member with force
-    let mainMember = mainGuild.members.cache.get(uid);
-    if (!mainMember) {
-      console.log(`👑 isBuyer: fetching member ${uid} from main guild...`);
-      mainMember = await mainGuild.members.fetch({ user: uid, force: true });
-    }
-    if (!mainMember) {
-      console.log(`👑 isBuyer: ${uid} → NO (not in main guild)`);
-      return false;
-    }
-    // Check roles cache
-    if (mainMember.roles.cache.has(BUYER_ROLE_ID)) {
-      console.log(`👑 isBuyer: ${uid} → YES (role in cache)`);
-      return true;
-    }
-    // Force fetch roles if cache seems incomplete
-    if (mainMember.roles.cache.size <= 1) {
-      console.log(`👑 isBuyer: force-fetching roles for ${uid}...`);
-      try {
-        await mainMember.roles.fetch();
-        if (mainMember.roles.cache.has(BUYER_ROLE_ID)) {
-          console.log(`👑 isBuyer: ${uid} → YES (roles fetched)`);
-          return true;
+  return true;
+}
+
+function mentionsOf(block) {
+  const index = new Map();
+  block.statements.forEach((statement, at) => {
+    let depth = 0;
+    walk(statement, {
+      enter(node) {
+        if (node.kind === Kind.Block) depth += 1;
+        else if (node.kind === Kind.Name && node.binding) {
+          const row = index.get(node.binding);
+          if (row) row.count += 1;
+          else index.set(node.binding, { count: 1, node, at, direct: depth === 0 });
         }
-      } catch (roleErr) {
-        console.warn(`⚠️ isBuyer roles fetch: ${roleErr.message}`);
+        return undefined;
+      },
+      leave(node) {
+        if (node.kind === Kind.Block) depth -= 1;
+      },
+    });
+  });
+  return index;
+}
+
+function inlineAt(block, at, declared, index, counts) {
+  const statements = block.statements;
+  const row = index.get(declared.binding);
+  if (!row || row.count !== 1 || !row.direct || row.at <= at) return false;
+  const read = row.node;
+
+  if (statements.some((statement) => statement.kind === Kind.Label)) return false;
+
+  const host = statements[row.at];
+  if (host.kind === Kind.While || host.kind === Kind.Repeat) return false;
+  if (copies.readsInto(host, read)) return false;
+  if (!capturesSafe(declared.value, counts)) return false;
+
+  transform(host, (node) => (node === read ? declared.value : node));
+  statements[at] = { kind: Kind.Do, body: { kind: Kind.Block, statements: [] } };
+  return true;
+}
+
+function inlineClosures(chunk) {
+  let moved = 0;
+  const counts = M.nameCounts(chunk);
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Block) return undefined;
+      let index = null;
+      for (let at = 0; at < node.statements.length; at += 1) {
+        const declared = closureOf(node.statements[at]);
+        if (!declared || !isLocalBinding(declared.binding)) continue;
+        if (!index) index = mentionsOf(node);
+        if (inlineAt(node, at, declared, index, counts)) moved += 1;
+      }
+      return undefined;
+    },
+  });
+  return moved;
+}
+
+module.exports = {
+  inlineClosures,
+};
+
+};
+
+__modules["src/beautify/copies.js"] = function(module, exports, require) {
+'use strict';
+
+const { Kind, isMultiValue } = require("src/lua/ast.js");
+const { walk, transform, collect, children } = require("src/lua/walk.js");
+const { Positions } = require("src/util/order.js");
+const { isLocalBinding } = require("src/lua/scope.js");
+const { bare } = require("src/util/flow.js");
+const services = require("src/beautify/services.js");
+const M = require("src/beautify/moves.js");
+
+function reachOf(binding) {
+  if (!binding) return null;
+  const declaration = binding.declaration;
+  if (!declaration) return null;
+  if (declaration.kind === Kind.LocalDeclaration) return 'after';
+  if (declaration.kind === Kind.LocalFunction) return 'from';
+  return 'inside';
+}
+
+function visibleAt(positions, binding, node) {
+  const reach = reachOf(binding);
+  if (!reach) return false;
+  const declared = positions.path(binding.declaration);
+  const wanted = positions.path(node);
+  if (!declared || !wanted || wanted.depth < declared.depth) return false;
+  let here = wanted;
+  while (here.depth > declared.depth) here = here.up;
+  if (here.up !== declared.up || here.block !== declared.block) return false;
+  if (reach === 'after') return here.at > declared.at;
+  if (reach === 'from') return here.at >= declared.at;
+  return here.at === declared.at && wanted.depth > declared.depth;
+}
+
+function writeTable(chunk) {
+  const table = new Map();
+  const entry = (binding) => {
+    let found = table.get(binding);
+    if (!found) {
+      found = { valued: 0, opaque: 0, empty: 0, value: null, at: null };
+      table.set(binding, found);
+    }
+    return found;
+  };
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.LocalDeclaration) {
+        const expressions = node.expressions || [];
+        const aligned = expressions.length === (node.names || []).length;
+        (node.bindings || []).forEach((binding, at) => {
+          if (!isLocalBinding(binding)) return;
+          const found = entry(binding);
+          if (!expressions.length) found.empty += 1;
+          else if (aligned) {
+            found.valued += 1;
+            found.value = expressions[at];
+            found.at = node;
+          } else found.opaque += 1;
+        });
+      } else if (node.kind === Kind.Assignment) {
+        const targets = node.targets || [];
+        const expressions = node.expressions || [];
+        const aligned = targets.length === expressions.length;
+        targets.forEach((target, at) => {
+          const named = bare(target);
+          if (!named || named.kind !== Kind.Name || !isLocalBinding(named.binding)) return;
+          const found = entry(named.binding);
+          if (aligned) {
+            found.valued += 1;
+            found.value = expressions[at];
+            found.at = node;
+          } else found.opaque += 1;
+        });
+      } else if (node.kind === Kind.LocalFunction) {
+        const found = entry(node.binding);
+        found.valued += 1;
+        found.value = null;
+        found.at = node;
+      } else if (node.kind === Kind.FunctionDeclaration) {
+        const named = bare(node.target);
+        if (named && named.kind === Kind.Name && isLocalBinding(named.binding)) {
+          const found = entry(named.binding);
+          found.valued += 1;
+          found.value = null;
+          found.at = node;
+        }
+      } else if (node.kind === Kind.NumericFor || node.kind === Kind.GenericFor
+        || node.kind === Kind.Function) {
+        for (const binding of node.bindings || []) {
+          if (isLocalBinding(binding)) entry(binding).opaque += 1;
+        }
+      }
+      return undefined;
+    },
+  });
+  return table;
+}
+
+function readsOf(binding) {
+  return (binding && binding.reads) || [];
+}
+
+function parentTable(chunk) {
+  const parents = new Map();
+  walk(chunk, {
+    enter(node) {
+      for (const child of children(node)) parents.set(child.node, node);
+      return undefined;
+    },
+  });
+  return parents;
+}
+
+function statementOf(parents, node) {
+  let current = node;
+  let above = parents.get(current);
+  while (above && above.kind !== Kind.Block) {
+    current = above;
+    above = parents.get(current);
+  }
+  return above ? current : null;
+}
+
+function functionNamed(statement, value) {
+  if (!statement) return null;
+  if (statement.kind === Kind.LocalFunction) {
+    return statement.body === value ? statement.binding : null;
+  }
+  const expressions = statement.expressions || [];
+  if (expressions.length !== 1 || bare(expressions[0]) !== value) return null;
+  if (statement.kind === Kind.LocalDeclaration) {
+    return (statement.names || []).length === 1 ? (statement.bindings || [])[0] : null;
+  }
+  if (statement.kind !== Kind.Assignment) return null;
+  const targets = statement.targets || [];
+  if (targets.length !== 1) return null;
+  const target = bare(targets[0]);
+  return target && target.kind === Kind.Name ? target.binding : null;
+}
+
+function handedOver(write, named) {
+  const harmless = new Set();
+  for (const expression of (write && write.expressions) || []) {
+    const value = bare(expression);
+    if (value && value.kind === Kind.Name && value.binding === named) harmless.add(value);
+  }
+  return harmless;
+}
+
+function sealed(positions, named, made, write) {
+  if (!isLocalBinding(named) || named.declaration !== made) return false;
+  const madeAt = positions.path(made);
+  const writeAt = positions.path(write);
+  if (!madeAt || !writeAt || madeAt.depth !== writeAt.depth) return false;
+  if (madeAt.up !== writeAt.up) return false;
+  const block = madeAt.block;
+  if (block !== writeAt.block) return false;
+  const from = madeAt.at;
+  const to = writeAt.at;
+  if (from >= to) return false;
+  const statements = block.statements || [];
+
+  if (statements.some((statement) => statement.kind === Kind.Label)) return false;
+  const harmless = handedOver(write, named);
+  for (let i = from + 1; i <= to; i += 1) {
+    const said = collect(statements[i],
+      (node) => node.kind === Kind.Name && node.binding === named);
+    if (i === to ? said.some((node) => !harmless.has(node)) : said.length) return false;
+  }
+  return true;
+}
+
+function filledBefore(parents, positions, read, write) {
+  const writeAt = positions.path(write);
+  if (!writeAt) return false;
+  const home = writeAt.block;
+  let current = parents.get(read);
+  while (current) {
+    if (current.kind === Kind.Function) {
+      const made = statementOf(parents, current);
+      const spot = made ? positions.path(made) : null;
+      if (spot && spot.depth === writeAt.depth && spot.block === home) {
+        const named = functionNamed(made, current);
+        return !!named && sealed(positions, named, made, write);
       }
     }
-    // Last resort: check via list of role IDs
-    const roleIds = [...mainMember.roles.cache.keys()];
-    console.log(`👑 isBuyer: ${uid} roles = [${roleIds.join(", ")}] (looking for ${BUYER_ROLE_ID})`);
-    if (roleIds.includes(BUYER_ROLE_ID)) {
-      console.log(`👑 isBuyer: ${uid} → YES (role ID match)`);
-      return true;
-    }
-    console.log(`👑 isBuyer: ${uid} → NO (buyer role not found)`);
-    return false;
-  } catch (e) {
-    console.warn(`⚠️ isBuyer ERROR for ${uid}: ${e.message}`);
-    // Final fallback: check local member if available
-    if (member?.roles?.cache?.has(BUYER_ROLE_ID)) {
-      console.log(`👑 isBuyer: ${uid} → YES (fallback local)`);
-      return true;
-    }
-    return false;
-  }
-}
-function channelAllowed(target) {
-  if (!config.allowedChannelId) return true;
-  return target.channelId === config.allowedChannelId;
-}
-async function hasPrinceStatus(userId) {
-  try {
-    const mainGuild = await client.guilds.fetch(GUILD_ID);
-    const member = await mainGuild.members.fetch(userId, { force: true });
-    if (!member?.presence?.activities) return false;
-    for (const act of member.presence.activities) {
-      if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
-        return true;
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-// Check if user has Server Tag (guild-specific avatar = server identity/profile)
-function hasServerTag(member) {
-  // Legacy wrapper — now checks status requirement
-  return memberHasPrinceStatus(member);
-}
-// Check if guild supports Server Tag feature
-function guildSupportsServerTag(guild) {
-  if (!guild) return false;
-  // Server Identity/Tag feature is available in all guilds that have it enabled
-  // Check for common features that indicate server identity support
-  const features = guild.features || [];
-  return features.includes("GUILD_SERVER_GUIDE") || 
-         features.includes("MEMBER_VERIFICATION_GATE_ENABLED") ||
-         features.includes("NEWS") ||
-         true; // Most modern guilds support server identity
-}
-async function isInMainGuild(userId) {
-  try {
-    const mainGuild = await client.guilds.fetch(GUILD_ID);
-    await mainGuild.members.fetch(userId, { force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-function memberHasPrinceStatus(member) {
-  if (!member?.presence?.activities) return false;
-  for (const act of member.presence.activities) {
-    if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
-      return true;
-    }
+    current = parents.get(current);
   }
   return false;
 }
-async function syncPrinceRole(member) {
-  try {
-    if (!member || member.guild.id !== GUILD_ID) return;
-    if (member.user.bot) return;
-    // Force-fetch to get latest server avatar data (no stale cache)
-    try { member = await member.guild.members.fetch(member.id, { force: true }); } catch {}
-    const hasStatus = memberHasPrinceStatus(member);
-    const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
-    console.log(`👑 Check ${member.user.tag}: hasStatus=${hasStatus} hasRole=${hasRole}`);
-    if (hasStatus && !hasRole) {
-      await member.roles.add(PRINCE_ROLE_ID, "Prince status detected").catch(() => {});
-      console.log(`👑 + Prince role: ${member.user.tag}`);
-    } else if (!hasStatus && hasRole) {
-      await member.roles.remove(PRINCE_ROLE_ID, "Prince status removed").catch(() => {});
-      console.log(`👑 - Prince role: ${member.user.tag}`);
-    }
-  } catch (e) {
-    console.warn(`⚠️ syncPrinceRole: ${e.message}`);
-  }
-}
-async function syncAllPrinceRoles() {
-  try {
-    const mainGuild = await client.guilds.fetch(GUILD_ID);
-    await mainGuild.members.fetch();
-    let added = 0, removed = 0, skipped = 0;
-    for (const member of mainGuild.members.cache.values()) {
-      if (member.user.bot) { skipped++; continue; }
-      try {
-        const hasStatus = memberHasPrinceStatus(member);
-        const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
-        if (hasStatus && !hasRole) {
-          await member.roles.add(PRINCE_ROLE_ID, "Startup sync: status detected").catch(() => {});
-          added++;
-        } else if (!hasStatus && hasRole) {
-          await member.roles.remove(PRINCE_ROLE_ID, "Startup sync: no status").catch(() => {});
-          removed++;
-        }
-      } catch (e) {
-        console.warn(`⚠️ syncAll member ${member.user?.tag}: ${e.message}`);
-      }
-    }
-    console.log(`👑 Startup role sync done: +${added} -${removed} ~${skipped} bots`);
-  } catch (e) {
-    console.warn(`⚠️ syncAllPrinceRoles: ${e.message}`);
-  }
-}
-// ============================================================
-// PERMISSION CHECK — REGULAR USER COMMANDS
-// Owner / Buyer → bypass all
-// Regular → status + channel + guild checks
-// ============================================================
-async function checkRegularPermission(msg, needsFileReply = false) {
-  // Owner or Buyer → full bypass
-  if (isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member)) {
-    return { allowed: true, isBuyer: true };
-  }
 
-  const isDM = !msg.guild;
-
-  // Regular users CANNOT use in DMs
-  if (isDM) {
-    return { allowed: false, reason: "❌ not here, dumbass.", isBuyer: false };
-  }
-
-  // Cross-server check: must be in main guild
-  if (msg.guild.id !== GUILD_ID) {
-    const inMain = await isInMainGuild(msg.author.id);
-    if (!inMain) {
-      return { allowed: false, reason: "❌ join in main server first bro `.gg/TBBAUZu8cW`.", isBuyer: false };
-    }
-  }
-
-  const hasStatus = await hasPrinceStatus(msg.author.id);
-  const noStatusMsg = "❌ put `.gg/TBBAUZu8cW` in your status first bro.";
-
-  // If channel is restricted
-  if (!channelAllowed(msg)) {
-    if (hasStatus) {
-      return { allowed: false, reason: "❌ not here, dumbass.", isBuyer: false };
-    } else {
-      return { allowed: false, reason: noStatusMsg, isBuyer: false };
-    }
-  }
-
-  // Must have status or server tag
-  if (!hasStatus) {
-    return { allowed: false, reason: noStatusMsg, isBuyer: false };
-  }
-
-  if (needsFileReply && !isReplyingToFile(msg)) {
-    return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass.", isBuyer: false };
-  }
-
-  return { allowed: true, isBuyer: false };
-}
-function isReplyingToFile(msg) {
-  const ref = msg.reference?.messageId;
-  if (!ref) return false;
-  const channel = msg.channel;
-  const repliedMsg = channel.messages.cache.get(ref);
-  if (!repliedMsg) return false;
-  if (repliedMsg.attachments.size > 0) return true;
-  for (const snap of repliedMsg.messageSnapshots?.values?.() || []) {
-    if (snap.attachments.size > 0) return true;
-  }
-  return false;
-}
-function replyUser(message, payload) {
-  const body = typeof payload === "string" ? { content: payload } : { ...payload };
-  body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
-  return message.reply(body);
+function settledOnce(positions, binding, info, parents) {
+  if (!info || info.valued !== 1 || info.opaque) return false;
+  const reads = readsOf(binding);
+  if (!reads.length) return false;
+  if (!info.empty) return true;
+  return reads.every((read) => read === info.at || positions.precedes(info.at, read)
+    || (parents && filledBefore(parents, positions, read, info.at)));
 }
 
-// Detect obfuscator type and confidence
-function detectObfuscator(src) {
-  if (!src || typeof src !== "string") return { name: "Unknown", confidence: 0 };
-  const s = src;
-  let sc = {};
-  sc.Luraph = 0; sc.WeAreDevs = 0; sc.Prometheus = 0; sc.Luarmor = 0;
-  sc.PolSec = 0; sc["25ms"] = 0; sc.Moonveil = 0; sc["MoonSec V3"] = 0;
-  sc.Solara = 0; sc.Hydrogen = 0; sc.Wave = 0; sc.Evon = 0;
-  sc["Synapse X"] = 0; sc["Script-Ware"] = 0; sc.Krnl = 0; sc.Fluxus = 0;
-  sc.Delta = 0; sc.Celery = 0; sc.Electron = 0; sc.Comet = 0;
-  sc["Vega X"] = 0; sc.IronBrew = 0; sc.DarkEccentric = 0; sc.Axon = 0;
-  sc.ProtoSmasher = 0; sc.Elysian = 0; sc.SirHurt = 0; sc.CocoZ = 0;
-  sc.Zaptosis = 0; sc["Obfuscator.Lua"] = 0; sc.LuaMinify = 0;
-  sc["Base64-Encoded"] = 0; sc["XOR-Encrypted"] = 0; sc.Bytecode = 0;
-  sc["VM-Obfuscated"] = 0; sc.Unobfuscate = 0;
-  
-  // ── Luraph ──
-  if (/Luraph|luraph/i.test(s)) sc.Luraph += 50;
-  if (/\[=\[[\s\S]{200,}\]\]/.test(s)) sc.Luraph += 20;
-  if (/loadstring\s*\(\s*[A-Za-z0-9+/=]{200,}\s*\)/.test(s)) sc.Luraph += 15;
-  if (/setmetatable\s*\(\s*\{\s*\}\s*,\s*\{\s*__index/.test(s)) sc.Luraph += 10;
-  
-  // ── WeAreDevs ──
-  if (/WeAreDevs|WAD_|wad_|wearedevs/i.test(s)) sc.WeAreDevs += 50;
-  if (/--\s*\/\/?\s*WeAreDevs/i.test(s)) sc.WeAreDevs += 30;
-  if (/M\s*\(\s*-?\d+\s*[+\-*]\s*-?\d+\s*\)/.test(s)) sc.WeAreDevs += 25;
-  if (/local\s+[A-Za-z_]+\s*=\s*\{(?:"\{(?:\\.|[^"\\])*"\s*[,;]\s*){5,}/.test(s)) sc.WeAreDevs += 20;
-  if (/\bz\s*\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\]/.test(s)) sc.WeAreDevs += 15;
-  if (/return\s*\(\s*function\s*\(/.test(s)) sc.WeAreDevs += 10;
-  
-  // ── Prometheus ──
-  if (/Prometheus|prometheus/i.test(s)) sc.Prometheus += 50;
-  if (/--\s*This file was generated using/i.test(s)) sc.Prometheus += 30;
-  if (/loadstring\s*\(\s*function\s*\(\s*\)\s*return\s*["']/.test(s)) sc.Prometheus += 20;
-  if (/string\.char\s*\(\s*\d+\s*(?:,\s*\d+\s*){5,}\)/.test(s)) sc.Prometheus += 15;
-  if (/pcall\s*\(\s*loadstring/.test(s)) sc.Prometheus += 10;
-  
-  // ── Luarmor ──
-  if (/Luarmor|luarmor/i.test(s)) sc.Luarmor += 50;
-  if (/_G\s*\[\s*["']luarmor/i.test(s)) sc.Luarmor += 30;
-  if (/string\.dump\s*\(/.test(s)) sc.Luarmor += 20;
-  if (/luarmor\.net|luarmor\.gg/i.test(s)) sc.Luarmor += 20;
-  
-  // ── PolSec ──
-  if (/PolSec|polsec/i.test(s)) sc.PolSec += 50;
-  if (/polsec\.gg/i.test(s)) sc.PolSec += 30;
-  if (/PolSecure|polsecure/i.test(s)) sc.PolSec += 20;
-  
-  // ── 25ms ──
-  if (/\b25ms\b|25MS/.test(s)) sc["25ms"] += 50;
-  if (/25ms\.to|25ms\.gg/i.test(s)) sc["25ms"] += 25;
-  
-  // ── Moonveil ──
-  if (/Moonveil|moonveil/i.test(s)) sc.Moonveil += 50;
-  if (/moonveil\.gg/i.test(s)) sc.Moonveil += 25;
-  
-  // ── MoonSec V3 ──
-  if (/MoonSec|moonsec|MoonSec V3/i.test(s)) sc["MoonSec V3"] += 50;
-  if (/moonsec\.net|moonsec\.gg/i.test(s)) sc["MoonSec V3"] += 25;
-  
-  // ── Solara ──
-  if (/Solara|solara/i.test(s)) sc.Solara += 50;
-  if (/solara\.gg|solara\.app/i.test(s)) sc.Solara += 25;
-  
-  // ── Hydrogen ──
-  if (/Hydrogen|hydrogen/i.test(s)) sc.Hydrogen += 50;
-  if (/hydrogen\.gg|hydrogen\.exe/i.test(s)) sc.Hydrogen += 25;
-  
-  // ── Wave ──
-  if (/\bWave\b|wave\.exe/i.test(s)) sc.Wave += 45;
-  
-  // ── Evon ──
-  if (/Evon|evon/i.test(s)) sc.Evon += 45;
-  if (/evon\.gg/i.test(s)) sc.Evon += 25;
-  
-  // ── Synapse X ──
-  if (/Synapse|synapse|Synapse X/i.test(s)) sc["Synapse X"] += 45;
-  if (/syn\.|synapse\.cc/i.test(s)) sc["Synapse X"] += 25;
-  
-  // ── Script-Ware ──
-  if (/Script-Ware|ScriptWare|script-ware/i.test(s)) sc["Script-Ware"] += 45;
-  if (/sw\.|scriptware/i.test(s)) sc["Script-Ware"] += 20;
-  
-  // ── Krnl ──
-  if (/Krnl|krnl/i.test(s)) sc.Krnl += 45;
-  if (/krnl\.gg|krnl\.ca/i.test(s)) sc.Krnl += 25;
-  
-  // ── Fluxus ──
-  if (/Fluxus|fluxus/i.test(s)) sc.Fluxus += 45;
-  if (/fluxteam|fluxus\.gg/i.test(s)) sc.Fluxus += 25;
-  
-  // ── Delta ──
-  if (/Delta|delta/i.test(s)) sc.Delta += 40;
-  if (/delta\.gg|deltaexec/i.test(s)) sc.Delta += 25;
-  
-  // ── Celery ──
-  if (/Celery|celery/i.test(s)) sc.Celery += 40;
-  if (/celery\.gg|celeryexec/i.test(s)) sc.Celery += 25;
-  
-  // ── Electron ──
-  if (/Electron|electron/i.test(s)) sc.Electron += 40;
-  if (/electron\.gg/i.test(s)) sc.Electron += 25;
-  
-  // ── Comet ──
-  if (/Comet|comet/i.test(s)) sc.Comet += 40;
-  if (/comet\.gg/i.test(s)) sc.Comet += 25;
-  
-  // ── Vega X ──
-  if (/Vega X|VegaX|vegax/i.test(s)) sc["Vega X"] += 40;
-  if (/vegax\.gg/i.test(s)) sc["Vega X"] += 25;
-  
-  // ── More Obfuscators ──
-  // ── IronBrew ──
-  if (/IronBrew|ironbrew|IB2|IB_/i.test(s)) sc.IronBrew += 50;
-  if (/ironbrew\.io/i.test(s)) sc.IronBrew += 25;
-  
-  // ── DarkEccentric ──
-  if (/DarkEccentric|darkeccentric|DE_/i.test(s)) sc.DarkEccentric += 50;
-  
-  // ── Axon ──
-  if (/\bAxon\b|axon\.exe/i.test(s)) sc.Axon += 45;
-  
-  // ── ProtoSmasher ──
-  if (/ProtoSmasher|protosmasher/i.test(s)) sc.ProtoSmasher += 45;
-  
-  // ── Elysian ──
-  if (/Elysian|elysian/i.test(s)) sc.Elysian += 45;
-  
-  // ── SirHurt ──
-  if (/SirHurt|sirhurt/i.test(s)) sc.SirHurt += 45;
-  
-  // ── CocoZ ──
-  if (/CocoZ|cocoz/i.test(s)) sc.CocoZ += 45;
-  
-  // ── Zaptosis ──
-  if (/Zaptosis|zaptosis/i.test(s)) sc.Zaptosis += 45;
-  
-  // ── Obfuscator.Lua ──
-  if (/Obfuscator\.Lua|obfuscator\.lua/i.test(s)) sc["Obfuscator.Lua"] += 45;
-  
-  // ── LuaMinify ──
-  if (/luamin|lua_min|minified\slua/i.test(s)) sc.LuaMinify += 35;
-  
-  // ── Base64-Encoded ──
-  if (/loadstring\s*\(\s*game:HttpGet.*base64|base64decode|base64_decode/i.test(s)) sc["Base64-Encoded"] += 35;
-  
-  // ── XOR-Encrypted ──
-  if (/xor\s*\(|bit\.bxor|string\.char\s*\(\s*\d+\s*%/i.test(s)) sc["XOR-Encrypted"] += 30;
-  
-  // ── Bytecode ──
-  if (/string\.dump|loadstring\s*\(\s*\\x/i.test(s)) sc.Bytecode += 40;
-  if (/\\x[0-9a-fA-F]{2}.*\\x[0-9a-fA-F]{2}.*\\x[0-9a-fA-F]{2}/.test(s)) sc.Bytecode += 20;
-  
-  // ── VM-Obfuscated (general fallback) ──
-  let vmScore = 0;
-  if (/loadstring\s*\(/.test(s)) vmScore += 10;
-  if (/\\x[0-9a-fA-F]{2}/.test(s)) vmScore += 10;
-  if (/string\.char\s*\(/.test(s)) vmScore += 10;
-  if (/setmetatable|getmetatable/.test(s)) vmScore += 5;
-  if (/pcall\s*\(|xpcall\s*\(/.test(s)) vmScore += 5;
-  if (/\bassert\s*\(/.test(s)) vmScore += 5;
-  sc["VM-Obfuscated"] = vmScore;
-  
-  // ── Unobfuscate (clean script) ──
-  const allObfScores = Object.values(sc).reduce((a, b) => a + b, 0) - (sc.Unobfuscate || 0);
-  if (allObfScores < 15) {
-    if (/function\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\(/.test(s)) sc.Unobfuscate += 25;
-    if (/--\s*\[/.test(s)) sc.Unobfuscate += 10;
-    if (/local\s+[a-zA-Z_][a-zA-Z0-9_]*\s*=/.test(s) && !/local\s+[A-Za-z_]+\s*=\s*\{/.test(s)) sc.Unobfuscate += 10;
-    if (/print\s*\(|warn\s*\(|error\s*\(/.test(s)) sc.Unobfuscate += 5;
-  }
-  
-  // Cap scores
-  for (const k of Object.keys(sc)) sc[k] = Math.min(sc[k], 100);
-  
-  // Sort and return best
-  const entries = Object.entries(sc).map(([name, score]) => ({ name, score }));
-  entries.sort((a, b) => b.score - a.score);
-  
-  const best = entries[0];
-  if (best.score < 15) return { name: "Unknown", confidence: 0 };
-  return { name: best.name, confidence: best.score };
-}
-function getEmbedColor(isBuyerUser) {
-  return REGULAR_COLOR;
-}
-function getFinderTitle(isBuyerUser) {
-  return "Finder Source Results";
-}
-// ============================================================
-// FILE HELPERS
-// ============================================================
-function normalize(name) {
-  return String(name || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/\.[^/.]+$/, "").replace(/[_\-.()[\]{}]+/g, " ")
-    .replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
-}
-function normalizeBase(name) {
-  let n = normalize(name);
-  n = n.replace(/\s*\d+$/, "").trim();
-  n = n.replace(/\s*(copy|ver|version|v)\s*\d*$/i, "").trim();
-  n = n.replace(/\s+/g, " ").trim();
-  return n;
-}
-function ext(name) {
-  const match = String(name || "").match(/\.([a-z0-9]+)$/i);
-  return match ? match[1].toLowerCase() : "";
-}
-function isImage(name, contentType) {
-  return String(contentType || "").toLowerCase().startsWith("image/") ||
-    /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|avif|heic|heif)$/i.test(String(name || ""));
-}
-function isAllowedFileType(name, contentType) {
-  const e = ext(name);
-  return (e === "txt" || e === "lua") && !isImage(name, contentType);
-}
-function isZipFile(name, contentType) {
-  const e = ext(name);
-  return e === "zip" || String(contentType || "").toLowerCase().includes("zip");
-}
-function isHtmlFile(name, contentType) {
-  const e = ext(name);
-  return e === "html" || e === "htm" || String(contentType || "").toLowerCase().includes("html");
-}
-function idForFile() {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let id;
-  do {
-    id = "";
-    for (let i = 0; i < 4; i++) {
-      id += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-  } while (library.files.some(file => file.id === id));
-  return id;
-}
-function getFile(id) {
-  const f = library.files.find(file => file.id === String(id || "").trim()) || null;
-  if (f && Number(f.size || 0) === 36) return null; // skip unavailable placeholder files
-  return f;
-}
-async function getFreshUrl(file) {
-  try {
-    const ch = await client.channels.fetch(file.channelId);
-    const orig = await ch.messages.fetch(file.messageId);
-    let fresh = orig.attachments.get(file.attachmentId);
-    if (!fresh) {
-      for (const s of orig.messageSnapshots?.values?.() || []) {
-        fresh = s.attachments?.get(file.attachmentId);
-        if (fresh) break;
-      }
-    }
-    if (fresh?.url) {
-      file.url = fresh.url;
-      saveLibrary();
-      return fresh.url;
-    }
-  } catch (e) {
-    console.warn(`⚠️ Could not refresh URL for ${file.filename}:`, e.message);
+function heldBy(parents, node) {
+  let current = parents.get(node);
+  while (current) {
+    if (current.kind === Kind.Function) return current;
+    current = parents.get(current);
   }
   return null;
 }
-function findFiles(query) {
-  query = normalize(query);
-  if (!query) return [];
-  const tokens = query.split(" ").filter(Boolean);
-  const seenNames = new Set();
-  return library.files
-    .filter(file => Number(file.size || 0) !== 36) // skip unavailable placeholder files
-    .map(file => {
-    const name = normalize(file.filename);
-    let score = 0;
-    if (name === query) score += 5000;
-    if (name.startsWith(query)) score += 2000;
-    if (name.includes(query)) score += 1000;
-    for (const token of tokens) {
-      if (name === token) score += 500;
-      else if (name.startsWith(token)) score += 200;
-      else if (name.includes(token)) score += 100;
+
+function loopsOver(parents, node) {
+  const found = new Set();
+  let current = node;
+  while (current) {
+    if (current.kind === Kind.While || current.kind === Kind.Repeat
+      || current.kind === Kind.NumericFor || current.kind === Kind.GenericFor) found.add(current);
+    current = parents.get(current);
+  }
+  return found;
+}
+
+function rewritten(parents, positions, from, copy) {
+  const around = loopsOver(parents, copy);
+  const nodes = (from.writes || []).slice();
+  const made = from.declaration;
+  if (made && (made.kind === Kind.NumericFor || made.kind === Kind.GenericFor)) nodes.push(made);
+  for (const node of nodes) {
+    for (const loop of loopsOver(parents, node)) if (around.has(loop)) return true;
+    if (node !== copy && !positions.precedes(node, copy)) return true;
+  }
+  return false;
+}
+
+function propagate(chunk) {
+  const positions = new Positions(chunk);
+  const parents = parentTable(chunk);
+  const writes = writeTable(chunk);
+  const names = M.nameCounts(chunk);
+  const replacements = new Map();
+
+  for (const [binding, info] of writes) {
+    if (!settledOnce(positions, binding, info, parents)) continue;
+    const source = bare(info.value);
+    if (!source || source.kind !== Kind.Name) continue;
+    const from = source.binding;
+    if (!isLocalBinding(from) || from === binding) continue;
+    if (!M.unshadowed(names, from.name)) continue;
+    const above = writes.get(from);
+
+    if (above && above.valued > 1) continue;
+    if (above && above.opaque > 1) continue;
+    if (above && above.valued === 1 && above.at !== info.at
+      && !positions.precedes(above.at, info.at)) continue;
+    const reads = readsOf(binding);
+    if (!reads.every((read) => visibleAt(positions, from, read))) continue;
+    if (reads.some((read) => heldBy(parents, read) !== heldBy(parents, info.at))
+      && rewritten(parents, positions, from, info.at)) continue;
+    replacements.set(binding, from);
+  }
+  if (!replacements.size) return 0;
+
+  const finalOf = (binding) => {
+    let current = binding;
+    for (let guard = 0; guard < 1000 && replacements.has(current); guard += 1) {
+      current = replacements.get(current);
     }
-    return { file, score };
-  }).filter(item => item.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .filter(item => {
-      const normName = normalize(item.file.filename);
-      if (seenNames.has(normName)) return false;
-      seenNames.add(normName);
+    return current;
+  };
+
+  let moved = 0;
+  const stored = new Set();
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Assignment) return undefined;
+      for (const target of node.targets || []) {
+        const named = bare(target);
+        if (named && named.kind === Kind.Name) stored.add(named);
+      }
+      return undefined;
+    },
+  });
+  transform(chunk, (node) => {
+    if (node.kind !== Kind.Name || !node.binding || stored.has(node)) return node;
+    if (!replacements.has(node.binding)) return node;
+    const from = finalOf(node.binding);
+    if (from === node.binding) return node;
+    moved += 1;
+    return { kind: Kind.Name, name: from.name, binding: from };
+  });
+  return moved;
+}
+
+function nextOf(statements, at) {
+  for (let i = at + 1; i < statements.length; i += 1) {
+    if (!M.isEmptyDo(statements[i])) return i;
+  }
+  return -1;
+}
+
+function holderOf(root, wanted) {
+  let found = null;
+  walk(root, {
+    enter(node, info) {
+      if (node === wanted && info) found = info.parent;
+      return undefined;
+    },
+  });
+  return found;
+}
+
+function readsInto(host, read) {
+  const holder = holderOf(host, read);
+  if (!holder || !holder.kind) return false;
+  if (holder.kind === Kind.Unary || holder.kind === Kind.Binary) return true;
+  if (holder.kind === Kind.Index) return true;
+  if (holder.kind === Kind.Call || holder.kind === Kind.MethodCall) {
+    return bare(holder.base) === read || holder.base === read;
+  }
+  return false;
+}
+
+function declaredFunction(statement) {
+  if (!statement || statement.kind !== Kind.LocalFunction) return null;
+  const binding = statement.binding;
+  if (!binding || !statement.body) return null;
+  if (collect(statement.body, (node) => node.kind === Kind.Name
+    && node.name === statement.name).length) return null;
+  return { binding, name: statement.name, value: statement.body };
+}
+
+function holdsRead(host, read) {
+  let found = false;
+  const visit = (node) => {
+    if (found || !node || !node.kind || node.kind === Kind.Block) return;
+    if (node === read) {
+      found = true;
+      return;
+    }
+    for (const child of children(node)) visit(child.node);
+  };
+  visit(host);
+  return found;
+}
+
+function inlineBelow(block, at) {
+  const statements = block.statements;
+  const written = M.plainWrite(statements[at]) || M.plainDeclaration(statements[at])
+    || declaredFunction(statements[at]);
+  if (!written) return false;
+  const binding = written.binding || written.target.binding;
+  if (!isLocalBinding(binding)) return false;
+
+  if (services.isLookup(written.value)) return false;
+  const reads = readsOf(binding);
+  if (reads.length !== 1) return false;
+  const below = nextOf(statements, at);
+  if (below < 0) return false;
+  const read = reads[0];
+  const host = statements[below];
+  if (host.kind === Kind.While || host.kind === Kind.Repeat) return false;
+
+  if (host.kind === Kind.Assignment
+    && (host.targets || []).some((target) => collect(target, (node) => node === read).length)) {
+    return false;
+  }
+
+  if (!holdsRead(host, read)) return false;
+  if (!M.reachesQuietly(host, read)) return false;
+  const held = bare(written.value);
+  if (held && (held.kind === Kind.Table || held.kind === Kind.Function)
+    && readsInto(host, read)) return false;
+
+  const value = isMultiValue(bare(written.value))
+    ? { kind: Kind.Paren, expression: written.value }
+    : written.value;
+  transform(host, (node) => (node === read ? value : node));
+  statements[at] = { kind: Kind.Do, body: { kind: Kind.Block, statements: [] } };
+  return true;
+}
+
+function inlineTemps(chunk) {
+  let moved = 0;
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Block) return undefined;
+      for (let at = 0; at < node.statements.length; at += 1) {
+        if (inlineBelow(node, at)) moved += 1;
+      }
+      return undefined;
+    },
+  });
+  return moved;
+}
+
+module.exports = {
+  reachOf,
+  visibleAt,
+  parentTable,
+  sealed,
+  rewritten,
+  propagate,
+  declaredFunction,
+  holderOf,
+  readsInto,
+  inlineTemps,
+};
+
+};
+
+__modules["src/beautify/declare.js"] = function(module, exports, require) {
+'use strict';
+
+const { Kind } = require("src/lua/ast.js");
+const { walk, collect } = require("src/lua/walk.js");
+const { isIdentifier } = require("src/lua/format.js");
+const { isLocalBinding } = require("src/lua/scope.js");
+const { bare } = require("src/util/flow.js");
+const { Positions } = require("src/util/order.js");
+const { visibleAt } = require("src/beautify/copies.js");
+const M = require("src/beautify/moves.js");
+
+function hasLabel(block) {
+  return (block.statements || []).some((statement) => statement.kind === Kind.Label);
+}
+
+function mentions(root, binding) {
+  return collect(root, (node) => node.kind === Kind.Name && node.binding === binding);
+}
+
+function mentionSpots(block, own) {
+  const spots = new Map();
+  (block.statements || []).forEach((statement, at) => {
+    walk(statement, {
+      enter(node) {
+        if (own && node.kind === Kind.Function) return false;
+        if (node.kind !== Kind.Name || !node.binding) return undefined;
+        const rows = spots.get(node.binding);
+        if (!rows) spots.set(node.binding, [{ at, nodes: [node] }]);
+        else if (rows[rows.length - 1].at === at) rows[rows.length - 1].nodes.push(node);
+        else rows.push({ at, nodes: [node] });
+        return undefined;
+      },
+    });
+  });
+  return spots;
+}
+
+function spotsOf(cache, block) {
+  const kept = cache && cache.get(block);
+  if (kept) return kept;
+  const spots = mentionSpots(block, true);
+  if (cache) cache.set(block, spots);
+  return spots;
+}
+
+function firstMention(spots, binding, after) {
+  for (const row of spots.get(binding) || []) {
+    if (row.at > after) return row;
+  }
+  return null;
+}
+
+function sinkable(block) {
+  const statements = block.statements || [];
+  const wanted = new Map();
+  if (hasLabel(block)) return wanted;
+  let spots = null;
+  statements.forEach((statement, at) => {
+    if (statement.kind !== Kind.LocalDeclaration) return;
+    if ((statement.expressions || []).length) return;
+    (statement.bindings || []).forEach((binding, slot) => {
+      if (!isLocalBinding(binding)) return;
+      if (!spots) spots = mentionSpots(block);
+      const first = firstMention(spots, binding, at);
+      if (!first) return;
+      const host = statements[first.at];
+      if (host.kind !== Kind.Assignment) return;
+      const targets = (host.targets || []).map((target) => bare(target));
+      const stores = first.nodes.filter((node) => targets.indexOf(node) >= 0);
+      if (stores.length !== first.nodes.length || stores.length !== 1) return;
+      let list = wanted.get(first.at);
+      if (!list) {
+        list = [];
+        wanted.set(first.at, list);
+      }
+      list.push({ binding, declaration: statement, slot, target: stores[0] });
+    });
+  });
+  return wanted;
+}
+
+function rebind(binding, declaration, dropped) {
+  binding.declaration = declaration;
+  binding.initializer = declaration;
+  const at = binding.writes.indexOf(dropped);
+  if (at >= 0) binding.writes.splice(at, 1);
+}
+
+function sink(chunk) {
+  let sunk = 0;
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Block) return undefined;
+      const wanted = sinkable(node);
+      for (const [at, list] of wanted) {
+        const host = node.statements[at];
+        const targets = (host.targets || []).map((target) => bare(target));
+        if (targets.length !== list.length) continue;
+        const order = targets.map((target) => list.find((one) => one.target === target));
+        if (order.some((one) => !one)) continue;
+        const declaration = {
+          kind: Kind.LocalDeclaration,
+          names: order.map((one) => one.binding.name),
+          expressions: host.expressions || [],
+          bindings: order.map((one) => one.binding),
+        };
+        node.statements[at] = declaration;
+        for (const one of order) {
+          const names = one.declaration.names || [];
+          const slot = names.indexOf(one.binding.name);
+          if (slot >= 0) {
+            names.splice(slot, 1);
+            (one.declaration.bindings || []).splice(slot, 1);
+          }
+          rebind(one.binding, declaration, one.target);
+          sunk += 1;
+        }
+      }
+      return undefined;
+    },
+  });
+  return sunk;
+}
+
+function slidable(block) {
+  const statements = block.statements || [];
+  const wanted = new Map();
+  if (hasLabel(block)) return wanted;
+  let spots = null;
+  statements.forEach((statement, at) => {
+    if (statement.kind !== Kind.LocalDeclaration) return;
+    if ((statement.expressions || []).length) return;
+    (statement.bindings || []).forEach((binding) => {
+      if (!isLocalBinding(binding)) return;
+      if (!spots) spots = mentionSpots(block);
+      const first = firstMention(spots, binding, at);
+
+      if (!first || first.at === at + 1) return;
+      for (let i = at + 1; i < first.at; i += 1) {
+        if (!silentAbout(statements[i], binding.name)) return;
+      }
+      let list = wanted.get(first.at);
+      if (!list) {
+        list = [];
+        wanted.set(first.at, list);
+      }
+      list.push({ binding, declaration: statement });
+    });
+  });
+  return wanted;
+}
+
+function slide(chunk) {
+  let slid = 0;
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Block) return undefined;
+      const wanted = slidable(node);
+      if (!wanted.size) return undefined;
+      const out = [];
+      node.statements.forEach((statement, at) => {
+        const list = wanted.get(at);
+        if (list && list.length) {
+          const declaration = {
+            kind: Kind.LocalDeclaration,
+            names: list.map((one) => one.binding.name),
+            expressions: [],
+            bindings: list.map((one) => one.binding),
+          };
+          for (const one of list) {
+            const names = one.declaration.names || [];
+            const slot = names.indexOf(one.binding.name);
+            if (slot >= 0) {
+              names.splice(slot, 1);
+              (one.declaration.bindings || []).splice(slot, 1);
+            }
+            one.binding.declaration = declaration;
+            one.binding.initializer = declaration;
+            slid += 1;
+          }
+          out.push(declaration);
+        }
+        out.push(statement);
+      });
+      node.statements = out;
+      return undefined;
+    },
+  });
+  return slid;
+}
+
+function innerBlock(root, nodes) {
+  const wanted = new Set(nodes);
+  const stack = [];
+  let common = null;
+  walk(root, {
+    enter(node) {
+      if (node.kind === Kind.Block) stack.push(node);
+      if (!wanted.has(node)) return undefined;
+      if (!common) common = [...stack];
+      else {
+        let depth = 0;
+        while (depth < common.length && common[depth] === stack[depth]) depth += 1;
+        common.length = depth;
+      }
+      return undefined;
+    },
+    leave(node) {
+      if (node.kind === Kind.Block) stack.pop();
+    },
+  });
+  return common && common.length ? common[common.length - 1] : null;
+}
+
+function ownBlocks(root) {
+  const found = new Set();
+  walk(root, {
+    enter(node) {
+      if (node.kind === Kind.Function) return false;
+      if (node.kind === Kind.Block) found.add(node);
+      return undefined;
+    },
+  });
+  return found;
+}
+
+function mentionsIn(root) {
+  const index = new Map();
+  const stack = [];
+  walk(root, {
+    enter(node) {
+      if (node.kind === Kind.Block) {
+        stack.push(node);
+      } else if (node.kind === Kind.Name && node.binding) {
+        const row = index.get(node.binding);
+        if (!row) {
+          index.set(node.binding, { nodes: [node], path: stack.slice() });
+        } else {
+          row.nodes.push(node);
+          let depth = 0;
+          while (depth < row.path.length && row.path[depth] === stack[depth]) depth += 1;
+          row.path.length = depth;
+        }
+      }
+      return undefined;
+    },
+    leave(node) {
+      if (node.kind === Kind.Block) stack.pop();
+    },
+  });
+  return index;
+}
+
+function pushable(home, index, cache) {
+  const statements = home.statements || [];
+  const plans = [];
+  if (hasLabel(home)) return plans;
+  if (!statements.some((statement) => statement.kind === Kind.LocalDeclaration
+    && !(statement.expressions || []).length)) return plans;
+  let inside = null;
+  statements.forEach((statement) => {
+    if (statement.kind !== Kind.LocalDeclaration) return;
+    if ((statement.expressions || []).length) return;
+    (statement.bindings || []).forEach((binding) => {
+      if (!isLocalBinding(binding)) return;
+      const row = index ? index.get(binding) : null;
+      const found = row ? row.nodes : mentions(home, binding);
+      if (!found.length) return;
+      const target = row ? row.path[row.path.length - 1] : innerBlock(home, found);
+      if (!inside) inside = ownBlocks(home);
+      if (!target || target === home || !inside.has(target)) return;
+      if (hasLabel(target)) return;
+      const rows = spotsOf(cache, target).get(binding) || [];
+      let own = 0;
+      for (const row of rows) own += row.nodes.length;
+      if (own !== found.length) return;
+      const first = rows[0];
+      if (!first) return;
+      const host = (target.statements || [])[first.at];
+      if (!host || host.kind !== Kind.Assignment) return;
+      const targets = (host.targets || []).map((one) => bare(one));
+      const stores = first.nodes.filter((node) => targets.indexOf(node) >= 0);
+      if (stores.length !== 1 || stores.length !== first.nodes.length) return;
+      plans.push({
+        binding, declaration: statement, target, at: first.at,
+      });
+    });
+  });
+  return plans;
+}
+
+function pushIn(chunk) {
+  const plans = [];
+  const index = mentionsIn(chunk);
+  const cache = new Map();
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.Block) plans.push(...pushable(node, index, cache));
+      return undefined;
+    },
+  });
+  if (!plans.length) return 0;
+  const rows = new Map();
+  for (const plan of plans) {
+    let list = rows.get(plan.target);
+    if (!list) {
+      list = new Map();
+      rows.set(plan.target, list);
+    }
+    let row = list.get(plan.at);
+    if (!row) {
+      row = [];
+      list.set(plan.at, row);
+    }
+    row.push(plan);
+  }
+  let pushed = 0;
+  for (const [target, list] of rows) {
+    for (const at of [...list.keys()].sort((a, b) => b - a)) {
+      const row = list.get(at);
+      const declaration = {
+        kind: Kind.LocalDeclaration,
+        names: row.map((one) => one.binding.name),
+        expressions: [],
+        bindings: row.map((one) => one.binding),
+      };
+      for (const one of row) {
+        const names = one.declaration.names || [];
+        const slot = names.indexOf(one.binding.name);
+        if (slot >= 0) {
+          names.splice(slot, 1);
+          (one.declaration.bindings || []).splice(slot, 1);
+        }
+        one.binding.declaration = declaration;
+        one.binding.initializer = declaration;
+        pushed += 1;
+      }
+      target.statements.splice(at, 0, declaration);
+    }
+  }
+  return pushed;
+}
+
+function harmless(statement) {
+  if (statement.kind === Kind.LocalFunction) return true;
+  if (statement.kind === Kind.LocalDeclaration) {
+    return (statement.expressions || []).every((one) => M.quiet(one));
+  }
+  if (statement.kind !== Kind.Assignment) return false;
+  return (statement.targets || []).every((one) => {
+    const named = bare(one);
+    return named && named.kind === Kind.Name && isLocalBinding(named.binding);
+  }) && (statement.expressions || []).every((one) => M.quiet(one));
+}
+
+function writesAny(statement, wanted) {
+  return collect(statement, (node) => node.kind === Kind.Assignment
+    && (node.targets || []).some((one) => {
+      const named = bare(one);
+      return named && named.kind === Kind.Name && wanted.has(named.binding);
+    })).length > 0;
+}
+
+function fillable(block, positions) {
+  const statements = block.statements || [];
+  const plans = [];
+  if (hasLabel(block)) return plans;
+  let spots = null;
+  statements.forEach((statement, at) => {
+    if (statement.kind !== Kind.LocalDeclaration) return;
+    if ((statement.expressions || []).length) return;
+    (statement.bindings || []).forEach((binding) => {
+      if (!isLocalBinding(binding)) return;
+      if (!spots) spots = mentionSpots(block, true);
+      const first = firstMention(spots, binding, at);
+      if (!first) return;
+      const to = first.at;
+      const store = statements[to];
+      if (store.kind !== Kind.Assignment) return;
+      if ((store.targets || []).length !== 1 || (store.expressions || []).length !== 1) return;
+      const stored = bare(store.targets[0]);
+      if (!stored || stored.kind !== Kind.Name || stored.binding !== binding) return;
+      if (first.nodes.length !== 1) return;
+      const value = store.expressions[0];
+      if (!M.quiet(value)) return;
+      const read = collect(value, (node) => node.kind === Kind.Name);
+      if (!read.every((node) => isLocalBinding(node.binding)
+        && visibleAt(positions, node.binding, statement))) return;
+      const wanted = new Set(read.map((node) => node.binding));
+      for (let i = at + 1; i < to; i += 1) {
+        if (!harmless(statements[i]) || writesAny(statements[i], wanted)) return;
+      }
+      plans.push({ binding, declaration: statement, store, value, block });
+    });
+  });
+  return plans;
+}
+
+function fill(chunk) {
+  const positions = new Positions(chunk);
+  const plans = [];
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.Block) plans.push(...fillable(node, positions));
+      return undefined;
+    },
+  });
+  if (!plans.length) return 0;
+  const rows = new Map();
+  for (const plan of plans) {
+    if (!rows.has(plan.block)) rows.set(plan.block, []);
+    rows.get(plan.block).push(plan);
+  }
+  let filled = 0;
+  for (const [block, list] of rows) {
+    const dropped = new Set(list.map((one) => one.store));
+    const above = new Map();
+    for (const plan of list) {
+      const declaration = {
+        kind: Kind.LocalDeclaration,
+        names: [plan.binding.name],
+        expressions: [plan.value],
+        bindings: [plan.binding],
+      };
+      const names = plan.declaration.names || [];
+      const slot = names.indexOf(plan.binding.name);
+      if (slot >= 0) {
+        names.splice(slot, 1);
+        (plan.declaration.bindings || []).splice(slot, 1);
+      }
+      rebind(plan.binding, declaration, bare(plan.store.targets[0]));
+      if (!above.has(plan.declaration)) above.set(plan.declaration, []);
+      above.get(plan.declaration).push(declaration);
+      filled += 1;
+    }
+    const kept = [];
+    for (const statement of block.statements || []) {
+      const added = above.get(statement);
+      if (added) kept.push(...added);
+      if (!dropped.has(statement)) kept.push(statement);
+    }
+    block.statements = kept;
+  }
+  return filled;
+}
+
+function dropEmpty(chunk) {
+  let dropped = 0;
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Block) return undefined;
+      const kept = node.statements.filter((statement) => {
+        const empty = statement.kind === Kind.LocalDeclaration
+          && !(statement.names || []).length;
+        if (empty) dropped += 1;
+        return !empty;
+      });
+      node.statements = kept;
+      return undefined;
+    },
+  });
+  return dropped;
+}
+
+function silentAbout(root, text) {
+  return !collect(root, (node) => node.kind === Kind.Name && node.name === text).length;
+}
+
+function recursiveForm(chunk) {
+  let restored = 0;
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Block || hasLabel(node)) return undefined;
+      const statements = node.statements;
+      let spots = null;
+      statements.forEach((statement, at) => {
+        if (statement.kind !== Kind.LocalDeclaration) return;
+        if ((statement.expressions || []).length) return;
+        for (const binding of [...(statement.bindings || [])]) {
+          if (!isLocalBinding(binding) || !isIdentifier(binding.name)) continue;
+          if (!spots) spots = mentionSpots(node);
+          const first = firstMention(spots, binding, at);
+          if (!first) continue;
+          const host = statements[first.at];
+          if (host.kind !== Kind.Assignment) continue;
+          if ((host.targets || []).length !== 1 || (host.expressions || []).length !== 1) continue;
+          if (bare(host.targets[0]) !== first.nodes[0]) continue;
+          const value = bare(host.expressions[0]);
+          if (!value || value.kind !== Kind.Function) continue;
+
+          if (mentions(value.body, binding).length !== first.nodes.length - 1) continue;
+          let clear = true;
+          for (let i = at + 1; i < first.at; i += 1) {
+            if (!silentAbout(statements[i], binding.name)) clear = false;
+          }
+          if (!clear) continue;
+          const declaration = {
+            kind: Kind.LocalFunction,
+            name: binding.name,
+            body: value,
+            binding,
+          };
+          statements[first.at] = declaration;
+          const names = statement.names || [];
+          const slot = names.indexOf(binding.name);
+          if (slot >= 0) {
+            names.splice(slot, 1);
+            (statement.bindings || []).splice(slot, 1);
+          }
+          rebind(binding, declaration, first.nodes[0]);
+          restored += 1;
+        }
+      });
+      return undefined;
+    },
+  });
+  return restored;
+}
+
+function localForm(chunk) {
+  let restored = 0;
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Block) return undefined;
+      node.statements.forEach((statement, at) => {
+        const declared = M.plainDeclaration(statement);
+        if (!declared) return;
+        const value = bare(declared.value);
+        if (!value || value.kind !== Kind.Function) return;
+        if (!isIdentifier(declared.name)) return;
+        if (!silentAbout(value.body, declared.name)) return;
+        const declaration = {
+          kind: Kind.LocalFunction,
+          name: declared.name,
+          body: value,
+          binding: declared.binding,
+        };
+        declared.binding.declaration = declaration;
+        declared.binding.initializer = declaration;
+        node.statements[at] = declaration;
+        restored += 1;
+      });
+      return undefined;
+    },
+  });
+  return restored;
+}
+
+function assignedForm(chunk) {
+  let restored = 0;
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Block) return undefined;
+      node.statements.forEach((statement, at) => {
+        if (statement.kind !== Kind.Assignment) return;
+        const targets = statement.targets || [];
+        const expressions = statement.expressions || [];
+        if (targets.length !== 1 || expressions.length !== 1) return;
+        const target = bare(targets[0]);
+        const value = bare(expressions[0]);
+        if (!target || target.kind !== Kind.Name) return;
+        if (!value || value.kind !== Kind.Function) return;
+        if (!isIdentifier(target.name)) return;
+        node.statements[at] = {
+          kind: Kind.FunctionDeclaration,
+          target,
+          isMethod: false,
+          body: value,
+        };
+        restored += 1;
+      });
+      return undefined;
+    },
+  });
+  return restored;
+}
+
+function methodNames(chunk) {
+  const found = new Set();
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.MethodCall) found.add(node.method);
+      return undefined;
+    },
+  });
+  return found;
+}
+
+function fieldName(node) {
+  if (!node || node.kind !== Kind.Index) return null;
+  const key = bare(node.index);
+  if (!key || key.kind !== Kind.String || !isIdentifier(key.value)) return null;
+  return key.value;
+}
+
+function isFieldPath(node) {
+  let current = node;
+  while (current && current.kind === Kind.Index) {
+    if (!fieldName(current)) return false;
+    current = bare(current.base);
+  }
+  return !!current && current.kind === Kind.Name;
+}
+
+function methodForm(chunk) {
+  const called = methodNames(chunk);
+  let restored = 0;
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Block) return undefined;
+      node.statements.forEach((statement, at) => {
+        if (statement.kind !== Kind.Assignment) return;
+        const targets = statement.targets || [];
+        const expressions = statement.expressions || [];
+        if (targets.length !== 1 || expressions.length !== 1) return;
+        const target = bare(targets[0]);
+        const value = bare(expressions[0]);
+        if (!value || value.kind !== Kind.Function) return;
+        const field = fieldName(target);
+        if (!field || !isFieldPath(target)) return;
+        const params = value.params || [];
+        const wantsSelf = called.has(field) && params.length > 0
+          && silentAbout(value.body, 'self');
+        if (wantsSelf) {
+          const binding = (value.bindings || [])[0];
+          if (binding) {
+            for (const mention of mentions(value.body, binding)) mention.name = 'self';
+            binding.name = 'self';
+          }
+          params[0] = 'self';
+        }
+        node.statements[at] = {
+          kind: Kind.FunctionDeclaration,
+          target,
+          isMethod: wantsSelf,
+          body: value,
+        };
+        restored += 1;
+      });
+      return undefined;
+    },
+  });
+  return restored;
+}
+
+module.exports = {
+  hasLabel,
+  mentions,
+  sink,
+  slide,
+  pushIn,
+  harmless,
+  fill,
+  dropEmpty,
+  recursiveForm,
+  localForm,
+  assignedForm,
+  methodForm,
+};
+
+};
+
+__modules["src/beautify/hoist.js"] = function(module, exports, require) {
+'use strict';
+
+const { Kind, unparen } = require("src/lua/ast.js");
+const { walk, collect } = require("src/lua/walk.js");
+const { isLocalBinding } = require("src/lua/scope.js");
+const { Positions } = require("src/util/order.js");
+const { visibleAt } = require("src/beautify/copies.js");
+const { hasLabel } = require("src/beautify/declare.js");
+
+function spoken(chunk) {
+  const taken = new Set();
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.Name) taken.add(node.name);
+      else if (node.kind === Kind.LocalFunction) taken.add(node.name);
+      else if (node.kind === Kind.NumericFor) taken.add(node.variable);
+      else if (node.kind === Kind.LocalDeclaration) {
+        for (const one of node.names || []) taken.add(one);
+      } else if (node.kind === Kind.GenericFor) {
+        for (const one of node.variables || []) taken.add(one);
+      } else if (node.kind === Kind.Function) {
+        for (const one of node.params || []) taken.add(one);
+      }
+      return undefined;
+    },
+  });
+  return taken;
+}
+
+function fresh(taken, stem = 'f') {
+  for (let n = 1; ; n += 1) {
+    const name = `${stem}${n}`;
+    if (taken.has(name)) continue;
+    taken.add(name);
+    return name;
+  }
+}
+
+function carries(fn, positions, host) {
+  const inside = new Set(collect(fn, () => true));
+  for (const node of collect(fn, (one) => one.kind === Kind.Name)) {
+    const binding = node.binding;
+    if (!isLocalBinding(binding)) continue;
+    if (!binding.declaration || inside.has(binding.declaration)) continue;
+    if (!visibleAt(positions, binding, host)) return false;
+  }
+  return true;
+}
+
+function calledWhereBuilt(chunk, positions) {
+  const found = [];
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Call) return undefined;
+      const base = unparen(node.base);
+      if (!base || base.kind !== Kind.Function) return undefined;
+      const spot = positions.path(node);
+      if (!spot) return undefined;
+      const { block, at } = spot;
+      const host = (block.statements || [])[at];
+
+      if (!host || hasLabel(block)) return undefined;
+      if (!carries(base, positions, host)) return undefined;
+      found.push({ block, host, call: node, fn: base });
+      return undefined;
+    },
+  });
+  return found;
+}
+
+function nameCalled(chunk) {
+  const positions = new Positions(chunk);
+  const plans = calledWhereBuilt(chunk, positions);
+  if (!plans.length) return 0;
+  const taken = spoken(chunk);
+  const rows = new Map();
+  for (const plan of plans) {
+    if (!rows.has(plan.block)) rows.set(plan.block, new Map());
+    const above = rows.get(plan.block);
+    if (!above.has(plan.host)) above.set(plan.host, []);
+    const name = fresh(taken);
+    above.get(plan.host).push({ kind: Kind.LocalFunction, name, body: plan.fn });
+    plan.call.base = { kind: Kind.Name, name };
+  }
+  let named = 0;
+  for (const [block, above] of rows) {
+    const kept = [];
+    for (const statement of block.statements || []) {
+      const added = above.get(statement);
+      if (added) {
+        kept.push(...added);
+        named += added.length;
+      }
+      kept.push(statement);
+    }
+    block.statements = kept;
+  }
+  return named;
+}
+
+module.exports = { spoken, fresh, carries, nameCalled };
+
+};
+
+__modules["src/beautify/jumps.js"] = function(module, exports, require) {
+'use strict';
+
+const A = require("src/lua/ast.js");
+const { Kind } = require("src/lua/ast.js");
+const { walk, collect } = require("src/lua/walk.js");
+const { diverges, divergesBlock } = require("src/util/flow.js");
+
+const TAILS = 8;
+
+const LOOPS = new Set([Kind.While, Kind.Repeat, Kind.NumericFor, Kind.GenericFor]);
+
+const EXITS = new Set([Kind.Return, Kind.Break, Kind.Continue]);
+
+function rootsOf(chunk) {
+  const roots = [];
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.Chunk) roots.push(node.body);
+      else if (node.kind === Kind.Function) roots.push(node.body);
+      return undefined;
+    },
+  });
+  return roots;
+}
+
+function survey(root) {
+  const after = new Map();
+  const holder = new Map();
+  const labels = new Map();
+  const gotos = [];
+  const leave = { kind: 'leave' };
+
+  const visitBlock = (block, exit) => {
+    const statements = (block && block.statements) || [];
+    for (let at = 0; at < statements.length; at += 1) {
+      const statement = statements[at];
+      let ahead = at + 1;
+      while (ahead < statements.length && statements[ahead].kind === Kind.Label) ahead += 1;
+      const next = ahead < statements.length
+        ? { kind: 'statement', node: statements[ahead] }
+        : exit;
+      after.set(statement, next);
+      holder.set(statement, statements);
+      if (statement.kind === Kind.Label) labels.set(statement.name, statement);
+      else if (statement.kind === Kind.Goto) gotos.push(statement);
+      if (statement.kind === Kind.If) {
+        visitBlock(statement.body, next);
+        for (const clause of statement.elseIfs || []) visitBlock(clause.body, next);
+        if (statement.elseBody) visitBlock(statement.elseBody, next);
+      } else if (statement.kind === Kind.Do) {
+        visitBlock(statement.body, next);
+      } else if (LOOP_KINDS.has(statement.kind)) {
+        visitBlock(statement.body, { kind: 'loop', node: statement });
+      }
+    }
+  };
+
+  visitBlock(root, leave);
+  return { after, holder, labels, gotos };
+}
+
+function same(one, other) {
+  if (!one || !other) return false;
+  if (one === other) return true;
+  if (one.kind !== other.kind) return false;
+  return one.node === other.node;
+}
+
+function drop(statements, statement) {
+  const at = statements.indexOf(statement);
+  if (at < 0) return false;
+  statements.splice(at, 1);
+  return true;
+}
+
+function replace(statements, statement, replacement) {
+  const at = statements.indexOf(statement);
+  if (at < 0) return false;
+  statements[at] = replacement;
+  return true;
+}
+
+function unreachable(statements, statement) {
+  const at = statements.indexOf(statement);
+  if (at <= 0) return false;
+  const before = statements[at - 1];
+  if (before.kind === Kind.Label) return false;
+  if (before.kind === Kind.Goto) return true;
+  return LEAVING_KINDS.has(before.kind) || diverges(before);
+}
+
+
+function copyOf(node) {
+  if (Array.isArray(node)) return node.map(copyOf);
+  if (!node || typeof node !== 'object') return node;
+  const copy = {};
+  for (const key of Object.keys(node)) {
+    if (key === 'binding' || key === 'bindings') continue;
+    copy[key] = copyOf(node[key]);
+  }
+  return copy;
+}
+
+function holds(node, target) {
+  let found = false;
+  walk(node, {
+    enter(one) {
+      if (one === target) found = true;
+      return undefined;
+    },
+  });
+  return found;
+}
+
+function sibling(statement, into) {
+  if (statement.kind === Kind.LocalDeclaration) {
+    for (const binding of statement.bindings || []) if (binding) into.add(binding);
+  } else if (statement.kind === Kind.LocalFunction && statement.binding) {
+    into.add(statement.binding);
+  }
+}
+
+function entering(statement, into) {
+  if (statement.kind === Kind.NumericFor && statement.binding) into.add(statement.binding);
+  else if (statement.kind === Kind.GenericFor) {
+    for (const binding of statement.bindings || []) if (binding) into.add(binding);
+  }
+}
+
+function bodiesOf(statement) {
+  if (statement.kind === Kind.If) {
+    const found = [statement.body];
+    for (const clause of statement.elseIfs || []) found.push(clause.body);
+    if (statement.elseBody) found.push(statement.elseBody);
+    return found;
+  }
+  if (statement.kind === Kind.Do || LOOP_KINDS.has(statement.kind)) return [statement.body];
+  return [];
+}
+
+function visibleAt(root, jump) {
+  const live = new Set();
+  const scan = (block) => {
+    for (const statement of block.statements || []) {
+      if (statement === jump) return true;
+      if (holds(statement, jump)) {
+        entering(statement, live);
+        for (const body of bodiesOf(statement)) {
+          if (body && holds(body, jump)) return scan(body);
+        }
+        return false;
+      }
+      sibling(statement, live);
+    }
+    return false;
+  };
+  return scan(root) ? live : null;
+}
+
+function declaredIn(statements) {
+  const found = new Set();
+  for (const statement of statements) {
+    walk(statement, {
+      enter(one) {
+        sibling(one, found);
+        entering(one, found);
+        if (one.kind === Kind.Function) {
+          for (const binding of one.bindings || []) if (binding) found.add(binding);
+        }
+        return undefined;
+      },
+    });
+  }
+  return found;
+}
+
+function leaves(block, depth = 0) {
+  const statements = (block && block.statements) || [];
+  if (!statements.length || depth > 48) return false;
+  const last = statements[statements.length - 1];
+  if (last.kind === Kind.Return) return true;
+  if (last.kind === Kind.Do) return leaves(last.body, depth + 1);
+  if (last.kind === Kind.If) {
+    if (!last.elseBody || !leaves(last.body, depth + 1)) return false;
+    for (const clause of last.elseIfs || []) {
+      if (!leaves(clause.body, depth + 1)) return false;
+    }
+    return leaves(last.elseBody, depth + 1);
+  }
+  return divergesBlock(block, depth + 1);
+}
+
+function tailOf(statements, label) {
+  const at = statements.indexOf(label);
+  if (at < 0) return null;
+  const tail = statements.slice(at + 1);
+  if (!tail.length || tail.length > TAIL_STATEMENTS) return null;
+  if (!leaves({ kind: Kind.Block, statements: tail })) return null;
+  let nodes = 0;
+  for (const statement of tail) {
+    for (const one of collect(statement, () => true)) {
+      if (one.kind === Kind.Goto || one.kind === Kind.Label) return null;
+      if (one.kind === Kind.Break || one.kind === Kind.Continue) return null;
+      nodes += 1;
+    }
+  }
+  return nodes > TAIL_NODES ? null : tail;
+}
+
+function movable(root, jump, tail) {
+  const visible = visibleAt(root, jump);
+  if (!visible) return false;
+  const inside = declaredIn(tail);
+  const used = new Set();
+  for (const statement of tail) {
+    walk(statement, {
+      enter(one) {
+        if (one.kind === Kind.Name && one.binding) used.add(one.binding);
+        return undefined;
+      },
+    });
+  }
+  const local = new Set();
+  for (const statement of root.statements || []) {
+    walk(statement, {
+      enter(one) {
+        sibling(one, local);
+        entering(one, local);
+        return undefined;
+      },
+    });
+  }
+  for (const binding of used) {
+    if (inside.has(binding) || visible.has(binding)) continue;
+    if (local.has(binding)) return false;
+  }
+  return true;
+}
+
+function copyableReturn(statement) {
+  if (!statement || statement.kind !== Kind.Return) return null;
+  const expressions = statement.expressions || [];
+  const plain = expressions.every((value) => {
+    const bare = A.unparen(value);
+    return bare.kind === Kind.Name || A.LITERALS.has(bare.kind);
+  });
+  if (!plain) return null;
+  return A.returnStatement(expressions.map((value) => copyOf(value)));
+}
+function lastOf(block) {
+  const statements = (block && block.statements) || [];
+  return statements.length ? statements[statements.length - 1] : null;
+}
+
+function stops(block) {
+  const last = lastOf(block);
+  if (last && (LEAVING_KINDS.has(last.kind) || last.kind === Kind.Goto)) return true;
+  return leaves(block);
+}
+
+function jumpsTo(block, name) {
+  const last = lastOf(block);
+  return last && last.kind === Kind.Goto && last.label === name ? last : null;
+}
+
+function namesIn(statements) {
+  const found = new Set();
+  for (const statement of statements) {
+    if (statement.kind === Kind.LocalDeclaration) {
+      for (const name of statement.names || []) found.add(name);
+    } else if (statement.kind === Kind.LocalFunction && statement.name) {
+      found.add(statement.name);
+    }
+  }
+  return found;
+}
+
+function readsIn(statements) {
+  const found = new Set();
+  for (const statement of statements) {
+    walk(statement, {
+      enter(one) {
+        if (one.kind === Kind.Name && one.binding) found.add(one.binding);
+        return undefined;
+      },
+    });
+  }
+  return found;
+}
+
+function ownersOf(root) {
+  const owners = new Map();
+  const blocks = new Map();
+  const note = (block) => {
+    for (const one of (block && block.statements) || []) blocks.set(one, block);
+  };
+  note(root);
+  walk(root, {
+    enter(node) {
+      if (node.kind === Kind.Function) return false;
+      for (const body of bodiesOf(node)) {
+        if (!body) continue;
+        owners.set(body, node);
+        note(body);
+      }
+      return undefined;
+    },
+  });
+  return { owners, blocks };
+}
+
+function climb(label, wanted, owners, blocks) {
+  const dropping = new Set();
+  let block = blocks.get(label);
+  let mark = label;
+  for (let level = 0; level < 64; level += 1) {
+    const owner = owners.get(block);
+    if (!owner) return null;
+    const above = blocks.get(owner);
+    if (!above) return null;
+    const list = above.statements || [];
+    if (list[list.length - 1] !== owner) return null;
+    if (owner.kind === Kind.If) {
+      if (!owner.elseBody) return null;
+      for (const other of bodiesOf(owner)) {
+        if (other === block) continue;
+        const jump = jumpsTo(other, label.name);
+        if (jump) {
+          dropping.add(jump);
+          continue;
+        }
+        if (!stops(other)) return null;
+      }
+    } else if (owner.kind !== Kind.Do) return null;
+    mark = owner;
+    block = above;
+    if (dropping.size === wanted) return { seat: owner, list, dropping };
+  }
+  return null;
+}
+
+function spill(label, gotos, owners, blocks) {
+  const statements = (blocks.get(label) || {}).statements || [];
+  const at = statements.indexOf(label);
+  if (at < 0) return false;
+  const tail = statements.slice(at + 1);
+  if (!tail.length) return false;
+  const wanted = gotos.filter((jump) => jump.label === label.name);
+  if (!wanted.length) return false;
+  const reached = climb(label, wanted.length, owners, blocks);
+  if (!reached) return false;
+  for (const jump of wanted) if (!reached.dropping.has(jump)) return false;
+  const held = new Set();
+  const inner = new Set();
+  for (const one of tail) {
+    for (const node of collect(one, (found) => found.kind === Kind.Label)) {
+      held.add(node.name);
+      inner.add(node);
+    }
+    for (const node of collect(one, (found) => found.kind === Kind.Goto)) inner.add(node);
+  }
+  for (const jump of gotos) {
+    if (inner.has(jump) || reached.dropping.has(jump)) continue;
+    if (held.has(jump.label)) return false;
+  }
+  const outside = collect(reached.seat, (found) => found.kind === Kind.Label)
+    .filter((found) => !inner.has(found) && found !== label);
+  for (const node of inner) {
+    if (node.kind !== Kind.Goto) continue;
+    if (outside.some((found) => found.name === node.label)) return false;
+  }
+  const inside = declaredIn(tail);
+  const blocked = declaredIn([reached.seat]);
+  for (const binding of inside) blocked.delete(binding);
+  for (const binding of readsIn(tail)) {
+    if (!inside.has(binding) && blocked.has(binding)) return false;
+  }
+  const seat = reached.list.indexOf(reached.seat);
+  if (seat < 0) return false;
+  const shadowing = namesIn(tail);
+  if (shadowing.size) {
+    for (let index = seat + 1; index < reached.list.length; index += 1) {
+      for (const node of collect(reached.list[index], (found) => found.kind === Kind.Name)) {
+        if (shadowing.has(node.name)) return false;
+      }
+    }
+  }
+  statements.splice(at, tail.length + 1);
+  for (const jump of reached.dropping) {
+    const list = (blocks.get(jump) || {}).statements;
+    if (list) list.splice(list.indexOf(jump), 1);
+  }
+  reached.list.splice(seat + 1, 0, ...tail);
+  return true;
+}
+
+function pull(chunk) {
+  let pulled = 0;
+  for (const root of rootsOf(chunk)) {
+    for (let round = 0; round < 64; round += 1) {
+      const { gotos } = survey(root);
+      if (!gotos.length) break;
+      const { owners, blocks } = ownersOf(root);
+      let moved = false;
+      for (const label of collect(root, (node) => node.kind === Kind.Label)) {
+        if (!blocks.has(label)) continue;
+        if (!spill(label, gotos, owners, blocks)) continue;
+        moved = true;
+        break;
+      }
+      if (!moved) break;
+      pulled += 1;
+    }
+  }
+  return pulled;
+}
+
+function clean(chunk) {
+  let cleaned = 0;
+  for (const root of rootsOf(chunk)) {
+    const { after, holder, labels, gotos } = survey(root);
+    if (!gotos.length && !labels.size) continue;
+    for (const jump of gotos) {
+      const statements = holder.get(jump);
+      if (!statements) continue;
+      if (unreachable(statements, jump)) {
+        if (drop(statements, jump)) cleaned += 1;
+        continue;
+      }
+      const label = labels.get(jump.label);
+      if (!label) continue;
+      const target = after.get(label);
+      if (same(target, after.get(jump))) {
+        if (drop(statements, jump)) cleaned += 1;
+        continue;
+      }
+      if (target && target.kind === 'leave') {
+        if (replace(statements, jump, A.returnStatement([]))) cleaned += 1;
+        continue;
+      }
+      if (target && target.kind === 'statement') {
+        const returned = copyableReturn(target.node);
+        if (returned && movable(root, jump, [target.node])
+          && replace(statements, jump, returned)) {
+          cleaned += 1;
+          continue;
+        }
+        const tail = tailOf(holder.get(label) || [], label);
+        if (!tail || !movable(root, jump, tail)) continue;
+        const at = statements.indexOf(jump);
+        if (at < 0) continue;
+        statements.splice(at, 1, ...tail.map(copyOf));
+        cleaned += 1;
+      }
+    }
+
+    const named = new Set();
+    walk(root, {
+      enter(node) {
+        if (node.kind === Kind.Function) return false;
+        if (node.kind === Kind.Goto) named.add(node.label);
+        return undefined;
+      },
+    });
+    for (const [name, label] of labels) {
+      if (named.has(name)) continue;
+      const statements = holder.get(label);
+      if (statements && drop(statements, label)) cleaned += 1;
+    }
+  }
+  return cleaned;
+}
+
+module.exports = {
+  copyOf,
+  leaves,
+  visibleAt,
+  movable,
+  survey,
+  same,
+  unreachable,
+  stops,
+  pull,
+  clean,
+};
+
+};
+
+__modules["src/beautify/loops.js"] = function(module, exports, require) {
+'use strict';
+
+const { Kind, unparen, isMultiValue } = require("src/lua/ast.js");
+const { walk } = require("src/lua/walk.js");
+const { isLocalBinding } = require("src/lua/scope.js");
+const { TABLES } = require("src/util/purity.js");
+const { isAlwaysTrue } = require("src/util/flow.js");
+
+const RETURNS = {
+  ipairs: [null, null, { kind: Kind.Number, value: 0 }],
+  pairs: [null, null, { kind: Kind.Nil }],
+  gmatch: [null],
+  gfind: [null],
+  lines: [null],
+};
+
+const CONTROLS = 3;
+
+function isLibrary(node) {
+  if (!node || node.kind !== Kind.Name) return false;
+  return !node.binding || !isLocalBinding(node.binding);
+}
+
+function libraryIterator(call) {
+  if (!call || call.kind !== Kind.Call) return null;
+  const base = unparen(call.base);
+  if (!base) return null;
+  if (isLibrary(base)) return base.name;
+  if (base.kind !== Kind.Index) return null;
+  const owner = unparen(base.base);
+  if (!isLibrary(owner) || !TABLES.has(owner.name)) return null;
+  const key = base.index;
+  if (!key || key.kind !== Kind.String) return null;
+  return key.value;
+}
+
+function spells(node, wanted) {
+  const inner = unparen(node);
+  if (!inner || !wanted || inner.kind !== wanted.kind) return false;
+  if (inner.kind !== Kind.Number) return true;
+  return inner.value === wanted.value;
+}
+
+function headerFits(loop, call, taken) {
+  const spelled = loop.expressions || [];
+  if (spelled.length < taken) return false;
+  if (spelled.length > CONTROLS) return false;
+  if (spelled.length === CONTROLS && taken === CONTROLS) return true;
+  const returns = RETURNS[libraryIterator(call)];
+  if (!returns) return false;
+  for (let at = taken; at < CONTROLS; at += 1) {
+    const wanted = at < returns.length ? returns[at] : { kind: Kind.Nil };
+    if (!wanted) return false;
+    if (at < spelled.length) {
+      if (!spells(spelled[at], wanted)) return false;
+    } else if (wanted.kind !== Kind.Nil) return false;
+  }
+  return true;
+}
+
+function headerOnly(declaration, loop) {
+  const bindings = declaration.bindings || [];
+  const names = declaration.names || [];
+  if (!bindings.length || bindings.length !== names.length) return false;
+  const spelled = loop.expressions || [];
+  if (spelled.length < bindings.length) return false;
+  return bindings.every((binding, at) => {
+    if (!binding || !isLocalBinding(binding)) return false;
+    if ((binding.writes || []).length) return false;
+    const reads = binding.reads || [];
+    if (reads.length !== 1) return false;
+    return unparen(spelled[at]) === reads[0];
+  });
+}
+
+function hoistedCall(statement) {
+  if (!statement || statement.kind !== Kind.LocalDeclaration) return null;
+  const expressions = statement.expressions || [];
+  if (expressions.length !== 1) return null;
+  const call = unparen(expressions[0]);
+  return isMultiValue(call) ? call : null;
+}
+
+function foldable(chunk) {
+  const plans = [];
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Block) return undefined;
+      const statements = node.statements || [];
+      statements.forEach((statement, at) => {
+        const loop = statements[at + 1];
+        if (!loop || loop.kind !== Kind.GenericFor) return;
+        const call = hoistedCall(statement);
+        if (!call) return;
+        if (!headerOnly(statement, loop)) return;
+        if (!headerFits(loop, call, (statement.bindings || []).length)) return;
+        plans.push({ block: node, declaration: statement, loop, call });
+      });
+      return undefined;
+    },
+  });
+  return plans;
+}
+
+function foldIterators(chunk) {
+  const plans = foldable(chunk);
+  if (!plans.length) return 0;
+  const dropped = new Set();
+  for (const plan of plans) {
+    plan.loop.expressions = [plan.call];
+    dropped.add(plan.declaration);
+  }
+  for (const plan of plans) {
+    plan.block.statements = plan.block.statements.filter((one) => !dropped.has(one));
+  }
+  return plans.length;
+}
+
+function negated(test) {
+  if (test && test.kind === Kind.Unary && test.operator === 'not') return test.argument;
+  return { kind: Kind.Unary, operator: 'not', argument: test };
+}
+
+function breakArm(branch) {
+  if ((branch.elseIfs || []).length) return null;
+  const lone = (block) => {
+    const statements = (block && block.statements) || [];
+    return statements.length === 1 && statements[0].kind === Kind.Break;
+  };
+  if (!branch.elseBody) return null;
+  if (lone(branch.elseBody) && !lone(branch.body)) {
+    return { condition: branch.condition, body: branch.body };
+  }
+  if (lone(branch.body) && !lone(branch.elseBody)) {
+    return { condition: negated(branch.condition), body: branch.elseBody };
+  }
+  return null;
+}
+
+function raiseTest(chunk) {
+  let raised = 0;
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.While) return undefined;
+      if (!isAlwaysTrue(node.condition)) return undefined;
+      const statements = (node.body && node.body.statements) || [];
+      if (statements.length !== 1 || statements[0].kind !== Kind.If) return undefined;
+      const arm = breakArm(statements[0]);
+      if (!arm) return undefined;
+      node.condition = arm.condition;
+      node.body = arm.body;
+      raised += 1;
+      return undefined;
+    },
+  });
+  return raised;
+}
+
+module.exports = { foldIterators, negated, raiseTest };
+
+};
+
+__modules["src/beautify/moves.js"] = function(module, exports, require) {
+'use strict';
+
+const { Kind } = require("src/lua/ast.js");
+const { walk, collect } = require("src/lua/walk.js");
+const { bare } = require("src/util/flow.js");
+
+function quiet(node) {
+  if (!node) return true;
+  switch (node.kind) {
+    case Kind.Nil:
+    case Kind.True:
+    case Kind.False:
+    case Kind.Number:
+    case Kind.String:
+    case Kind.Vararg:
+    case Kind.Name:
+    case Kind.Function:
       return true;
-    })
-    .map(item => item.file);
-}
-async function fetchMessages(channel, before) {
-  const options = { limit: 100 };
-  if (before) options.before = before;
-  return await channel.messages.fetch(options);
-}
-function attachmentsOf(message) {
-  const result = [];
-  for (const a of message.attachments?.values?.() || []) {
-    if (isAllowedFileType(a.name, a.contentType)) {
-      result.push({ attachment: a, forwarded: false });
-    }
+    case Kind.Paren:
+      return quiet(node.expression);
+    case Kind.Table:
+      return (node.entries || []).every((entry) => (entry.type !== 'key' || quiet(entry.key))
+        && quiet(entry.value));
+    default:
+      return false;
   }
-  for (const s of message.messageSnapshots?.values?.() || []) {
-    for (const a of s.attachments?.values?.() || []) {
-      if (isAllowedFileType(a.name, a.contentType)) {
-        result.push({ attachment: a, forwarded: true });
+}
+
+function holds(root, wanted) {
+  return collect(root, (node) => node === wanted).length > 0;
+}
+
+function storeSites(root) {
+  const stores = new Set();
+  walk(root, {
+    enter(node) {
+      if (node.kind !== Kind.Assignment) return undefined;
+      for (const target of node.targets || []) {
+        const site = bare(target);
+        if (site && site.kind === Kind.Index) stores.add(site);
       }
-    }
-  }
-  return result;
-}
-function allAttachmentsOf(message) {
-  const result = [];
-  for (const a of message.attachments?.values?.() || []) {
-    if (isAllowedFileType(a.name, a.contentType)) result.push(a);
-  }
-  for (const s of message.messageSnapshots?.values?.() || []) {
-    for (const a of s.attachments?.values?.() || []) {
-      if (isAllowedFileType(a.name, a.contentType)) result.push(a);
-    }
-  }
-  return result;
-}
-function zipAttachmentsOf(message) {
-  const result = [];
-  for (const a of message.attachments?.values?.() || []) {
-    if (isZipFile(a.name, a.contentType)) result.push(a);
-  }
-  for (const s of message.messageSnapshots?.values?.() || []) {
-    for (const a of s.attachments?.values?.() || []) {
-      if (isZipFile(a.name, a.contentType)) result.push(a);
-    }
-  }
-  return result;
-}
-function extractAttachmentsOf(message) {
-  const result = [];
-  for (const a of message.attachments?.values?.() || []) {
-    if (isZipFile(a.name, a.contentType)) result.push(a);
-  }
-  for (const s of message.messageSnapshots?.values?.() || []) {
-    for (const a of s.attachments?.values?.() || []) {
-      if (isZipFile(a.name, a.contentType)) result.push(a);
-    }
-  }
-  return result;
-}
-function getMaxFileSize(guild) {
-  const tier = guild?.premiumTier || 0;
-  if (tier >= 3) return { size: 1000 * 1024 * 1024, label: "1000MB" };
-  if (tier >= 2) return { size: 750 * 1024 * 1024, label: "750MB" };
-  if (tier >= 1) return { size: 500 * 1024 * 1024, label: "500MB" };
-  return { size: 300 * 1024 * 1024, label: "300MB" };
-}
-async function scanChannel(channel) {
-  if (!channel?.isTextBased?.() || !channel.messages) throw new Error("Not a readable text channel.");
-  if (runningScans.has(channel.id)) throw new Error("Already scanning.");
-  runningScans.add(channel.id);
-  try {
-    const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
-    const existingFullNames = new Set(library.files.map(f => normalize(f.filename)));
-    const found = [];
-    let before = null, messages = 0, pages = 0, skippedDup = 0, replacedDup = 0;
-    while (true) {
-      const batch = await fetchMessages(channel, before);
-      pages++; if (!batch.size) break;
-      for (const msg of batch.values()) {
-        messages++;
-        for (const item of attachmentsOf(msg)) {
-          const a = item.attachment;
-          const filename = a.name || "unknown_file";
-          const baseName = normalizeBase(filename);
-          const fullName = normalize(filename);
-          const fileSize = Number(a.size || 0);
-          const url = a.url || a.proxyURL || a.proxy_url;
-          if (!baseName || !url) continue;
-          // Skip files that are unavailable (exactly 36 bytes = Discord unavailable placeholder)
-          if (fileSize === 36) continue;
-          const isDupBase = existingBases.has(baseName);
-          const isDupFull = existingFullNames.has(fullName);
-          if (isDupBase || isDupFull) {
-            skippedDup++;
-            continue;
-          }
-          existingBases.add(baseName);
-          existingFullNames.add(fullName);
-          found.push({
-            id: idForFile(), filename, url, size: fileSize,
-            contentType: a.contentType || null, channelId: msg.channelId,
-            messageId: msg.id, attachmentId: String(a.id), forwarded: item.forwarded,
-            createdTimestamp: msg.createdTimestamp || Date.now(), scannedAt: Date.now()
-          });
-        }
-      }
-      const oldest = batch.last();
-      if (!oldest || batch.size < 100) break;
-      before = oldest.id;
-    }
-    library.files.push(...found);
-    library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
-    saveLibrary();
-    const libraryTotal = library.files.length;
-    const channelTotal = library.files.filter(f => f.channelId === channel.id).length;
-    console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | ${replacedDup} replaced | ${skippedDup} skipped | ${pages} pages`);
-    return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: libraryTotal, channelTotal };
-  } finally { runningScans.delete(channel.id); }
-}
-async function downloadURL(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return Buffer.from(await res.arrayBuffer());
-}
-async function forwardTxt(source, destination) {
-  if (!source?.isTextBased?.()) throw new Error("Source not readable.");
-  if (!destination?.isTextBased?.()) throw new Error("Dest not writable.");
-  let before = null, messages = 0, sent = 0;
-  const sendBatch = [];
-  while (true) {
-    const batch = await fetchMessages(source, before);
-    if (!batch.size) break;
-    for (const msg of batch.values()) {
-      messages++;
-      for (const a of allAttachmentsOf(msg)) {
-        sendBatch.push(
-          downloadURL(a.url)
-            .then(buf => destination.send({ files: [new AttachmentBuilder(buf, { name: a.name || "file" })] }))
-            .then(() => sent++)
-            .catch(e => console.error(`⚠️ Forward: ${e.message}`))
-        );
-      }
-    }
-    const oldest = batch.last();
-    if (!oldest || batch.size < 100) break;
-    before = oldest.id;
-  }
-  await Promise.allSettled(sendBatch);
-  return { messages, sent };
-}
-// ============================================================
-// ZIP EXTRACT HELPERS
-// ============================================================
-function extractFilesFromZip(zipBuffer) {
-  const zip = new AdmZip(zipBuffer);
-  const entries = zip.getEntries();
-  const extractedFiles = [];
-  for (const entry of entries) {
-    if (entry.isDirectory) continue;
-    const entryName = path.basename(entry.entryName);
-    if (!entryName || entryName.startsWith(".")) continue;
-    try {
-      const data = entry.getData();
-      extractedFiles.push({ name: entryName, data });
-    } catch (e) {
-      console.warn(`⚠️ Could not extract ${entry.entryName}:`, e.message);
-    }
-  }
-  return extractedFiles;
-}
-// ============================================================
-// LUA SCRIPT CLEANER
-// ============================================================
-function cleanLuaScript(text) {
-  if (!text) return "";
-  if (typeof text !== "string") { try { text = String(text); } catch { return ""; } }
-  var trimmed = text.trim();
-  if (!trimmed) return text;
-
-  var linesArr;
-  try { linesArr = trimmed.split(/\r?\n/); } catch { linesArr = [trimmed]; }
-  if (!linesArr || !linesArr.length) return text;
-
-  var cleaned = [];
-
-  // IP logger/grabber domains
-  var ipGrabberDomains = ["iplogger.org","iplogger.com","grabify.link","grabify.xyz","nipiscan.com","spiderip.com","blasze.tk","blasze.com","ip-api.com","ipify.org","icanhazip.com","ifconfig.co","ifconfig.me","whatismyip.com","ipinfo.io","ipgeolocation.io","freegeoip.net","freegeoip.app","checkip.amazonaws.com","bit.ly","tinyurl.com","is.gd","t.co","ow.ly","rb.gy","cutt.ly","bc.vc","adf.ly","linkvertise.com","shorte.st","bcvc.one","pornhub.com","discord.media","iplogger","grabify","logmyip","ipgrabber","stealip","ip-logger","ipgrab","iplog","logger","grabip","trackip","ip-tracker","ip-trace","ipgrabbed","iplogged","ip-logger","ip-grabber"];
-
-  function isGrabber(text) {
-    if (!text) return false;
-    for (var i = 0; i < ipGrabberDomains.length; i++) {
-      if (text.indexOf(ipGrabberDomains[i]) !== -1) return true;
-    }
-    return false;
-  }
-
-  function isSafeUrl(text) {
-    if (!text) return false;
-    try { if (/discord\.(gg|com\/invite)\//i.test(text)) return true; } catch {}
-    try { if (/files\.catbox\.moe\//i.test(text)) return true; } catch {}
-    try { if (/rbxassetid:\/\/\d+/i.test(text)) return true; } catch {}
-    try { if (/rbxthumb:\/\//i.test(text)) return true; } catch {}
-    return false;
-  }
-
-  // Script loader patterns
-  var loaderPatterns = [
-    /loadstring\s*\([^)]*\)\s*\(\s*\)/gi,
-    /loadstring\s*\([^)]*\)/gi,
-    /game\s*:\s*HttpGet\s*\([^)]*\)/gi,
-    /HttpService\s*:\s*GetAsync\s*\([^)]*\)/gi,
-    /syn\s*\.\s*request\s*\([^)]*\)/gi,
-    /http\s*\.\s*get\s*\([^)]*\)/gi,
-    /pcall\s*\(\s*loadstring[^)]*\)/gi,
-    /xpcall\s*\(\s*loadstring[^)]*\)/gi,
-    /identifyexecutor\s*\([^)]*\)/gi,
-    /load\s*\([^)]+\)/gi,
-    /require\s*\(\s*["']https?:\/\/[^"']+["']\s*\)/gi,
-    /socket\s*\.\s*(connect|tcp|udp)\s*\(/gi,
-  ];
-
-  function hasLoader(text) {
-    if (!text) return false;
-    for (var i = 0; i < loaderPatterns.length; i++) {
-      try { if (loaderPatterns[i].test(text)) return true; } catch {}
-    }
-    return false;
-  }
-
-  // Junk/obfuscation patterns (Luraph-style)
-  var junkPatterns = [
-    /["'][A-Za-z0-9]{2,6}["']\s*\/\s*\(\s*\d+\s*-\s*["'][A-Za-z0-9]{3,8}["']\s*\^\s*\d+/,
-    /return\s+["'][A-Za-z0-9]{2,6}["']\s*\/\s*\(/,
-    /local\s+[a-z]\d*\s*=\s*random\(/,
-    /local\s+[a-z]\d*\s*=\s*math\.random\(/,
-    /local\s+[a-z]\d*\s*=\s*gmatch/,
-    /local\s+_\s*=\s*table\.concat/,
-    /local\s+[a-z]\d*\s*=\s*unpack/,
-    /local\s+[a-z]\d*\s*=\s*table\.unpack/,
-    /error\(["'][A-Za-z0-9]+["']\s*,\s*0\)/,
-    /You Are Lost/,
-    /local\s+[a-z]+\d*\s*=\s*random\(\d+,\s*\d+\)\s*==\s*1/,
-    /\^\s*\d{5,}/,
-    /:\(%d*\):/,
-    // More aggressive: simple junk aliases
-    /^\s*local\s+[a-z]\d*\s*=\s*[a-z]+\.?[a-z]*\d*\s*$/,  // local v1 = string.gmatch
-    /^\s*local\s+[a-z]\d*\s*=\s*(true|false|0|nil|{})\s*$/,  // local u2 = true
-    /^\s*local\s+[a-z]\d*\s*=\s*[a-z]+\d*\s*or\s+[a-z]+\.?[a-z]*\d*/,  // local v1 = unpack or table.unpack
-    /local\s+[a-z]\d*\s*=\s*tonumber\(.*tostring/,  // local num = tonumber(v5(tostring(...)))
-    /tostring\(result\)/,  // junk parsing
-    /local\s+[a-z]\d*\s*=\s*\{\s*pcall\(function/,  // local t2 = { pcall(function()
-    /if\s+not\s+pcall\(function\(\)\s*$/,  // if not pcall(function()
-    /if\s+[a-z]\d*\s+then\s*$/,  // if v19 then
-    /[a-z]\d*\s*=\s*[a-z]\d*\s*and\s+[a-z]\d*/,  // u2 = u2 and t2[1]
-    /[a-z]\d*\s*=\s*\([a-z]\d*\s*\+\s*[a-z]\d*\)\s*%\s*256/,  // n1 = (n1 + t2[...]) % 256
-    /repeat\s+task\.wait\(\)\s+until\s+game:IsLoaded\(\)/,  // keep this, it's real
-  ];
-
-  function isJunkLine(text) {
-    if (!text) return false;
-    for (var i = 0; i < junkPatterns.length; i++) {
-      try { if (junkPatterns[i].test(text)) return true; } catch {}
-    }
-    return false;
-  }
-
-  var luaKw = ["local","function","if","then","end","return","for","while","repeat","until","do","print","warn","game","workspace","script","Players","Instance","Vector3","CFrame","Color3","UDim2","Enum","task","spawn","pcall","xpcall","require","loadstring","getgenv","gethui","hookfunction","hookmetamethod","getrawmetatable","setreadonly","getnamecallmethod","getconnections","firesignal","fireclickdetector","getobjects","isnetworkowner","setclipboard","writefile","readfile","listfiles","isfolder","makefolder","delfolder","delfile","loadfile","dofile","TweenService","UserInputService","RunService","ReplicatedStorage","StarterGui","CoreGui","Lighting","TeleportService","MarketplaceService","HttpService","InsertService","Selection","RbxUtility","MegaMorph","Valkyrie","Synapse","ScriptWare","KRNL","Fluxus","Delta","Hydrogen","Codex","Wave"];
-
-  function isLuaLine(text) {
-    if (!text) return false;
-    for (var i = 0; i < luaKw.length; i++) {
-      if (text.indexOf(luaKw[i]) !== -1) return true;
-    }
-    if (/=|==|~=|<=|>=|<|>/.test(text)) return true;
-    if (/\(|\)|\{|\}/.test(text)) return true;
-    if (/local\s+\w+/.test(text)) return true;
-    if (/function\s*\(/.test(text)) return true;
-    if (/:\w+\(/.test(text)) return true;
-    return false;
-  }
-
-  for (var li = 0; li < linesArr.length; li++) {
-    var raw = linesArr[li];
-    if (raw === null || raw === undefined) continue;
-    var originalLine = String(raw);
-    var t = originalLine.trim();
-    if (!t) { cleaned.push(""); continue; }
-
-    // 1. DELETE comment lines (keep if safe discord invite)
-    if (t.indexOf("--") === 0) {
-      if (!isSafeUrl(t)) continue;
-    }
-
-    // 2. DELETE IP logger/grabber lines
-    if (isGrabber(t)) continue;
-
-    // 3. DELETE script loader lines
-    if (hasLoader(t)) continue;
-
-    // 4. DELETE junk/obfuscation lines (anti-tamper, Luraph-style)
-    if (isJunkLine(t)) continue;
-
-    // 5. DELETE scrambled/garbage (not Lua)
-    if (!isLuaLine(t) && t.length > 3) {
-      if (!/\s/.test(t) && t.length > 20 && !/^https?:\/\//.test(t)) {
-        if (!isSafeUrl(t) && !/^["'].*["']$/.test(t)) continue;
-      }
-    }
-
-    // 6. Remove inline comments (preserve indent)
-    var inStrS = false, inStrD = false;
-    var cutAt = -1;
-    for (var ci = 0; ci < originalLine.length - 1; ci++) {
-      var c = originalLine.charAt(ci), nx = originalLine.charAt(ci + 1);
-      if (c === "\\" && (inStrS || inStrD)) { ci++; continue; }
-      if (c === '"' && !inStrS) inStrD = !inStrD;
-      if (c === "'" && !inStrD) inStrS = !inStrS;
-      if (!inStrS && !inStrD && c === "-" && nx === "-") { cutAt = ci; break; }
-    }
-    var lineToKeep = originalLine;
-    if (cutAt >= 0) lineToKeep = originalLine.substring(0, cutAt).replace(/\s+$/, "");
-    if (!lineToKeep.trim()) continue;
-
-    // 7. Remove any remaining loader code inline
-    for (var pi = 0; pi < loaderPatterns.length; pi++) {
-      try { lineToKeep = lineToKeep.replace(loaderPatterns[pi], ""); } catch {}
-    }
-    if (!lineToKeep.trim() || lineToKeep.trim().length < 3) continue;
-    if (/^[\s();,{}]+$/.test(lineToKeep.trim())) continue;
-
-    // 8. Change ALL print/warn to leak message
-    try {
-      lineToKeep = lineToKeep.replace(/\bprint\s*\([^)]*\)/g, 'print("leak by https://discord.gg/TBBAUZu8cW")');
-      lineToKeep = lineToKeep.replace(/\bwarn\s*\([^)]*\)/g, 'print("leak by https://discord.gg/TBBAUZu8cW")');
-    } catch {}
-
-    // 9. Replace Discord invites
-    try {
-      lineToKeep = lineToKeep.replace(/(https?:\/\/)?discord\.(gg|com\/invite)\/[a-zA-Z0-9-]+/gi, "https://discord.gg/TBBAUZu8cW");
-    } catch {}
-
-    if (!lineToKeep.trim()) continue;
-    cleaned.push(lineToKeep);
-  }
-
-  var result = cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-  return result || "";
-}
-
-
-// GOOFYSCATOR Obfuscator
-// ============================================================
-function goofyscator(source, settings) {
-  const s = settings || {};
-  let out = source;
-  
-  // Helper: random string generator
-  const randStr = (len) => {
-    const c = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let r = "_";
-    for (let i = 0; i < len; i++) r += c[Math.floor(Math.random() * c.length)];
-    return r;
-  };
-  
-  // Helper: XOR encrypt a string
-  const xorStr = (str, key) => {
-    let result = [];
-    for (let i = 0; i < str.length; i++) {
-      result.push(str.charCodeAt(i) ^ key.charCodeAt(i % key.length));
-    }
-    return result.join(",");
-  };
-  
-  // encryptStrings: Find and encrypt string literals
-  if (s.encryptStrings !== false) {
-    const key = randStr(8);
-    out = out.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'/g, (match) => {
-      const inner = match.slice(1, -1);
-      if (inner.length < 2) return match;
-      const encrypted = xorStr(inner, key);
-      return `(function() local k="${key}" local e={${encrypted}} local r="" for i=1,#e do r=r..string.char(bit.bxor(e[i],k:byte((i-1)%#k+1))) end return r end)()`;
-    });
-  }
-  
-  // proxifyLocals: Wrap local declarations
-  if (s.proxifyLocals !== false) {
-    const proxyName = randStr(6);
-    out = `local ${proxyName} = setmetatable({}, {__index = function(_,k) return rawget(_G,k) end, __newindex = function(_,k,v) rawset(_G,k,v) end})\n` + out;
-    out = out.replace(/\blocal\s+(\w+)/g, (m, name) => {
-      if (name === proxyName) return m;
-      return m;
-    });
-  }
-  
-  // proxifyFunctions: Wrap function calls
-  if (s.proxifyFunctions !== false) {
-    const funcProxy = randStr(6);
-    out = `local ${funcProxy} = function(f,...) return f(...) end\n` + out;
-  }
-  
-  // antiTamper: Add anti-edit check
-  if (s.antiTamper !== false) {
-    const tamperCheck = `-- Anti-Tamper\nlocal _orig = checkcaller or function() return true end\nif not _orig() then error("Tampered") end\n`;
-    out = tamperCheck + out;
-  }
-  
-  // controlFlowFlattening: Basic control flow flattening with switch
-  if (s.controlFlowFlattening !== false) {
-    const dispatcher = randStr(6);
-    const lines = out.split("\n");
-    if (lines.length > 3) {
-      const wrapped = [];
-      wrapped.push(`local ${dispatcher} = 1`);
-      wrapped.push(`while true do`);
-      wrapped.push(`  if ${dispatcher} == 1 then`);
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].trim()) {
-          wrapped.push(`    ${lines[i]}`);
-          if (i < lines.length - 1) {
-            wrapped.push(`    ${dispatcher} = ${i + 2}`);
-            wrapped.push(`  elseif ${dispatcher} == ${i + 2} then`);
-          }
-        }
-      }
-      wrapped.push(`  else break end`);
-      wrapped.push(`end`);
-      out = wrapped.join("\n");
-    }
-  }
-  
-  // loaderVMDepth: Nest in VM loaders
-  const depth = s.loaderVMDepth || 1;
-  for (let i = 0; i < depth; i++) {
-    const vmKey = randStr(10);
-    const encoded = Buffer.from(out, "utf8").toString("base64");
-    out = `-- Goofyscator Layer ${i + 1}\nlocal ${vmKey} = loadstring(game:HttpGet and game:HttpGet("") or "${encoded}") or loadstring(require(game:GetService("HttpService")).Base64Decode("${encoded}"))()\n`;
-  }
-  
-  return out;
-}
-// ============================================================
-// LUA OBFUSCATOR (Prince Obfuscator — Luarmor/Luraph style)
-// ============================================================
-function obfuscateLua(source) {
-  if (!source || typeof source !== "string") return source;
-  const crypto = require("crypto");
-  
-  const XOR_KEY = crypto.randomBytes(16).toString("hex");
-  const randStr = (len) => crypto.randomBytes(len).toString("hex").slice(0, len);
-  
-  const usedNames = new Set();
-  const genName = () => {
-    let n;
-    do { n = "_" + randStr(6 + Math.floor(Math.random() * 6)); } while (usedNames.has(n));
-    usedNames.add(n);
-    return n;
-  };
-  
-  const encryptStr = (str, key) => {
-    let out = [];
-    for (let i = 0; i < str.length; i++) {
-      out.push(str.charCodeAt(i) ^ key.charCodeAt(i % key.length));
-    }
-    return Buffer.from(new Uint8Array(out)).toString("base64");
-  };
-  
-  // Step 1: Encrypt strings
-  const stringTable = [];
-  let code = source.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'/g, (m) => {
-    const inner = m.slice(1, -1);
-    if (inner.length < 2) return m;
-    const idx = stringTable.length;
-    stringTable.push(encryptStr(inner, XOR_KEY));
-    return genName() + "[" + idx + "]";
+      return undefined;
+    },
   });
-  
-  // Step 2: Scramble local vars
-  const varMap = new Map();
-  code = code.replace(/\blocal\s+(function\s+)?([a-zA-Z_]\w*)/g, (m, isFunc, name) => {
-    const reserved = ["string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber","loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error","warn","print","select","unpack","require","game","workspace","script","bit","bit32"];
-    if (reserved.includes(name) || varMap.has(name)) return m;
-    varMap.set(name, genName());
-    return isFunc ? "local function " + varMap.get(name) : "local " + varMap.get(name);
+  return stores;
+}
+
+function evaluatedBefore(statement, target) {
+  const stores = storeSites(statement);
+  const before = [];
+  const ancestors = [];
+  let reached = false;
+  walk(statement, {
+    enter(node) {
+      if (reached) return false;
+      if (node === target) {
+        reached = true;
+        for (const ancestor of ancestors) {
+          const at = before.indexOf(ancestor);
+          if (at >= 0) before.splice(at, 1);
+        }
+        return false;
+      }
+      if (!stores.has(node)) before.push(node);
+      if (node.kind === Kind.Function && !holds(node, target)) return false;
+      ancestors.push(node);
+      return undefined;
+    },
+    leave(node) {
+      if (!reached && ancestors[ancestors.length - 1] === node) ancestors.pop();
+    },
   });
-  for (const [old, n] of varMap) {
-    const re = new RegExp("\\b" + old.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "g");
-    code = code.replace(re, n);
-  }
-  
-  // Step 3: Encode entire code as base64 (simple, works in Roblox)
-  const encoded = Buffer.from(code, "utf8").toString("base64");
-  
-  // Step 4: Generate VM variable names
-  const v_key = genName(), v_tab = genName(), v_dec = genName();
-  const v_b64 = genName(), v_dec2 = genName(), v_env = genName();
-  const v_fn = genName(), v_s = genName(), v_k = genName(), v_r = genName();
-  const v_i = genName();
-  
-  const tableStr = "{" + stringTable.map(s => '"' + s + '"').join(",") + "}";
-  
-  // Build Roblox-compatible output
-  // Uses bit32.bxor, proper base64 decode via HttpService pattern
-  const header = "-- This file was generated using Prince Obfuscator\n";
-  
-  const output = header +
-    "local " + v_key + '="' + XOR_KEY + '"\n' +
-    "local " + v_tab + "=" + tableStr + "\n" +
-    "local " + v_dec + "=function(" + v_s + "," + v_k + ")local " + v_r + '=""for ' + v_i + "=1,#" + v_s + "do " + v_r + "=" + v_r + "..string.char(bit32.bxor(" + v_s + ":byte(" + v_i + ")," + v_k + ":byte((" + v_i + "-1)%" + "#" + v_k + "+1)))end return " + v_r + " end\n" +
-    "local " + v_b64 + '="' + encoded + '"\n' +
-    "local " + v_dec2 + "=function(s)local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'local r=''s=s:gsub('[^A-Za-z0-9%+%/]','')for i=1,#s,4 do local a,b,c,d=b:find(s:sub(i,i)),b:find(s:sub(i+1,i+1))or 1,b:find(s:sub(i+2,i+2))or 1,b:find(s:sub(i+3,i+3))or 1 a=a-1 b=b-1 c=c-1 d=d-1 r=r..string.char(bit32.band(bit32.rshift(bit32.lshift(a,2),2)+bit32.rshift(b,4),255)) if s:sub(i+2,i+2)~='=' then r=r..string.char(bit32.band(bit32.lshift(bit32.band(b,15),4)+bit32.rshift(c,2),255)) end if s:sub(i+3,i+3)~='=' then r=r..string.char(bit32.band(bit32.lshift(bit32.band(c,3),6)+d,255)) end end return r end\n" +
-    "local " + v_env + "=setmetatable({},{__index=function(t,k)return _G[k]end})\n" +
-    "v_env[" + v_dec + "]=" + v_dec + "\n" +
-    "local " + v_fn + "=loadstring(" + v_dec2 + "(" + v_b64 + "))\n" +
-    "if " + v_fn + " then setfenv(" + v_fn + "," + v_env + ") return " + v_fn + "(...) end";
-  
-  return output;
+  return reached ? before : null;
 }
 
-
-
-// ============================================================
-// SLASH COMMANDS — only /say (global, DM support)
-// ============================================================
-const commands = [
-  new SlashCommandBuilder()
-    .setName("say")
-    .setDescription("Send message — Owner Only.")
-    .addStringOption(o => o
-      .setName("text")
-      .setDescription("Message content.")
-      .setRequired(true))
-    .addStringOption(o => o
-      .setName("type")
-      .setDescription("Message style.")
-      .setRequired(true)
-      .addChoices(
-        { name: "With Embed", value: "good" },
-        { name: "No Embed", value: "none" }
-      ))
-    .addStringOption(o => o
-      .setName("title")
-      .setDescription("Optional embed title.")
-      .setRequired(false))
-    .toJSON(),
-  new SlashCommandBuilder()
-    .setName("robuxpanel")
-    .setDescription("Send Robux purchase panel — Owner Only.")
-    .addRoleOption(o => o
-      .setName("staff-role")
-      .setDescription("Role that can manage tickets.")
-      .setRequired(true))
-    .addChannelOption(o => o
-      .setName("category")
-      .setDescription("Category where tickets are created.")
-      .setRequired(true))
-    .addStringOption(o => o
-      .setName("gamepass")
-      .setDescription("Roblox gamepass link or ID.")
-      .setRequired(true))
-    .toJSON()
-].map(c => c);
-async function registerCommands() {
-  if (registering) return;
-  registering = true;
-  const rest = new REST({ version: "10", timeout: 15000 }).setToken(TOKEN);
-  try {
-    console.log("🧹 Clearing old guild commands...");
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] });
-    console.log("🧹 Clearing old global commands...");
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
-    console.log("🧩 Registering global /say command...");
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    console.log("✅ Commands registered (global).");
-  } catch (e) { registering = false; console.error("❌ Register fail:", e.message); }
+function reachesQuietly(statement, target) {
+  const before = evaluatedBefore(statement, target);
+  if (!before) return false;
+  return before.every((node) => quiet(node));
 }
-// ============================================================
-// READY
-// ============================================================
-client.once("ready", async () => {
-  isReady = true; lastReady = Date.now();
-  console.log("==========================================");
-  console.log(`✅ ONLINE: ${client.user.tag}`);
-  console.log(`🏠 Guilds: ${client.guilds.cache.size}`);
-  console.log(`📚 Files: ${library.files.length}`);
-  console.log("⚡ Bot ready!");
-  console.log("==========================================");
-  registerCommands().catch(e => console.error("❌ Register:", e.message));
-  setTimeout(() => syncAllPrinceRoles(), 3000);
-});
-client.on("shardReady", id => { isReady = true; lastReady = Date.now(); console.log(`🟢 Shard ${id} ready`); });
-client.on("shardResume", id => { isReady = true; lastReady = Date.now(); console.log(`🟢 Shard ${id} resumed`); });
-client.on("shardReconnecting", id => { isReady = false; console.warn(`🟡 Shard ${id} reconnecting...`); });
-client.on("shardDisconnect", (e, id) => { isReady = false; console.warn(`🔴 Shard ${id} down: ${e?.code}`); });
-client.on("presenceUpdate", async (oldPresence, newPresence) => {
-  if (!newPresence || !newPresence.member) return;
-  if (newPresence.guild.id !== GUILD_ID) return;
-  await syncPrinceRole(newPresence.member);
-});
 
-
-client.on("error", e => console.error("❌ Discord error:", e));
-client.on("warn", w => console.warn("⚠️ Discord warn:", w));
-// ============================================================
-// BUTTON HANDLER
-// ============================================================
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isButton()) return;
-  const uid = interaction.user.id;
-  // ─── EXTRACT CAROUSEL BUTTONS ───
-  if (interaction.customId === "extract_prev" || interaction.customId === "extract_next") {
-    if (!extractCarouselMenus.has(uid)) {
-      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const menu = extractCarouselMenus.get(uid);
-    if (interaction.message.id !== menu.messageId) return;
-    if (interaction.user.id !== menu.authorId) {
-      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    if (interaction.customId === "extract_prev") menu.index--;
-    if (interaction.customId === "extract_next") menu.index++;
-    if (menu.index < 0) menu.index = 0;
-    if (menu.index >= menu.files.length) menu.index = menu.files.length - 1;
-    const currentFile = menu.files[menu.index];
-    const attachment = new AttachmentBuilder(currentFile.data, { name: currentFile.name });
-    const pageLabel = `${menu.index + 1}/${menu.files.length}`;
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index <= 0),
-      new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
-      new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(menu.index >= menu.files.length - 1)
-    );
-    await interaction.update({ content: null, files: [attachment], components: [row] }).catch(() => {});
-    extractCarouselMenus.set(uid, menu);
-    return;
-  }
-// ─── ALTLIST PAGINATION BUTTONS ───
-if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") {
-  if (!altListMenus.has(uid)) {
-    return interaction.reply({ content: "⏳ scan expired bro, run `.altlist` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  const altMenu = altListMenus.get(uid);
-  if (Date.now() - altMenu.createdAt > EXPIRY_MS) {
-    altListMenus.delete(uid);
-    return interaction.reply({ content: "⏳ scan expired bro, run `.altlist` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  if (interaction.message.id !== altMenu.messageId) return;
-  if (interaction.user.id !== altMenu.authorId) {
-    return interaction.reply({ content: "❌ not yours, run `.altlist` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  if (interaction.customId === "alt_prev") altMenu.page--;
-  if (interaction.customId === "alt_next") altMenu.page++;
-  if (altMenu.page < 1) altMenu.page = 1;
-  if (altMenu.page > altMenu.totalPages) altMenu.page = altMenu.totalPages;
-  const altStart = (altMenu.page - 1) * 5;
-  const altPageItems = altMenu.results.slice(altStart, altStart + 5);
-  const altLines = altPageItems.map((s, i) => {
-    const idx = altStart + i + 1;
-    const riskLevel = s.score >= 50 ? "🔴 HIGH" : s.score >= 35 ? "🟠 MED" : "🟡 LOW";
-    const createdDate = new Date(s.created).toLocaleDateString("en-US");
-    return `**${idx}.** ${s.member.user.tag} <@${s.member.id}>\n   ${riskLevel} | Score: \`${s.score}\` | Created: ${createdDate}\n   ${s.flags.join(" │ ")}`;
+function readsWithin(root) {
+  const found = new Set();
+  const stored = new Set();
+  walk(root, {
+    enter(node) {
+      if (node.kind === Kind.Assignment) {
+        for (const target of node.targets || []) {
+          const named = bare(target);
+          if (named && named.kind === Kind.Name) stored.add(named);
+        }
+      }
+      if (node.kind === Kind.Name && node.binding && !stored.has(node)) found.add(node.binding);
+      return undefined;
+    },
   });
-  const altEmbed = new EmbedBuilder()
-    .setColor(0x2B2D31)
-    .setTitle(`🔍 Suspicious Accounts — ${altMenu.results.length} found`)
-    .setDescription(altLines.join("\n\n"))
-    .setFooter({ text: `Page ${altMenu.page}/${altMenu.totalPages} │ ${altMenu.guildName} │ ${altMenu.memberCount} total members` });
-  const altRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("alt_prev").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(altMenu.page <= 1),
-    new ButtonBuilder().setCustomId("alt_next").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(altMenu.page >= altMenu.totalPages)
-  );
-  await interaction.update({ embeds: [altEmbed], components: [altRow] }).catch(() => {});
-  altListMenus.set(uid, altMenu);
-  return;
-}
-  // ─── FINDER PAGINATION BUTTONS ───
-  if (interaction.customId === "prev_page" || interaction.customId === "next_page") {
-    if (!paginationMenus.has(uid)) {
-      return interaction.reply({ content: "❌ not yours, do `.find` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const menu = paginationMenus.get(uid);
-    if (Date.now() - menu.createdAt > EXPIRY_MS) {
-      paginationMenus.delete(uid);
-      return interaction.reply({ content: "❌ not yours, do `.find` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    if (interaction.message.id !== menu.messageId) return;
-    if (interaction.user.id !== menu.authorId) {
-      return interaction.reply({ content: "❌ not yours, do `.find` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    if (interaction.customId === "prev_page") menu.page--;
-    if (interaction.customId === "next_page") menu.page++;
-    if (menu.page < 1) menu.page = 1;
-    if (menu.page > menu.totalPages) menu.page = menu.totalPages;
-    const start = (menu.page - 1) * 8;
-    const pageItems = menu.results.slice(start, start + 8);
-    const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
-    const embed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle(getFinderTitle(menu.isBuyer))
-      .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
-      .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
-      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
-    );
-    await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
-    paginationMenus.set(uid, menu);
-    return;
-  }
-  // ─── WHS START BUTTON ───
-  if (interaction.customId === "whs_start") {
-    if (!interaction.member) {
-      return interaction.reply({ content: "❌ use in server.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    // Only the person who ran .whs can click Start
-    const ownerId = whsPanelOwners.get(interaction.message.id);
-    if (ownerId && interaction.user.id !== ownerId) {
-      return interaction.reply({ content: "❌ not yours, bro.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    
-    // Build modal
-    const modal = new ModalBuilder()
-      .setCustomId("whs_modal")
-      .setTitle("Webhook Spammer");
-    
-    const urlInput = new TextInputBuilder()
-      .setCustomId("whs_url")
-      .setLabel("Webhook URL")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("The Webhook URL...")
-      .setRequired(true);
-    
-    const msgInput = new TextInputBuilder()
-      .setCustomId("whs_message")
-      .setLabel("Spam Message")
-      .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("Your message...")
-      .setRequired(true);
-    
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(urlInput),
-      new ActionRowBuilder().addComponents(msgInput)
-    );
-    
-    // Show modal FIRST — this is critical, must happen before any reply/update
-    await interaction.showModal(modal).catch(() => {});
-    
-    // Then disable the button separately (doesn't consume the interaction)
-    try {
-      const disabledRow = new ActionRowBuilder().addComponents(
-        ButtonBuilder.from(interaction.message.components[0].components[0])
-          .setDisabled(true)
-      );
-      await interaction.message.edit({ components: [disabledRow] }).catch(() => {});
-    } catch {}
-    
-    return;
-  }
-
-  // ─── ROBUX BUY BUTTON ───
-  if (interaction.customId === "robux_buy") {
-    if (!robuxConfig) {
-      return interaction.reply({ content: "❌ panel not configured yet.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const modal = new ModalBuilder()
-      .setCustomId("robux_modal")
-      .setTitle("Roblox Information");
-    const userInput = new TextInputBuilder()
-      .setCustomId("roblox_user")
-      .setLabel("Roblox Username or User ID")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("Enter your Roblox username or ID")
-      .setRequired(true);
-    const row = new ActionRowBuilder().addComponents(userInput);
-    modal.addComponents(row);
-    await interaction.showModal(modal).catch(() => {});
-    return;
-  }
-});
-
-// ============================================================
-
-// ============================================================
-// MODAL SUBMIT HANDLER — Robux ticket creation
-// ============================================================
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isModalSubmit()) return;
-  if (interaction.customId === "whs_modal") {
-    const webhookUrl = interaction.fields.getTextInputValue("whs_url");
-    const spamMsg = interaction.fields.getTextInputValue("whs_message");
-    const avatarURL = interaction.user.displayAvatarURL({ dynamic: true, size: 128 });
-    
-    // Quick webhook validation
-    const probe = await fetch(webhookUrl, { method: "GET" }).catch(() => null);
-    if (!probe || probe.status === 404) {
-      return interaction.reply({ content: "❌ Not Found.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-    
-    let sent = 0, failed = 0;
-    const maxMessages = 200;
-    
-    for (let i = 0; i < maxMessages; i++) {
-      const contentMsg = spamMsg;
-      try {
-        const res = await fetch(webhookUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: contentMsg })
-        });
-        if (res.status === 204) sent++;
-        else if (res.status === 429) {
-          try {
-            const rl = await res.json();
-            await new Promise(r => setTimeout(r, Math.min((rl.retry_after || 0.5) * 1000, 1000)));
-          } catch {}
-        } else failed++;
-      } catch { failed++; }
-      await new Promise(r => setTimeout(r, 30));
-    }
-    
-    const resultEmbed = new EmbedBuilder()
-      .setColor(0x2B2D31)
-      .setTitle("Webhook Raid Complete")
-      .setDescription(`✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n🌐 **Status:** Done`)
-      .setFooter({ text: `Request by @${interaction.user.username}│Webhook Spammer`, iconURL: avatarURL });
-    
-    const removeRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("whs_remove")
-        .setLabel("Remove")
-        .setStyle(ButtonStyle.Danger)
-    );
-    
-    // Use followUp to ensure components show properly
-    // Store webhook URL for Remove button handler
-    const resultMsg = await interaction.followUp({ 
-      embeds: [resultEmbed], 
-      components: [removeRow], 
-      flags: MessageFlags.Ephemeral 
-    }).catch(() => {});
-    if (resultMsg) {
-      whsWebhookUrls.set(resultMsg.id, webhookUrl);
-      // Auto-cleanup after 1 hour
-      setTimeout(() => whsWebhookUrls.delete(resultMsg.id), 60 * 60 * 1000);
-    }
-    return;
-  }
-  if (interaction.customId !== "robux_modal") return;
-  if (!robuxConfig) return;
-  
-  const robloxUser = interaction.fields.getTextInputValue("roblox_user");
-  const uid = interaction.user.id;
-  
-  try {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    
-    const category = await interaction.guild.channels.fetch(robuxConfig.categoryId).catch(() => null);
-    if (!category || category.type !== ChannelType.GuildCategory) {
-      await interaction.editReply({ content: "❌ category not found bro." });
-      return;
-    }
-    
-    // Create ticket channel
-    const ticketName = `robux-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-    const ticketChannel = await interaction.guild.channels.create({
-      name: ticketName,
-      type: ChannelType.GuildText,
-      parent: category.id,
-      permissionOverwrites: [
-        { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-        { id: uid, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-        { id: robuxConfig.staffRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels] }
-      ]
-    });
-    
-    // Store ticket
-    robuxTickets.set(ticketChannel.id, {
-      userId: uid,
-      robloxUser: robloxUser,
-      gamepass: robuxConfig.gamepass,
-      purchased: false,
-      createdAt: Date.now()
-    });
-    
-    // Send ticket info
-    const ticketEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("🎫 Robux Purchase Ticket")
-      .setDescription(
-        `**User:** <@${uid}>\n` +
-        `**Roblox:** \`${robloxUser}\`\n` +
-        `**Gamepass:** ${robuxConfig.gamepass}\n\n` +
-        `⏳ Checking for purchase every 10 seconds...\n` +
-        `Once purchased, staff will be notified.`
-      );
-    
-    const closeRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("robux_close")
-        .setLabel("Close Ticket")
-        .setStyle(ButtonStyle.Danger)
-    );
-    
-    await ticketChannel.send({
-      content: `<@${uid}> <@&${robuxConfig.staffRoleId}>`,
-      embeds: [ticketEmbed],
-      components: [closeRow]
-    });
-    
-    await interaction.editReply({ content: `✅ Ticket created: <#${ticketChannel.id}>` });
-    
-  } catch (e) {
-    console.error("❌ Ticket creation:", e);
-    try { await interaction.editReply({ content: `❌ failed: ${e.message.slice(0, 100)}` }); } catch {}
-  }
-});
-
-// ============================================================
-// ROBUX TICKET BUTTON HANDLER (close ticket)
-// ============================================================
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isButton()) return;
-  if (interaction.customId === "whs_remove") {
-    const webhookUrl = whsWebhookUrls.get(interaction.message.id);
-    if (webhookUrl) {
-      try {
-        await fetch(webhookUrl, { method: "DELETE" });
-      } catch {}
-      whsWebhookUrls.delete(interaction.message.id);
-    }
-    await interaction.message.delete().catch(() => {});
-    return interaction.reply({ content: "✅ Webhook removed.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-  if (interaction.customId === "robux_close") {
-    const ticket = robuxTickets.get(interaction.channel.id);
-    if (!ticket) {
-      await interaction.reply({ content: "❌ not a ticket channel.", flags: MessageFlags.Ephemeral }).catch(() => {});
-      return;
-    }
-    // Only staff or ticket owner can close
-    const member = interaction.member;
-    const isStaff = robuxConfig && member.roles.cache.has(robuxConfig.staffRoleId);
-    const isOwner = ticket.userId === interaction.user.id;
-    if (!isStaff && !isOwner && !isOwner(interaction.user.id)) {
-      await interaction.reply({ content: "❌ not allowed.", flags: MessageFlags.Ephemeral }).catch(() => {});
-      return;
-    }
-    robuxTickets.delete(interaction.channel.id);
-    await interaction.reply({ content: "🔒 Closing ticket in 5 seconds..." }).catch(() => {});
-    setTimeout(async () => {
-      await interaction.channel.delete().catch(() => {});
-    }, 5000);
-    return;
-  }
-});
-
-// ============================================================
-// ROBUX PURCHASE CHECKER — every 10 seconds
-// ============================================================
-setInterval(async () => {
-  if (!robuxConfig || robuxTickets.size === 0) return;
-  for (const [channelId, ticket] of robuxTickets) {
-    if (ticket.purchased) continue;
-    try {
-      const channel = await client.channels.fetch(channelId).catch(() => null);
-      if (!channel) { robuxTickets.delete(channelId); continue; }
-      
-      // NOTE: Actual Roblox API check requires Roblox credentials.
-      // Replace this block with real API call if you have a cookie/token.
-      // For now, this is a placeholder that checks for "!paid" command from staff.
-      // To integrate real checking: fetch https://apis.roblox.com/game-passes/v1/game-passes/{id}/products
-      // and verify user ownership.
-      
-      // Simulated: check if staff sent "!paid" in the channel
-      // (Real implementation would call Roblox API here)
-      
-    } catch (e) {
-      console.warn("Purchase check error:", e.message);
-    }
-  }
-}, 10000);
-
-// When purchase is detected, call this function:
-async function markPurchased(channelId) {
-  const ticket = robuxTickets.get(channelId);
-  if (!ticket || ticket.purchased) return;
-  ticket.purchased = true;
-  try {
-    const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (channel) {
-      await channel.send("Please, wait the owner to respond to you.").catch(() => {});
-    }
-  } catch (e) { console.warn(e); }
+  return found;
 }
 
-// ============================================================
-// WATCHDOG
-// ============================================================
-setInterval(async () => {
-  if (isReady || reconnecting || Date.now() - lastReady < 60000) return;
-  reconnecting = true;
-  console.warn("🟡 Reconnecting...");
-  try { client.destroy(); await new Promise(r => setTimeout(r, 1500)); await client.login(TOKEN); console.log("🟢 Reconnected."); }
-  catch (e) { console.error("❌ Reconnect fail:", e.message); }
-  finally { reconnecting = false; }
-}, 30000).unref?.();
-// ============================================================
-// SLASH COMMAND HANDLER — only /say
-// ============================================================
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-  console.log(`📨 /${interaction.commandName}`);
-  try {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const isOwnerUser = isOwner(interaction.user.id);
-    if (!isOwnerUser) {
-      await interaction.editReply({ content: "❌ owner only, dumbass." });
-      return;
-    }
-    if (interaction.commandName === "say") {
-      const text = interaction.options.getString("text");
-      const type = interaction.options.getString("type") || "good";
-      const title = interaction.options.getString("title");
-      const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-      await interaction.deleteReply().catch(() => {});
-      const targetChannel = interaction.channel || interaction.user.dmChannel || await interaction.user.createDM().catch(() => null);
-      if (!targetChannel) {
-        await interaction.followUp({ content: "❌ can't send message here.", flags: MessageFlags.Ephemeral }).catch(() => {});
-        return;
+function nameCounts(root) {
+  const counts = new Map();
+  const seen = new Set();
+  const note = (binding, text) => {
+    if (!binding || seen.has(binding)) return;
+    seen.add(binding);
+    counts.set(text, (counts.get(text) || 0) + 1);
+  };
+  walk(root, {
+    enter(node) {
+      if (node.kind === Kind.Function) {
+        (node.bindings || []).forEach((binding, at) => note(binding, (node.params || [])[at]));
+      } else if (node.kind === Kind.LocalDeclaration) {
+        (node.bindings || []).forEach((binding, at) => note(binding, (node.names || [])[at]));
+      } else if (node.kind === Kind.LocalFunction) {
+        note(node.binding, node.name);
+      } else if (node.kind === Kind.NumericFor) {
+        note(node.binding, node.variable);
+      } else if (node.kind === Kind.GenericFor) {
+        (node.bindings || []).forEach((binding, at) => note(binding, (node.variables || [])[at]));
       }
-      if (type === "none") {
-        await targetChannel.send({ content: text });
-      } else {
-        const embed = new EmbedBuilder()
-          .setColor(REGULAR_COLOR)
-          .setDescription(text)
-          .setFooter({ text: timeFooter });
-        if (title) embed.setTitle(title);
-        await targetChannel.send({ embeds: [embed] });
+      return undefined;
+    },
+  });
+  return counts;
+}
+
+function unshadowed(counts, text) {
+  return counts.get(text) === 1;
+}
+
+function plainWrite(statement) {
+  if (!statement || statement.kind !== Kind.Assignment) return null;
+  const targets = statement.targets || [];
+  const expressions = statement.expressions || [];
+  if (targets.length !== 1 || expressions.length !== 1) return null;
+  const target = bare(targets[0]);
+  if (!target || target.kind !== Kind.Name || !target.binding) return null;
+  return { target, value: expressions[0] };
+}
+
+function plainDeclaration(statement) {
+  if (!statement || statement.kind !== Kind.LocalDeclaration) return null;
+  const names = statement.names || [];
+  const expressions = statement.expressions || [];
+  if (names.length !== 1 || expressions.length !== 1) return null;
+  const binding = (statement.bindings || [])[0];
+  if (!binding) return null;
+  return { binding, name: names[0], value: expressions[0] };
+}
+
+function isEmptyDo(statement) {
+  if (!statement || statement.kind !== Kind.Do) return false;
+  return !((statement.body && statement.body.statements) || []).length;
+}
+
+module.exports = {
+  quiet,
+  reachesQuietly,
+  readsWithin,
+  nameCounts,
+  unshadowed,
+  plainWrite,
+  plainDeclaration,
+  isEmptyDo,
+};
+
+};
+
+__modules["src/beautify/names.js"] = function(module, exports, require) {
+'use strict';
+
+const { Kind } = require("src/lua/ast.js");
+const { walk, collect } = require("src/lua/walk.js");
+const { isIdentifier } = require("src/lua/format.js");
+const { isLocalBinding } = require("src/lua/scope.js");
+const { isDigit, isLower, isUpper } = require("src/lua/chars.js");
+const { bare } = require("src/util/flow.js");
+
+function words(text) {
+  const found = [];
+  let at = 0;
+  while (at < text.length) {
+    const character = text[at];
+    if (!isUpper(character) && !isLower(character) && !isDigit(character)) {
+      at += 1;
+      continue;
+    }
+    let end = at;
+    if (isUpper(character)) {
+      while (end < text.length && isUpper(text[end])) end += 1;
+      const run = end - at;
+      if (run >= 3 && end < text.length && isLower(text[end])) end -= 1;
+      else if (run === 1) {
+        while (end < text.length && (isLower(text[end]) || isDigit(text[end]))) end += 1;
+      } else if (end < text.length && isLower(text[end])) {
+        while (end < text.length && (isLower(text[end]) || isDigit(text[end]))) end += 1;
       }
-      return;
-    }
-    if (interaction.commandName === "robuxpanel") {
-      const staffRole = interaction.options.getRole("staff-role");
-      const category = interaction.options.getChannel("category");
-      const gamepass = interaction.options.getString("gamepass");
-      
-      robuxConfig = {
-        staffRoleId: staffRole.id,
-        categoryId: category.id,
-        gamepass: gamepass
-      };
-      
-      const panelEmbed = new EmbedBuilder()
-        .setColor(REGULAR_COLOR)
-        .setTitle("Robux Panel")
-        .setDescription(
-          "**How to send robux?**\n" +
-          `1. Click the \`Buy\` button below.
-2. Then put your username or user id there.
-3. Then click \`Submit\` a ticket will be open there, and click the "Buy" and purchase it.`
-        );
-      
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("robux_buy")
-          .setLabel("Buy")
-          .setStyle(ButtonStyle.Success)
-      );
-      
-      await interaction.deleteReply().catch(() => {});
-      await interaction.channel.send({ embeds: [panelEmbed], components: [row] });
-      return;
-    }
-  } catch (e) {
-    console.error("❌ Interaction:", e);
-    const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
-    interaction.deferred || interaction.replied ? await interaction.editReply(msg).catch(() => {}) : await interaction.reply(msg).catch(() => {});
-  }
-});
-// ============================================================
-// PREFIX COMMANDS
-// ============================================================
-client.on("messageCreate", async msg => {
-  if (msg.author.bot) return;
-  const txt = (msg.content || "").trim();
-  const isDM = !msg.guild;
-  // OWNER-ONLY DOT COMMANDS
-  // ─────────────────────────────────────────────
-  if (/^\.serverlist$/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const guilds = client.guilds.cache.sort((a, b) => b.memberCount - a.memberCount);
-    let lines = []; let num = 1;
-    for (const g of guilds.values()) {
-      lines.push(`**${num}.** \`${g.name}\`\n   🆔 \`${g.id}\`\n   👥 Members: \`${g.memberCount}\``); num++;
-    }
-    replyUser(msg, { embeds: [new EmbedBuilder().setColor(0x808080).setTitle(`🌐 Server List — ${guilds.size} total`).setDescription(lines.join("\n\n"))
-      .setFooter({ text: `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}` })
-    ] }).catch(() => {});
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .altlist — Alt/Suspicious Account Scanner (Owner Only)
-  // ─────────────────────────────────────────────
-  if (/^\.altlist(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    
-    // Check if user provided a specific user ID/mention
-    const targetArg = txt.split(/\s+/)[1]?.trim();
-    let targetUserId = null;
-    if (targetArg) {
-      const mentionMatch = targetArg.match(/<@!?(\d+)>/);
-      if (mentionMatch) targetUserId = mentionMatch[1];
-      else if (/^\d+$/.test(targetArg)) targetUserId = targetArg;
-    }
-    
-    // Single user check mode
-    if (targetUserId) {
-      try {
-        const targetMember = await msg.guild.members.fetch(targetUserId).catch(() => null);
-        if (!targetMember || targetMember.user.bot) {
-          replyUser(msg, "❌ user not found or is a bot, dumbass.").catch(() => {});
-          return;
-        }
-        const now = Date.now();
-        let score = 0;
-        const flags = [];
-        const created = targetMember.user.createdTimestamp;
-        const ageDays = (now - created) / (24 * 60 * 60 * 1000);
-        
-        if (ageDays < 7) { score += 40; flags.push(`🕐 **${ageDays.toFixed(0)} days old**`); }
-        else if (ageDays < 30) { score += 20; flags.push(`🕐 ${ageDays.toFixed(0)} days old`); }
-        
-        const joined = targetMember.joinedTimestamp;
-        if (joined) {
-          const joinDays = (now - joined) / (24 * 60 * 60 * 1000);
-          if (joinDays < 3) { score += 15; flags.push(`🆕 Joined ${joinDays.toFixed(0)}d ago`); }
-        }
-        
-        if (!targetMember.user.avatar) { score += 20; flags.push("👤 No avatar"); }
-        
-        const nonEveryoneRoles = targetMember.roles.cache.filter(r => r.id !== msg.guild.id);
-        if (nonEveryoneRoles.size === 0) { score += 15; flags.push("🎭 No roles"); }
-        
-        const uname = targetMember.user.username;
-        const numMatch = uname.match(/(\d{3,})$/);
-        if (numMatch && numMatch[1].length >= 4) { score += 10; flags.push(`🔢 Numbers in name`); }
-        
-        if (targetMember.displayName === uname && !targetMember.user.avatar) { score += 5; }
-        
-        if (targetMember.premiumSince && ageDays < 30) { score += 10; flags.push("⚠️ New + boosting"); }
-        
-        const riskLevel = score >= 50 ? "🔴 HIGH RISK" : score >= 35 ? "🟠 MEDIUM RISK" : score >= 25 ? "🟡 LOW RISK" : "✅ CLEAN";
-        const createdDate = new Date(created).toLocaleDateString("en-US");
-        const joinDate = joined ? new Date(joined).toLocaleDateString("en-US") : "Unknown";
-        
-        const userEmbed = new EmbedBuilder()
-          .setColor(score >= 25 ? 0x2B2D31 : 0x2B2D31)
-          .setTitle(`🔍 Account Check — ${targetMember.user.tag}`)
-          .setThumbnail(targetMember.user.avatarURL({ dynamic: true }) || null)
-          .setDescription(
-            `**User:** <@${targetMember.id}>\n` +
-            `**ID:** \`${targetMember.id}\`\n` +
-            `**Risk:** ${riskLevel} (Score: \`${score}\`)\n` +
-            `**Created:** ${createdDate} (${ageDays.toFixed(0)} days ago)\n` +
-            `**Joined:** ${joinDate}\n` +
-            `**Avatar:** ${targetMember.user.avatar ? "✅ Has avatar" : "❌ No avatar"}\n` +
-            `**Roles:** ${nonEveryoneRoles.size}\n\n` +
-            (flags.length > 0 ? `**Flags:**\n${flags.map(f => `• ${f}`).join("\n")}` : "**Flags:** None — account looks clean ✅")
-          )
-          .setFooter({ text: `Suspicion score: ${score}/100+` });
-        
-        if (score >= 25) { await applyAltRole(targetMember); }
-        replyUser(msg, { embeds: [userEmbed] }).catch(() => {});
-        return;
-      } catch (e) {
-        replyUser(msg, `❌ error: ${e.message.slice(0, 100)}`).catch(() => {});
-        return;
-      }
-    }
-    
-    // Full server scan mode
-    const loadingMsg = await replyUser(msg, "🔍 Scanning server for suspicious accounts...").catch(() => {});
-    
-    try {
-      // Fetch members with rate limit retry
-      try {
-        await msg.guild.members.fetch().catch(async (e) => {
-          // If rate limited, wait and retry once
-          const retryMatch = e?.message?.match(/Retry after ([\d.]+) seconds?/);
-          const waitSec = retryMatch ? parseFloat(retryMatch[1]) + 1 : 12;
-          console.log(`⚠️ Altlist rate limited, waiting ${waitSec}s...`);
-          await new Promise(r => setTimeout(r, waitSec * 1000));
-          try { await msg.guild.members.fetch(); } catch {}
-        });
-      } catch {}
-      // If cache is still empty, try fetch with limit
-      if (msg.guild.members.cache.size < 5) {
-        try { await msg.guild.members.fetch({ limit: 1000 }); } catch {}
-      }
-      const now = Date.now();
-      const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
-      const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
-      const suspicious = [];
-      
-      for (const member of msg.guild.members.cache.values()) {
-        if (member.user.bot) continue;
-        
-        let score = 0;
-        const flags = [];
-        
-        // 1. Account created < 30 days ago
-        const created = member.user.createdTimestamp;
-        const ageDays = (now - created) / (24 * 60 * 60 * 1000);
-        if (ageDays < 7) { score += 40; flags.push(`🕐 **${ageDays.toFixed(0)} days old**`); }
-        else if (ageDays < 30) { score += 20; flags.push(`🕐 ${ageDays.toFixed(0)} days old`); }
-        
-        // 2. Joined server < 7 days ago
-        const joined = member.joinedTimestamp;
-        if (joined) {
-          const joinDays = (now - joined) / (24 * 60 * 60 * 1000);
-          if (joinDays < 3) { score += 15; flags.push(`🆕 Joined ${joinDays.toFixed(0)}d ago`); }
-        }
-        
-        // 3. Default/no avatar
-        if (!member.user.avatar) { score += 20; flags.push("👤 No avatar"); }
-        
-        // 4. Only @everyone role (no other roles)
-        const nonEveryoneRoles = member.roles.cache.filter(r => r.id !== msg.guild.id);
-        if (nonEveryoneRoles.size === 0) { score += 15; flags.push("🎭 No roles"); }
-        
-        // 5. Username ends with lots of numbers (alt pattern)
-        const uname = member.user.username;
-        const numMatch = uname.match(/(\d{3,})$/);
-        if (numMatch && numMatch[1].length >= 4) { score += 10; flags.push(`🔢 Numbers in name`); }
-        
-        // 6. Display name same as username (generic)
-        if (member.displayName === uname && !member.user.avatar) { score += 5; }
-        
-        // 7. Suspicious: nitro but no avatar / new account contradiction
-        if (member.premiumSince && ageDays < 30) { score += 10; flags.push("⚠️ New + boosting"); }
-        
-        if (score >= 25) {
-          suspicious.push({
-            member,
-            score,
-            flags,
-            ageDays,
-            created
-          });
-          await applyAltRole(member);
-        }
-      }
-      
-      // Sort by suspicion score (highest first)
-      suspicious.sort((a, b) => b.score - a.score);
-      
-      if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      
-      if (suspicious.length === 0) {
-        replyUser(msg, "✅ No suspicious accounts found bro, server looks clean.").catch(() => {});
-        return;
-      }
-      
-      // Build pages of results (max 5 per embed)
-      const perPage = 5;
-      const totalPages = Math.ceil(suspicious.length / perPage);
-      const top = suspicious.slice(0, perPage);
-      
-      const lines = top.map((s, i) => {
-        const riskLevel = s.score >= 50 ? "🔴 HIGH" : s.score >= 35 ? "🟠 MED" : "🟡 LOW";
-        const createdDate = new Date(s.created).toLocaleDateString("en-US");
-        return `**${i + 1}.** ${s.member.user.tag} <@${s.member.id}>\n   ${riskLevel} | Score: \`${s.score}\` | Created: ${createdDate}\n   ${s.flags.join(" │ ")}`;
-      });
-      
-      const embed = new EmbedBuilder()
-        .setColor(0x2B2D31)
-        .setTitle(`🔍 Suspicious Accounts — ${suspicious.length} found`)
-        .setDescription(lines.join("\n\n"))
-        .setFooter({ text: `Page 1/${totalPages} │ ${msg.guild.name} │ ${msg.guild.memberCount} total members` });
-      
-      const altRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("alt_prev").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
-        new ButtonBuilder().setCustomId("alt_next").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
-      );
-      
-      const sent = await replyUser(msg, { embeds: [embed], components: [altRow] }).catch(() => {});
-      if (sent) {
-        altListMenus.set(msg.author.id, {
-          results: suspicious, page: 1, totalPages, messageId: sent.id,
-          authorId: msg.author.id, guildName: msg.guild.name, memberCount: msg.guild.memberCount,
-          createdAt: Date.now()
-        });
-      }
-      
-    } catch (e) {
-      if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      const errMsg = e.message.includes("rate limited") || e.message.includes("opcode 8") 
-        ? "⏳ Discord rate limited, try again in 1-2 minutes bro."
-        : `❌ scan failed: ${e.message.slice(0, 80)}`;
-      replyUser(msg, errMsg).catch(() => {});
-    }
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .scanchannel — Owner Only
-  // ─────────────────────────────────────────────
-  if (/^\.scanchannel(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    const args = txt.split(/\s+/).slice(1);
-    let ch = null;
-    const mentionMatch = txt.match(/<#(\d+)>/);
-    if (mentionMatch) { try { ch = await client.channels.fetch(mentionMatch[1]); } catch {} }
-    if (!ch && args[0]) { try { ch = await client.channels.fetch(args[0].trim()); } catch {} }
-    if (!ch && !args[0]) { ch = msg.channel; }
-    if (!ch) { replyUser(msg, "❌ provide a channel: `.scanchannel #channel` or `.scanchannel channel_id`, dumbass.").catch(() => {}); return; }
-    if (!ch?.isTextBased?.()) { replyUser(msg, "❌ not a readable text channel, idiot.").catch(() => {}); return; }
-    if (runningScans.has(ch.id)) { replyUser(msg, "⚠️ already scanning that channel, bro.").catch(() => {}); return; }
-    const startMsg = await replyUser(msg, `⚡ **Scan started** for <#${ch.id}>...`).catch(() => {});
-    scanChannel(ch).then(r => {
-      const out = `✅ **Scan complete!**\n📂 <#${ch.id}>\n💬 Messages: \`${r.messages}\`\n📄 New: \`${r.found}\`\n🔄 Replaced: \`${r.replaced || 0}\`\n🚫 Skipped: \`${r.skipped}\`\n📁 Channel Files: \`${r.channelTotal}\`\n📚 Library Total: \`${r.total}\``;
-      if (startMsg) startMsg.edit(out).catch(() => {});
-      else replyUser(msg, out).catch(() => {});
-    }).catch(e => {
-      const out = `❌ **Scan failed:**\n\`${e.message.slice(0,1500)}\``;
-      if (startMsg) startMsg.edit(out).catch(() => {});
-      else replyUser(msg, out).catch(() => {});
-    });
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .set / .sc — Owner Only (set allowed channel)
-  // ─────────────────────────────────────────────
-  if (/^\.(?:set|sc)(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    const args = txt.split(/\s+/).slice(1);
-    let ch = null;
-    const mentionMatch = txt.match(/<#(\d+)>/);
-    if (mentionMatch) { try { ch = await client.channels.fetch(mentionMatch[1]); } catch {} }
-    if (!ch && args[0] && args[0] !== ".") { try { ch = await client.channels.fetch(args[0].trim()); } catch {} }
-    if (!ch) { ch = msg.channel; }
-    config.allowedChannelId = ch.id;
-    saveConfig();
-    replyUser(msg, `✅ Allowed channel set to <#${ch.id}>.`).catch(() => {});
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .scan — Owner Only (supports multiple channels: .scan #ch1 #ch2)
-  // ─────────────────────────────────────────────
-  if (/^\.scan(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    const chans = msg.mentions.channels.size ? [...msg.mentions.channels.values()] : [msg.channel];
-    let totalNew = 0, totalSkipped = 0, totalMsgs = 0;
-    for (const ch of chans) {
-      if (!ch?.isTextBased?.()) { await msg.channel.send(`❌ <#${ch.id}> not text`).catch(() => {}); continue; }
-      if (runningScans.has(ch.id)) { await msg.channel.send(`⚠️ <#${ch.id}> already scanning`).catch(() => {}); continue; }
-      try {
-        await msg.channel.send(`⚡ Scanning <#${ch.id}>...`).catch(() => {});
-        const r = await scanChannel(ch);
-        totalNew += r.found; totalSkipped += r.skipped; totalMsgs += r.messages;
-        await msg.channel.send(`✅ <#${ch.name}> — 💬 ${r.messages} msgs | 📄 ${r.found} new | 🚫 ${r.skipped} skipped | 📁 Total File: ${r.total}`).catch(() => {});
-      } catch (e) {
-        await msg.channel.send(`❌ <#${ch.id}> failed: ${e.message.slice(0,80)}`).catch(() => {});
-      }
-    }
-    if (chans.length > 1) {
-      replyUser(msg, `📊 **Scan Complete:** ${chans.length} channels | 💬 ${totalMsgs} msgs | 📄 ${totalNew} new | 🚫 ${totalSkipped} skipped | 📁 Library Total: ${library.files.length}`).catch(() => {});
-    }
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .dm — Owner Only (DM role or user)
-  // ─────────────────────────────────────────────
-  if (/^\.dm(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const roleMatch = txt.match(/<@&(\d+)>/);
-    const userMatch = txt.match(/<@!?(\d+)>/);
-    const idMatch = txt.match(/\s(\d{17,})/);
-    const message = txt.replace(/^\.dm\s+/, "").replace(/<@&?\d+>/g, "").replace(/\s\d{17,}\s?/, "").trim();
-    if (!message) { replyUser(msg, "❌ usage: `.dm @role/@user/ID message here`").catch(() => {}); return; }
-    let targets = [];
-    if (roleMatch && msg.guild) {
-      try {
-        const role = await msg.guild.roles.fetch(roleMatch[1]);
-        if (role) targets = [...role.members.values()];
-      } catch {}
-    } else if (userMatch) {
-      try { const m = await msg.guild?.members.fetch(userMatch[1]); if (m) targets = [m]; } catch {}
-    } else if (idMatch) {
-      try { const u = await client.users.fetch(idMatch[1]); if (u) targets = [{ user: u, send: (p) => u.send(p) }]; } catch {}
-    }
-    if (!targets.length) { replyUser(msg, "❌ no valid targets found.").catch(() => {}); return; }
-    let sent = 0, failed = 0;
-    const statusMsg = await replyUser(msg, `📨 Sending to ${targets.length} targets...`).catch(() => {});
-    for (const t of targets) {
-      try { await (t.send ? t.send(message) : t.user.send(message)); sent++; }
-      catch { failed++; }
-      await new Promise(r => setTimeout(r, 300));
-    }
-    if (statusMsg) statusMsg.edit(`✅ Done! Sent: ${sent} | Failed: ${failed}`).catch(() => {});
-    else replyUser(msg, `✅ Done! Sent: ${sent} | Failed: ${failed}`).catch(() => {});
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .extract — Owner Only
-  // ─────────────────────────────────────────────
-  if (/^\.extract(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    let attachments = extractAttachmentsOf(msg);
-    if (!attachments.length && msg.reference?.messageId) {
-      try { const ref = await msg.channel.messages.fetch(msg.reference.messageId); attachments = extractAttachmentsOf(ref); } catch {}
-    }
-    if (!attachments.length) { replyUser(msg, "❌ upload a .zip file or reply to one, dumbass.").catch(() => {}); return; }
-    const sourceFile = attachments[0];
-    const maxInfo = getMaxFileSize(msg.guild);
-    if (sourceFile.size > maxInfo.size) { replyUser(msg, `❌ max file is ${maxInfo.label}, lol.`).catch(() => {}); return; }
-    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-    try {
-      const buf = await downloadURL(sourceFile.url);
-      let files = extractFilesFromZip(buf);
-      if (!files.length) { if (sentMsg) await sentMsg.delete().catch(() => {}); replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {}); return; }
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      for (let i = 0; i < files.length; i += 10) {
-        const batch = files.slice(i, i + 10);
-        const atts = batch.map(f => new AttachmentBuilder(f.data, { name: f.name }));
-        await msg.channel.send({ files: atts }).catch(() => {});
-      }
-    } catch (e) { if (sentMsg) await sentMsg.delete().catch(() => {}); replyUser(msg, `❌ error: ${e.message}`).catch(() => {}); }
-    return;
-  }
-  if (/^\.getinv(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const serverId = txt.split(/\s+/)[1];
-    if (!serverId) { replyUser(msg, "❌ usage: `.getinv <server id>`, dumbass.").catch(() => {}); return; }
-    try {
-      const guild = await client.guilds.fetch(serverId.trim());
-      const channels = await guild.channels.fetch();
-      const targetChannel = channels.find(c => c.type === ChannelType.GuildText && c.permissionsFor(guild.members.me)?.has("CreateInstantInvite"))
-        || channels.find(c => c.isTextBased?.() && c.permissionsFor(guild.members.me)?.has("CreateInstantInvite"));
-      if (!targetChannel) { replyUser(msg, "❌ no channel with invite permission found, bro.").catch(() => {}); return; }
-      const invite = await targetChannel.createInvite({ maxAge: 1800, maxUses: 1, unique: true, reason: "Owner requested" });
-      replyUser(msg, `✅ **Invite for \`${guild.name}\`**\n🔗 https://discord.gg/${invite.code}\n⏱️ Expires: **30 min**\n👤 Uses: **1**`).catch(() => {});
-    } catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
-    return;
-  }
-  if (/^\.leave(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const args = txt.split(/\s+/).slice(1); const target = args[0];
-    if (!target) {
-      if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-      if (msg.guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
-      try { await msg.guild.leave(); replyUser(msg, `✅ left **${msg.guild.name}**, bro.`).catch(() => {}); }
-      catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
-      return;
-    }
-    if (target.toLowerCase() === "all") {
-      let left = 0, failed = 0;
-      for (const g of client.guilds.cache.values()) {
-        if (g.id === GUILD_ID) continue;
-        try { await g.leave(); left++; } catch { failed++; }
-      }
-      replyUser(msg, `✅ left **${left}** servers${failed ? ` (${failed} failed)` : ""}. Main server safe.`).catch(() => {});
-      return;
-    }
-    try {
-      const guild = await client.guilds.fetch(target.trim());
-      if (guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
-      await guild.leave(); replyUser(msg, `✅ left **${guild.name}**, bro.`).catch(() => {});
-    } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .dm — Owner Only (DM all members with a role or single user)
-  // ─────────────────────────────────────────────
-  if (/^\.dm(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    // Parse role mention, user mention, or ID
-    const roleMention = txt.match(/<@&(\d+)>/);
-    const userMention = txt.match(/<@!?(\d+)>/);
-    let targetType = null; // "role" or "user"
-    let targetId = null;
-    let messageStart = 0;
-    
-    if (roleMention) {
-      targetType = "role";
-      targetId = roleMention[1];
-      messageStart = txt.indexOf(roleMention[0]) + roleMention[0].length;
-    } else if (userMention) {
-      targetType = "user";
-      targetId = userMention[1];
-      messageStart = txt.indexOf(userMention[0]) + userMention[0].length;
     } else {
-      const args = txt.split(/\s+/).slice(1);
-      if (args[0] && /^\d+$/.test(args[0])) {
-        targetId = args[0].trim();
-        messageStart = txt.indexOf(args[0]) + args[0].length;
-        // Try to determine if it's a role or user
-        try {
-          const roleCheck = await msg.guild.roles.fetch(targetId);
-          if (roleCheck) targetType = "role";
-        } catch {}
-        if (!targetType) {
-          try {
-            const userCheck = await msg.guild.members.fetch(targetId);
-            if (userCheck) targetType = "user";
-          } catch {}
-        }
-      }
+      while (end < text.length && (isLower(text[end]) || isDigit(text[end]))) end += 1;
     }
-    
-    if (!targetId || !targetType) { replyUser(msg, "❌ mention a role/user or paste ID, dumbass.").catch(() => {}); return; }
-    const messageText = txt.slice(messageStart).trim();
-    if (!messageText) { replyUser(msg, "❌ put a message to send, idiot.").catch(() => {}); return; }
-    
-    if (targetType === "user") {
-      // Single user DM
-      try {
-        const member = await msg.guild.members.fetch(targetId);
-        if (!member) { replyUser(msg, "❌ user not found in this server, dumbass.").catch(() => {}); return; }
-        const startMsg = await replyUser(msg, `⏳ Sending DM to **${member.user.tag}**...`).catch(() => {});
-        try {
-          await member.send(messageText);
-          const result = `✅ **DM Sent!**\n\n👤 User: **${member.user.tag}**\n✅ Status: \`Sent\`\n📨 Message:\n> ${messageText.slice(0, 1000)}`;
-          if (startMsg) startMsg.edit(result).catch(() => {});
-          else replyUser(msg, result).catch(() => {});
-        } catch {
-          const result = `❌ **DM Failed!**\n\n👤 User: **${member.user.tag}**\n❌ Status: \`Failed to send\``;
-          if (startMsg) startMsg.edit(result).catch(() => {});
-          else replyUser(msg, result).catch(() => {});
-        }
-      } catch (e) {
-        replyUser(msg, `❌ invalid user, dumbass.`).catch(() => {});
-      }
-      return;
-    }
-    
-    // Role-based DM (original ghostdm behavior)
-    let role = null;
-    try { role = await msg.guild.roles.fetch(targetId); } catch {}
-    if (!role) { replyUser(msg, "❌ invalid role, dumbass.").catch(() => {}); return; }
-    const startMsg = await replyUser(msg, `⏳ Sending DMs to **${role.members?.size || "?"}** members with role **${role.name}**...`).catch(() => {});
-    let sent = 0, failed = 0;
-    try { await msg.guild.members.fetch(); } catch {}
-    const membersWithRole = msg.guild.members.cache.filter(m => m.roles.cache.has(targetId) && !m.user.bot);
-    for (const member of membersWithRole.values()) {
-      try {
-        await member.send(messageText);
-        sent++;
-      } catch {
-        failed++;
-      }
-    }
-    const result = `✅ **DM complete!**\n\n👥 Role: **${role.name}**\n✅ Sent: \`${sent}\`\n❌ Failed: \`${failed}\`\n📨 Message:\n> ${messageText.slice(0, 1000)}`;
-    if (startMsg) startMsg.edit(result).catch(() => {});
-    else replyUser(msg, result).catch(() => {});
-    return;
+    found.push(text.slice(at, end));
+    at = end;
   }
-  // ─────────────────────────────────────────────
-  // .delwh — Delete Webhook (regular + buyer)
-  // ─────────────────────────────────────────────
-  if (/^\.delwh(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "whs", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    
-    const arg = txt.split(/\s+/)[1]?.trim();
-    if (!arg) {
-      return replyUser(msg, "❌ usage: `.delwh <webhook_url>`, dumbass.").catch(() => {});
-    }
-    
-    let webhookUrl = arg;
-    const urlMatch = txt.match(/(https:\/\/discord\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+)/i);
-    if (urlMatch) webhookUrl = urlMatch[1];
-
-    const timeFooter = `Requested by @${msg.author.username}│Webhook Delete`;
-    const loadingEmbed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Deleting Webhook URL...")
-      .setDescription("⏳ Processing...")
-      .setFooter({ text: timeFooter });
-    const sentMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
-
-    try {
-      const res = await fetch(webhookUrl, { method: "DELETE" });
-      
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      
-      if (res.status === 404) {
-        await msg.channel.send(`<@${msg.author.id}> ❌ Not Found`).catch(() => {});
-      } else {
-        const resultEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("Result")
-          .setFooter({ text: timeFooter });
-        
-        if (res.ok) {
-          resultEmbed.setDescription("✅ Delete");
-        } else {
-          resultEmbed.setDescription(`❌ failed: HTTP ${res.status}`);
-        }
-        
-        await msg.channel.send({
-          content: `<@${msg.author.id}> done, delete the webhook bro!`,
-          embeds: [resultEmbed]
-        }).catch(() => {});
-      }
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ error: ${e.message.slice(0,100)}`).catch(() => {});
-    }
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // ─────────────────────────────────────────────
-  // ─────────────────────────────────────────────
-  // .whs — Webhook Spammer (with Start button + modal)
-  // ─────────────────────────────────────────────
-  if (/^\.whs(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    
-    const panelEmbed = new EmbedBuilder()
-      .setColor(getEmbedColor(perm.isBuyer))
-      .setDescription("Click `Start` button below to start.");
-    
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("whs_start")
-        .setLabel("Start")
-        .setStyle(ButtonStyle.Success)
-    );
-    
-    const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [row] }).catch(() => {});
-    if (panelMsg) {
-      whsPanelOwners.set(panelMsg.id, msg.author.id);
-      setTimeout(() => whsPanelOwners.delete(panelMsg.id), 10 * 60 * 1000);
-    }
-    return;
-  }
-
-  // .upload — file → Pastefy loadstring (regular + buyer)
-  // ─────────────────────────────────────────────
-  if (/^\.upload(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "upload", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    let attachments = [...(msg.attachments?.values() || [])].filter(a => {
-      const e = ext(a.name);
-      return e === "txt" || e === "lua";
-    });
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        for (const a of refMsg.attachments?.values?.() || []) {
-          const e = ext(a.name);
-          if (e === "txt" || e === "lua") attachments.push(a);
-        }
-        for (const s of refMsg.messageSnapshots?.values?.() || []) {
-          for (const a of s.attachments?.values?.() || []) {
-            const e = ext(a.name);
-            if (e === "txt" || e === "lua") attachments.push(a);
-          }
-        }
-      } catch {}
-    }
-    if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
-    const file = attachments[0];
-    if (file.size > 200 * 1024) { replyUser(msg, "❌ max is 200kb lol.").catch(() => {}); return; }
-    const sentMsg = await replyUser(msg, "⏳ Uploading...").catch(() => {});
-    try {
-      const res = await fetch(file.url);
-      const content = await res.text();
-      const apiKey = process.env.PASTEFY_API_KEY;
-      if (!apiKey) throw new Error("PASTEFY_API_KEY not set in env vars");
-      // Try Pastefy API v2 with minimal fields
-      const headers = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      };
-      const body = {
-        title: file.name || "script.lua",
-        content: content
-      };
-      let pastefyRes = await fetch("https://pastefy.app/api/v2/paste", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body)
-      });
-      let rawUrl = null;
-      if (pastefyRes.ok) {
-        try {
-          const data = await pastefyRes.json();
-          const pid = data?.id || data?._id || data?.paste?.id;
-          if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
-        } catch {}
-      }
-      // Fallback: try v1 endpoint
-      if (!rawUrl) {
-        const v1Res = await fetch("https://pastefy.app/api/v1/paste", {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body)
-        });
-        if (v1Res.ok) {
-          try {
-            const data = await v1Res.json();
-            const pid = data?.id || data?._id || data?.paste?.id;
-            if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
-          } catch {}
-        } else {
-          // Show v2 error if both failed
-          const errText = await pastefyRes.text();
-          throw new Error(`Pastefy v2 HTTP ${pastefyRes.status}: ${errText.slice(0, 150)}`);
-        }
-      }
-      if (!rawUrl) throw new Error("Could not get paste URL from Pastefy response");
-      const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      const embed = new EmbedBuilder()
-        .setColor(getEmbedColor(isBuyerUser))
-        .setTitle("Script Copy")
-        .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
-        .setFooter({ text: `Request by @${msg.author.username}│File → Script`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-      await msg.channel.send({
-        content: `<@${msg.author.id}> Here is the script bro!`,
-        embeds: [embed]
-      }).catch(() => {});
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ upload failed: ${e.message}`).catch(() => {});
-    }
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .obf — Prince Obfuscator (regular + buyer)
-  // ─────────────────────────────────────────────
-  if (/^\.obf(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "obf", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    let attachments = [...(msg.attachments?.values() || [])].filter(a => {
-      const e = ext(a.name);
-      return e === "txt" || e === "lua";
-    });
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        for (const a of refMsg.attachments?.values?.() || []) {
-          const e = ext(a.name);
-          if (e === "txt" || e === "lua") attachments.push(a);
-        }
-        for (const s of refMsg.messageSnapshots?.values?.() || []) {
-          for (const a of s.attachments?.values?.() || []) {
-            const e = ext(a.name);
-            if (e === "txt" || e === "lua") attachments.push(a);
-          }
-        }
-      } catch {}
-    }
-    if (!attachments.length) { replyUser(msg, "❌ upload a file so i can make it obfuscate file.").catch(() => {}); return; }
-    const file = attachments[0];
-    if (file.size > 200 * 1024) { replyUser(msg, "❌ max is 200kb lol.").catch(() => {}); return; }
-    const sentMsg = await replyUser(msg, "🔒 Obfuscating...").catch(() => {});
-    try {
-      const res = await fetch(file.url);
-      const source = await res.text();
-      // Obfuscate the script
-      const obfuscated = obfuscateLua(source);
-      // Upload obfuscated to Pastefy
-      const apiKey = process.env.PASTEFY_API_KEY;
-      if (!apiKey) throw new Error("PASTEFY_API_KEY not set in env vars");
-      const headers = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      };
-      const body = {
-        title: "obfuscated.lua",
-        content: obfuscated
-      };
-      let pastefyRes = await fetch("https://pastefy.app/api/v2/paste", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body)
-      });
-      let rawUrl = null;
-      if (pastefyRes.ok) {
-        try {
-          const data = await pastefyRes.json();
-          const pid = data?.id || data?._id || data?.paste?.id;
-          if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
-        } catch {}
-      }
-      if (!rawUrl) {
-        const v1Res = await fetch("https://pastefy.app/api/v1/paste", {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body)
-        });
-        if (v1Res.ok) {
-          try {
-            const data = await v1Res.json();
-            const pid = data?.id || data?._id || data?.paste?.id;
-            if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
-          } catch {}
-        } else {
-          const errText = await pastefyRes.text();
-          throw new Error(`Pastefy HTTP ${pastefyRes.status}: ${errText.slice(0, 150)}`);
-        }
-      }
-      if (!rawUrl) throw new Error("Could not get paste URL from Pastefy response");
-      const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
-      // Create obfuscated file attachment
-      const obfFileName = "obfuscated.lua";
-      const obfAttachment = new AttachmentBuilder(Buffer.from(obfuscated, "utf-8"), { name: obfFileName });
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      await msg.channel.send({
-        content: `<@${msg.author.id}>\n\`\`\`lua\n${loadstring}\n\`\`\``,
-        files: [obfAttachment]
-      }).catch(() => {});
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ obfuscate failed: ${e.message}`).catch(() => {});
-    }
-    return;
-  }
-  // ─────────────────────────────────────────────
-
-  // .find, .get, .rename/.rn, .et, .dl/.download
-  // ─────────────────────────────────────────────
-
-  // .et — carousel mode
-  if (/^\.et(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, true);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    if (isDM && !perm.isBuyer) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
-    const cd = checkCommandCooldown(msg.author.id, "et", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    let attachments = extractAttachmentsOf(msg);
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        attachments = extractAttachmentsOf(refMsg);
-      } catch {}
-    }
-    if (!attachments.length) {
-      replyUser(msg, "❌ upload a .zip file or reply to one, dumbass.").catch(() => {});
-      return;
-    }
-    const sourceFile = attachments[0];
-    const maxInfo = getMaxFileSize(msg.guild);
-    if (sourceFile.size > maxInfo.size) {
-      replyUser(msg, `❌ max file is ${maxInfo.label}, lol.`).catch(() => {});
-      return;
-    }
-    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-    try {
-      const buf = await downloadURL(sourceFile.url);
-      let files = extractFilesFromZip(buf);
-      if (!files.length) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
-        return;
-      }
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      const firstFile = files[0];
-      const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
-      const pageLabel = `1/${files.length}`;
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
-        new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
-        new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
-      );
-      const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
-      if (carouselMsg) {
-        extractCarouselMenus.set(msg.author.id, {
-          files, index: 0, sourceType: "zip",
-          messageId: carouselMsg.id, authorId: msg.author.id, createdAt: Date.now()
-        });
-      }
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
-    }
-    return;
-  }
-  // .rename / .rn
-  if (/^\.(?:rename|rn)$/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "rename", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    let attachments = [...(msg.attachments?.values() || [])];
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        attachments = [...allAttachmentsOf(refMsg)];
-      } catch {}
-    }
-    if (!attachments.length) { replyUser(msg, "❌ bruh, upload file or reply to a file.").catch(() => {}); return; }
-    const file = attachments[0];
-    const fileExt = ext(file.name);
-    if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-    const workingEmbed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Renaming...")
-      .setDescription("⏳ Processing...")
-      .setFooter({ text: timeFooter });
-    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-    // NO DELAY — FAST response
-    (async () => {
-      try {
-        const res = await fetch(file.url);
-        const text = await res.text();
-        // Extract URLs from original file content
-        const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
-        const foundUrls = text.match(urlRegex) || [];
-        const cleaned = cleanLuaScript(text);
-        
-        // Stats
-        const originalLines = text.split("\n").length;
-        const cleanedLines = cleaned.split("\n").length;
-        const linesRemoved = originalLines - cleanedLines;
-        const originalSize = Buffer.byteLength(text, "utf8");
-        const cleanedSize = Buffer.byteLength(cleaned, "utf8");
-        
-        // Filename: 20 random chars + .lua
-        const randChars = "abcdefghijklmnopqrstuvwxyz";
-        let outputName = "";
-        for (let i = 0; i < 20; i++) {
-          outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
-        }
-        outputName += ".lua";
-        
-        const finalOutput = cleaned;
-        
-        const allLines = cleaned.split("\n");
-        // Limit preview to MAX 50 words (or 5 lines, whichever comes first)
-        let previewWords = [];
-        let wordCount = 0;
-        let lineCount = 0;
-        for (const line of allLines) {
-          if (lineCount >= 5 || wordCount >= 50) break;
-          const words = line.trim().split(/\s+/).filter(Boolean);
-          for (const w of words) {
-            if (wordCount >= 50) break;
-            previewWords.push(w);
-            wordCount++;
-          }
-          previewWords.push("\n");
-          lineCount++;
-        }
-        let previewText = previewWords.join(" ").replace(/ \n /g, "\n").trim();
-        if (previewText.endsWith("\n")) previewText = previewText.slice(0, -1);
-        if (wordCount >= 50 || lineCount >= 5) previewText += "\n...";
-        // Safety truncation
-        if (previewText.length > 1000) previewText = previewText.slice(0, 1000) + "\n...";
-        
-        // Build description with URL section if links found
-        let description = `\`\`\`lua\n${previewText}\n\`\`\``;
-        if (foundUrls.length > 0) {
-          const uniqueUrls = [...new Set(foundUrls)];
-          const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
-          let urlSection = `\n\n**URL Found:**\n${urlList}`;
-          if (uniqueUrls.length > 10) urlSection += `\n- ...and ${uniqueUrls.length - 10} more`;
-          description += urlSection.slice(0, 800);
-        }
-        
-        const avatarURL = msg.author.displayAvatarURL({ dynamic: true, size: 128 });
-        const resultEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("File Preview")
-          .setDescription(description)
-          .setFooter({ text: `Request by @${msg.author.username}│Clean & Fixed`, iconURL: avatarURL });
-        const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput), { name: outputName });
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**`,
-          files: [fixedFile],
-          embeds: [resultEmbed]
-        }).catch(() => {});
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
-      }
-    })();
-    return;
-  }
-  // .get
-  if (/^\.get(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const cd = checkCommandCooldown(msg.author.id, "get", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    const id = txt.split(/\s+/)[1];
-    if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
-    const file = getFile(id);
-    if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
-    const freshUrl = await getFreshUrl(file);
-    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
-    return;
-  }
-  // .dl / .download — gives file from library ID OR downloads from Discord CDN link
-  if (/^\.(?:dl|download)(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const arg = txt.split(/\s+/)[1];
-    if (!arg) { replyUser(msg, "❌ put file link, idiot.").catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "dl", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-
-    // Check if Instagram URL
-    if (/instagram\.com|instagr\.am|ig\.me/i.test(arg)) {
-      const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-      try {
-        let downloadUrl = null;
-        let mediaType = "Media";
-        try {
-          const apiRes = await fetch("https://api.cobalt.tools/api/json", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Accept": "application/json" },
-            body: JSON.stringify({ url: arg })
-          });
-          if (!apiRes.ok) throw new Error("API " + apiRes.status);
-          const data = await apiRes.json();
-          
-          if (data?.url) {
-            downloadUrl = data.url;
-            mediaType = data.audio ? "Audio" : "Video/Photo";
-          } else if (data?.audio) {
-            downloadUrl = data.audio;
-            mediaType = "Audio";
-          } else if (data?.picker && Array.isArray(data.picker) && data.picker.length > 0) {
-            downloadUrl = data.picker[0].url;
-            mediaType = "Photo (1/" + data.picker.length + ")";
-          }
-        } catch {}
-        
-        if (!downloadUrl) throw new Error("Failed to get Instagram media");
-        
-        const resEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("📥 Instagram Download")
-          .setDescription("**Type:** " + mediaType + "\n🔗 **Download:** [Click Here](" + downloadUrl + ")")
-          .setFooter({ text: "Request by @" + msg.author.username + "│Instagram DL", iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-        
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**`,
-          embeds: [resEmbed]
-        }).catch(() => {});
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, "❌ failed — link may be private, expired, or not a post/reel.").catch(() => {});
-      }
-      return;
-    }
-
-    // Check if TikTok URL — NO WATERMARK
-    if (/tiktok\.com|vm\.tiktok\.com/i.test(arg)) {
-      const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-      try {
-        // Try cobalt.tools first (clean, no watermark)
-        let videoUrl = null;
-        try {
-          const apiRes = await fetch("https://api.cobalt.tools/api/json", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Accept": "application/json" },
-            body: JSON.stringify({ url: arg })
-          });
-          const data = await apiRes.json();
-          if (data?.url) videoUrl = data.url;
-        } catch {}
-        
-        // Fallback: tikwm
-        if (!videoUrl) {
-          try {
-            const api2 = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(arg)}`);
-            const d2 = await api2.json();
-            if (d2?.data?.play) videoUrl = d2.data.play;
-          } catch {}
-        }
-        
-        if (!videoUrl) throw new Error("Failed to get video");
-        
-        const resEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("📥 TikTok Download")
-          .setDescription(`🔗 **Download:** [Click Here](${videoUrl})`)
-          .setFooter({ text: `Request by @${msg.author.username}│TikTok DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-        
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**`,
-          embeds: [resEmbed]
-        }).catch(() => {});
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ failed: ${e.message.slice(0, 80)}`).catch(() => {});
-      }
-      return;
-    }
-
-    // Check if input is a URL
-    if (/^https?:\/\//i.test(arg) || /cdn\.discordapp\.com/i.test(arg) || /media\.discordapp\.net/i.test(arg)) {
-      const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-      try {
-        const buf = await downloadURL(arg);
-        // Extract filename from URL
-        let fileName = "file";
-        const urlMatch = arg.match(/\/([^/?#]+)(?:\?|#|$)/);
-        if (urlMatch) fileName = decodeURIComponent(urlMatch[1]);
-        const fileExt = ext(fileName);
-        if (!fileExt) fileName += ".txt";
-        const attachment = new AttachmentBuilder(buf, { name: fileName });
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**`,
-          files: [attachment]
-        }).catch(() => {});
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
-      }
-      return;
-    }
-
-    // Otherwise treat as file ID from library
-    const file = getFile(arg);
-    if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
-    const freshUrl = await getFreshUrl(file);
-    const fileUrl = freshUrl || file.url;
-    const fileAttachment = { attachment: fileUrl, name: file.filename || "file.lua" };
-    
-    await msg.channel.send({
-      content: `<@${msg.author.id}> **Here is the file twin!**`,
-      files: [fileAttachment]
-    }).catch(() => {});
-    return;
-  }
-  // .find
-  if (/^\.find(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { replyUser(msg, perm.reason).catch(() => {}); return; }
-    const query = txt.slice(5).trim();
-    if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
-    const results = findFiles(query);
-    if (!results.length) { replyUser(msg, "❌ no found for that, dumbass.").catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "find", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
-    const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
-    const pageItems = results.slice(0, perPage);
-    const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
-    const embed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle(getFinderTitle(isBuyerUser))
-      .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
-      .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeNow}` });
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
-      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
-    );
-    const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
-    if (sent) paginationMenus.set(msg.author.id, {
-      results, page: 1, totalPages, messageId: sent.id,
-      authorId: msg.author.id, createdAt: Date.now(), isBuyer: isBuyerUser
-    });
-    return;
-  }
-});
-// ============================================================
-// EXPRESS SERVER
-// ============================================================
-const app = express();
-app.get("/", (req, res) => res.status(200).send(isReady ? "✅ ONLINE" : "⏳ Starting..."));
-app.get("/health", (req, res) => res.status(200).json({
-  process: "online", discord: isReady ? "ready" : "offline", bot: client.user?.tag, guild: GUILD_ID, files: library.files.length
-}));
-app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Port ${PORT}`));
-const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || "";
-if (keepAliveUrl) {
-  setInterval(() => {
-    try { require("https").get(`${keepAliveUrl}/health`).on("error", () => {}); } catch(e) {}
-  }, 180000);
+  return found;
 }
-process.on("unhandledRejection", e => console.error("❌ Rejection:", e));
-process.on("uncaughtException", e => console.error("❌ Exception:", e));
-console.log("🔑 Connecting...");
-client.login(TOKEN).catch(e => { console.error("❌ Login fail:", e); process.exit(1); });
+
+function camel(text) {
+  const parts = words(String(text || ''));
+  if (!parts.length) return null;
+  const head = parts[0].toLowerCase();
+  const tail = parts.slice(1).map((part) => (part === part.toUpperCase() && part.length > 1
+    ? part
+    : part[0].toUpperCase() + part.slice(1)));
+  const candidate = head + tail.join('');
+  return isIdentifier(candidate) ? candidate : null;
+}
+
+function typeWord(text) {
+  let end = text.length;
+  while (end > 1 && isDigit(text[end - 1])) end -= 1;
+  return text.slice(0, end);
+}
+
+function spelled(node) {
+  const value = bare(node);
+  if (!value || value.kind !== Kind.String) return null;
+  return camel(value.value);
+}
+
+function keyOf(node) {
+  if (!node || node.kind !== Kind.Index) return null;
+  const key = bare(node.index);
+  if (!key || key.kind !== Kind.String) return null;
+  return key.value;
+}
+
+const CTORS = ['Create', 'New', 'Make', 'Build'];
+
+function constructed(method) {
+  const text = String(method || '');
+  for (const verb of CTORS) {
+    if (text.length <= verb.length) continue;
+    if (text.slice(0, verb.length) !== verb) continue;
+    if (!isUpper(text[verb.length])) continue;
+    return text.slice(verb.length);
+  }
+  return null;
+}
+
+function optionName(node) {
+  const table = bare(node);
+  if (!table || table.kind !== Kind.Table) return null;
+  for (const wanted of ['Title', 'Name']) {
+    for (const entry of table.entries || []) {
+      if (entry.type !== 'key') continue;
+      const key = bare(entry.key);
+      if (!key || key.kind !== Kind.String || key.value !== wanted) continue;
+      const value = bare(entry.value);
+      if (value && value.kind === Kind.String) return value.value;
+    }
+  }
+  return null;
+}
+
+const QUALIFIERS = 2;
+
+function qualifierOf(args) {
+  const first = (args || [])[0];
+  if (!first) return null;
+  const said = bare(first);
+  const text = said && said.kind === Kind.String ? said.value : optionName(first);
+  if (!text) return null;
+  const parts = words(String(text));
+  if (!parts.length || parts.length > QUALIFIERS) return null;
+  return parts.join(' ');
+}
+
+function entryKey(entry) {
+  if (!entry || entry.type !== 'key') return null;
+  const key = bare(entry.key);
+  return key && key.kind === Kind.String ? key.value : null;
+}
+
+const CALLBACKS = new Set(['Callback', 'OnCallback', 'OnChanged', 'OnChange',
+  'OnClick', 'OnToggle', 'OnFocusLost']);
+
+const LABELS = ['Title', 'Name', 'Flag'];
+
+function controlWord(table) {
+  for (const wanted of LABELS) {
+    for (const entry of table.entries || []) {
+      if (entryKey(entry) !== wanted) continue;
+      const said = bare(entry.value);
+      if (!said || said.kind !== Kind.String) continue;
+      const parts = words(said.value);
+      if (!parts.length || parts.length > QUALIFIERS) continue;
+      return parts.join(' ');
+    }
+  }
+  return null;
+}
+
+function optionCallbacks(root) {
+  const found = [];
+  walk(root, {
+    enter(node) {
+      if (node.kind !== Kind.Table) return undefined;
+      for (const entry of node.entries || []) {
+        if (!CALLBACKS.has(entryKey(entry))) continue;
+        const fn = bare(entry.value);
+        if (!fn || fn.kind !== Kind.Function) continue;
+        found.push({ word: controlWord(node), fn });
+      }
+      return undefined;
+    },
+  });
+  return found;
+}
+
+function writtenBy(fn) {
+  const own = new Set();
+  walk(fn, {
+    enter(node) {
+      for (const binding of node.bindings || []) own.add(binding);
+      if (node.kind === Kind.LocalFunction || node.kind === Kind.NumericFor) {
+        own.add(node.binding);
+      }
+      return undefined;
+    },
+  });
+  const inside = new Set(collect(fn, (node) => node.kind === Kind.Name));
+  const held = new Set();
+  for (const said of inside) {
+    const binding = said.binding;
+    if (!binding || !isLocalBinding(binding) || own.has(binding)) continue;
+    const writes = binding.writes || [];
+    if (!writes.length || !writes.every((write) => inside.has(write))) continue;
+    held.add(binding);
+  }
+  return held.size === 1 ? [...held][0] : null;
+}
+
+const LOADERS = new Set(['loadstring', 'load']);
+
+const PLUMBING = new Set(['raw', 'main', 'master', 'latest', 'download', 'releases',
+  'release', 'blob', 'refs', 'heads', 'tags', 'archive', 'files', 'file', 'lua',
+  'init', 'source', 'dl', 'api', 'v1', 'v2']);
+
+function fromUrl(text) {
+  const shown = String(text).split('?')[0].split('#')[0];
+  const scheme = shown.indexOf('://');
+  const path = scheme < 0 ? shown : shown.slice(scheme + 3);
+  const parts = path.split('/').filter((part) => part.length > 0);
+
+  for (let at = parts.length - 1; at >= 1; at -= 1) {
+    const segment = parts[at].split('.')[0];
+    if (!segment || PLUMBING.has(segment.toLowerCase())) continue;
+    const named = camel(segment);
+    if (named) return named;
+  }
+  return null;
+}
+
+function loadedLibrary(node) {
+  if (node.kind !== Kind.Call || (node.args || []).length) return null;
+  const inner = bare(node.base);
+  if (!inner || inner.kind !== Kind.Call) return null;
+  const loader = bare(inner.base);
+  if (!loader || loader.kind !== Kind.Name || isLocalBinding(loader.binding)) return null;
+  if (!LOADERS.has(loader.name)) return null;
+  let url = null;
+  walk(inner, {
+    enter(one) {
+      if (url === null && one.kind === Kind.String && one.value.indexOf('://') >= 0) {
+        url = one.value;
+      }
+      return undefined;
+    },
+  });
+  return url === null ? null : fromUrl(url);
+}
+
+const CHOICE = { and: ['rhs', 'lhs'], or: ['lhs', 'rhs'] };
+
+function hintOf(node) {
+  const value = bare(node);
+  if (!value) return null;
+  if (value.kind === Kind.Binary) {
+    const sides = CHOICE[value.operator];
+    if (!sides) return null;
+    for (const side of sides) {
+      const found = hintOf(value[side]);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (value.kind === Kind.Call || value.kind === Kind.MethodCall) {
+    const args = value.args || [];
+    const fetched = loadedLibrary(value);
+    if (fetched) return fetched;
+    const made = value.kind === Kind.MethodCall ? constructed(value.method) : null;
+    const qualifier = qualifierOf(args);
+    if (made) {
+      const named = camel(qualifier === null ? made : `${qualifier} ${made}`);
+      if (named) return named;
+    }
+    if (args.length === 1) {
+      const named = spelled(args[0]);
+      if (named) return named;
+    }
+    if (value.kind === Kind.MethodCall) {
+      if (qualifier !== null && optionName(args[0]) !== null) {
+        const named = camel(`${qualifier} ${value.method}`);
+        if (named) return named;
+      }
+      return camel(value.method);
+    }
+    const base = bare(value.base);
+    const library = base && base.kind === Kind.Index ? bare(base.base) : null;
+    if (library && library.kind === Kind.Name && !isLocalBinding(library.binding)) {
+      return camel(typeWord(library.name));
+    }
+    return null;
+  }
+  if (value.kind === Kind.Index) {
+    const key = keyOf(value);
+    return key ? camel(key) : null;
+  }
+  if (value.kind === Kind.Name && !isLocalBinding(value.binding)) return camel(value.name);
+  return null;
+}
+
+const LISTENERS = {
+  InputBegan: 'input',
+  InputChanged: 'input',
+  InputEnded: 'input',
+  PlayerAdded: 'player',
+  PlayerRemoving: 'player',
+  CharacterAdded: 'character',
+  CharacterRemoving: 'character',
+  ChildAdded: 'child',
+  ChildRemoved: 'child',
+  DescendantAdded: 'descendant',
+  DescendantRemoving: 'descendant',
+  Touched: 'part',
+  TouchEnded: 'part',
+  Chatted: 'message',
+  Heartbeat: 'delta',
+  Stepped: 'delta',
+  RenderStepped: 'delta',
+  PromptButtonHoldBegan: 'player',
+};
+
+function connectedEvent(node) {
+  if (!node || node.kind !== Kind.MethodCall || node.method !== 'Connect') return null;
+  return keyOf(bare(node.base));
+}
+
+const ITERS = {
+  ipairs: ['index', 'value'],
+  pairs: ['key', 'value'],
+  next: ['key', 'value'],
+  gmatch: ['match'],
+  gfind: ['match'],
+  lines: ['line'],
+};
+
+function iteratorName(expressions) {
+  const first = bare((expressions || [])[0]);
+  if (!first) return null;
+  if (first.kind === Kind.MethodCall) return first.method;
+  if (first.kind === Kind.Call) {
+    const base = bare(first.base);
+    if (!base) return null;
+    if (base.kind === Kind.Name) return isLocalBinding(base.binding) ? null : base.name;
+    return keyOf(base);
+  }
+  if (first.kind === Kind.Name && !isLocalBinding(first.binding)) return first.name;
+  return null;
+}
+
+const METAS = {
+  __index: ['object', 'key'],
+  __newindex: ['object', 'key', 'value'],
+  __call: ['object'],
+  __tostring: ['object'],
+  __len: ['object'],
+  __unm: ['object'],
+  __gc: ['object'],
+  __close: ['object'],
+  __add: ['lhs', 'rhs'],
+  __sub: ['lhs', 'rhs'],
+  __mul: ['lhs', 'rhs'],
+  __div: ['lhs', 'rhs'],
+  __idiv: ['lhs', 'rhs'],
+  __mod: ['lhs', 'rhs'],
+  __pow: ['lhs', 'rhs'],
+  __concat: ['lhs', 'rhs'],
+  __eq: ['lhs', 'rhs'],
+  __lt: ['lhs', 'rhs'],
+  __le: ['lhs', 'rhs'],
+};
+
+function keyedFunctions(chunk) {
+  const found = [];
+  const note = (key, value) => {
+    const spelling = bare(key);
+    const held = bare(value);
+    if (!spelling || spelling.kind !== Kind.String) return;
+    if (!held || held.kind !== Kind.Function) return;
+    found.push([spelling.value, held]);
+  };
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.Table) {
+        for (const entry of node.entries || []) {
+          if (entry.type === 'key') note(entry.key, entry.value);
+        }
+      } else if (node.kind === Kind.Assignment) {
+        const expressions = node.expressions || [];
+        if (expressions.length !== (node.targets || []).length) return undefined;
+        node.targets.forEach((target, at) => {
+          const stored = bare(target);
+          if (stored && stored.kind === Kind.Index) note(stored.index, expressions[at]);
+        });
+      } else if (node.kind === Kind.FunctionDeclaration && !node.isMethod) {
+        const target = bare(node.target);
+        if (target && target.kind === Kind.Index) note(target.index, node.body);
+      }
+      return undefined;
+    },
+  });
+  return found;
+}
+
+function roleFacts(chunk) {
+  const fields = new Map();
+  const called = new Set();
+  const steps = new Map();
+  const note = (list, binding, value) => {
+    const kept = list.get(binding);
+    if (kept) kept.push(value);
+    else list.set(binding, [value]);
+  };
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.Table) {
+        for (const entry of node.entries || []) {
+          if (entry.type === 'key') fields.set(bare(entry.value), bare(entry.key));
+        }
+      } else if (node.kind === Kind.Call) {
+        const base = bare(node.base);
+        if (base) called.add(base);
+      } else if (node.kind === Kind.Assignment) {
+        const expressions = node.expressions || [];
+        const targets = node.targets || [];
+        const aligned = expressions.length === targets.length;
+        targets.forEach((target, at) => {
+          const value = aligned ? bare(expressions[at]) : null;
+          if (target.kind === Kind.Name && target.binding) {
+            note(steps, target.binding, value);
+          }
+          if (!aligned) return;
+          const stored = bare(target);
+          if (stored && stored.kind === Kind.Index) fields.set(value, bare(stored.index));
+        });
+      }
+      return undefined;
+    },
+  });
+  return { fields, called, steps };
+}
+
+function storedField(chunk, binding, facts) {
+  const reads = (binding && binding.reads) || [];
+  if (!reads.length) return null;
+  const { fields } = facts || roleFacts(chunk);
+  const keys = new Set();
+  let stored = 0;
+  for (const read of reads) {
+    const spelling = fields.get(read);
+    if (spelling === undefined) continue;
+    if (spelling && spelling.kind === Kind.String) keys.add(spelling.value);
+    stored += 1;
+  }
+  if (stored !== reads.length || keys.size !== 1) return null;
+  return camel([...keys][0]);
+}
+
+function onlyCalled(chunk, binding, facts) {
+  const reads = (binding && binding.reads) || [];
+  if (!reads.length) return false;
+  const { called } = facts || roleFacts(chunk);
+  let seen = 0;
+  for (const read of reads) if (called.has(read)) seen += 1;
+  return seen === reads.length;
+}
+
+const ACCUMS = { '+': ['count', 'total'], '..': [null, 'text'] };
+
+function seedOperator(node) {
+  const seed = bare(node);
+  if (!seed) return null;
+  if (seed.kind === Kind.Number && seed.value === 0) return '+';
+  if (seed.kind === Kind.String && seed.value === '') return '..';
+  return null;
+}
+
+function accumulated(chunk, binding, operator, facts) {
+  const [ones, many] = ACCUMS[operator];
+  const written = (facts || roleFacts(chunk)).steps.get(binding) || [];
+  let steps = 0;
+  let byOne = 0;
+  let other = 0;
+  for (const value of written) {
+    if (!value || value.kind !== Kind.Binary || value.operator !== operator) {
+      other += 1;
+      continue;
+    }
+    const lhs = bare(value.lhs);
+    const rhs = bare(value.rhs);
+    const added = lhs && lhs.kind === Kind.Name && lhs.binding === binding ? rhs
+      : (rhs && rhs.kind === Kind.Name && rhs.binding === binding ? lhs : null);
+    if (!added) {
+      other += 1;
+      continue;
+    }
+    steps += 1;
+    if (added.kind === Kind.Number && added.value === 1) byOne += 1;
+  }
+  if (!steps || other) return null;
+  return byOne === steps ? ones : many;
+}
+
+function suggest(chunk) {
+  const hints = new Map();
+  const offer = (binding, hint) => {
+    if (!hint || !binding || !isLocalBinding(binding) || hints.has(binding)) return;
+    hints.set(binding, hint);
+  };
+  const named = new Map();
+  walk(chunk, {
+    enter(node) {
+      if (node.kind !== Kind.Assignment) return undefined;
+      const targets = node.targets || [];
+      const expressions = node.expressions || [];
+      if (targets.length !== expressions.length) return undefined;
+      targets.forEach((target, at) => {
+        const field = bare(target);
+        if (keyOf(field) !== 'Name') return;
+        const owner = bare(field.base);
+        if (!owner || owner.kind !== Kind.Name || !isLocalBinding(owner.binding)) return;
+        const hint = spelled(expressions[at]);
+        if (hint && !named.has(owner.binding)) named.set(owner.binding, hint);
+      });
+      return undefined;
+    },
+  });
+  for (const [binding, hint] of named) offer(binding, hint);
+
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.LocalDeclaration) {
+        const expressions = node.expressions || [];
+        if (expressions.length !== (node.names || []).length) return undefined;
+        (node.bindings || []).forEach((binding, at) => {
+          offer(binding, hintOf(expressions[at]));
+        });
+      } else if (node.kind === Kind.Assignment) {
+        const targets = node.targets || [];
+        const expressions = node.expressions || [];
+        if (targets.length !== expressions.length) return undefined;
+        targets.forEach((target, at) => {
+          const stored = bare(target);
+          if (!stored || stored.kind !== Kind.Name) return;
+          offer(stored.binding, hintOf(expressions[at]));
+        });
+      } else if (node.kind === Kind.GenericFor) {
+        const wanted = ITERS[iteratorName(node.expressions)] || [];
+        (node.bindings || []).forEach((binding, at) => offer(binding, wanted[at]));
+      } else if (node.kind === Kind.MethodCall) {
+        const event = connectedEvent(node);
+        const wanted = event && LISTENERS[event];
+        if (!wanted) return undefined;
+        for (const argument of node.args || []) {
+          const listener = bare(argument);
+          if (!listener || listener.kind !== Kind.Function) continue;
+          if ((listener.params || [])[0] === 'self') continue;
+          offer((listener.bindings || [])[0], wanted);
+        }
+      }
+      return undefined;
+    },
+  });
+
+  for (const { word, fn } of optionCallbacks(chunk)) {
+    if ((fn.params || [])[0] !== 'self') offer((fn.bindings || [])[0], 'value');
+    const hint = word === null ? null : camel(word);
+    if (hint) offer(writtenBy(fn), hint);
+  }
+
+  for (const [key, fn] of keyedFunctions(chunk)) {
+    const wanted = METAS[key];
+    if (!wanted) continue;
+    (fn.bindings || []).forEach((binding, at) => offer(binding, wanted[at]));
+  }
+
+  const seeds = new Map();
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.LocalDeclaration) {
+        const expressions = node.expressions || [];
+        if (expressions.length !== (node.names || []).length) return undefined;
+        (node.bindings || []).forEach((binding, at) => {
+          const operator = seedOperator(expressions[at]);
+          if (operator && isLocalBinding(binding)) seeds.set(binding, operator);
+        });
+      }
+      return undefined;
+    },
+  });
+
+  const roles = [];
+  walk(chunk, {
+    enter(node) {
+      const parameter = node.kind === Kind.Function;
+      if (!parameter && node.kind !== Kind.LocalDeclaration) return undefined;
+      for (const binding of node.bindings || []) {
+        if (binding && isLocalBinding(binding) && !hints.has(binding)) {
+          roles.push([binding, parameter]);
+        }
+      }
+      return undefined;
+    },
+  });
+  const facts = roles.length ? roleFacts(chunk) : null;
+  for (const [binding, parameter] of roles) {
+    const field = storedField(chunk, binding, facts);
+    if (field) {
+      offer(binding, field);
+      continue;
+    }
+
+    if (parameter && onlyCalled(chunk, binding, facts)) {
+      offer(binding, 'fn');
+      continue;
+    }
+    const operator = seeds.get(binding);
+    if (operator) offer(binding, accumulated(chunk, binding, operator, facts));
+  }
+  return hints;
+}
+
+function allocator(taken) {
+  return (wanted) => {
+    if (!taken.has(wanted) && isIdentifier(wanted)) {
+      taken.add(wanted);
+      return wanted;
+    }
+    for (let n = 2; n < 100000; n += 1) {
+      const candidate = `${wanted}${n}`;
+      if (!taken.has(candidate) && isIdentifier(candidate)) {
+        taken.add(candidate);
+        return candidate;
+      }
+    }
+    throw new Error('names: candidate pool exhausted');
+  };
+}
+
+module.exports = {
+  spelled,
+  keyOf,
+  entryKey,
+  suggest,
+  allocator,
+};
+
+};
+
+__modules["src/beautify/scopes.js"] = function(module, exports, require) {
+'use strict';
+
+const {
+  Kind, block: makeBlock, doStatement, localDecl, assignment, name: makeName,
+} = require("src/lua/ast.js");
+const { walk } = require("src/lua/walk.js");
+
+const LIMIT = 180;
+const WINDOW = 24;
+const RUN = 12;
+
+function declaredCount(statement) {
+  if (statement.kind === Kind.LocalDeclaration) return statement.names.length;
+  if (statement.kind === Kind.LocalFunction) return 1;
+  return 0;
+}
+
+function declaredBindings(statement) {
+  if (statement.kind === Kind.LocalDeclaration) return statement.bindings || [];
+  if (statement.kind === Kind.LocalFunction && statement.binding) return [statement.binding];
+  return [];
+}
+
+function openedBy(statement) {
+  switch (statement.kind) {
+    case Kind.Do:
+    case Kind.While:
+      return [{ body: statement.body, extra: 0 }];
+    case Kind.Repeat:
+      return [{ body: statement.body, extra: 0, sealed: true }];
+    case Kind.NumericFor:
+      return [{ body: statement.body, extra: 4 }];
+    case Kind.GenericFor:
+      return [{ body: statement.body, extra: statement.variables.length + 3 }];
+    case Kind.If: {
+      const bodies = [{ body: statement.body, extra: 0 }];
+      for (const clause of statement.elseIfs || []) bodies.push({ body: clause.body, extra: 0 });
+      if (statement.elseBody) bodies.push({ body: statement.elseBody, extra: 0 });
+      return bodies;
+    }
+    default:
+      return [];
+  }
+}
+
+function survey(body, base) {
+  const blocks = [];
+  let peak = base;
+  const visit = (current, active, sealed) => {
+    let live = active;
+    let direct = 0;
+    for (const statement of current.statements) {
+      live += declaredCount(statement);
+      direct += declaredCount(statement);
+      if (live > peak) peak = live;
+      for (const opened of openedBy(statement)) visit(opened.body, live + opened.extra, opened.sealed);
+    }
+    blocks.push({ block: current, base: active, direct, sealed });
+  };
+  visit(body, base, false);
+  return { peak, blocks };
+}
+
+function jumps(block) {
+  const stack = [block];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const item of node) stack.push(item);
+      continue;
+    }
+    if (node.kind === Kind.Function) continue;
+    if (node.kind === Kind.Label || node.kind === Kind.Goto) return true;
+    for (const key of Object.keys(node)) {
+      if (key === 'binding' || key === 'bindings') continue;
+      stack.push(node[key]);
+    }
+  }
+  return false;
+}
+
+function sites(block) {
+  const holder = new Map();
+  block.statements.forEach((statement, at) => {
+    walk(statement, {
+      enter(node) {
+        if (!holder.has(node)) holder.set(node, at);
+        return undefined;
+      },
+    });
+  });
+  return holder;
+}
+
+function reachOf(block, holder) {
+  const last = block.statements.length - 1;
+  const reach = new Map();
+  block.statements.forEach((statement, at) => {
+    const bindings = declaredBindings(statement);
+    if (!bindings.length) return;
+    let to = at;
+    for (const binding of bindings) {
+      for (const use of binding.reads.concat(binding.writes)) {
+        const site = holder.get(use);
+        if (site === undefined) to = last;
+        else if (site > to) to = site;
+      }
+    }
+    reach.set(at, to);
+  });
+  return reach;
+}
+
+function ambiguous(block) {
+  const owners = new Map();
+  const note = (label, id) => {
+    let seen = owners.get(label);
+    if (!seen) {
+      seen = new Set();
+      owners.set(label, seen);
+    }
+    seen.add(id);
+  };
+  for (const statement of block.statements) {
+    for (const binding of declaredBindings(statement)) note(binding.name, binding.id);
+  }
+  walk(block, {
+    enter(node) {
+      if (node.kind === Kind.Name && node.binding) note(node.name, node.binding.id);
+      if (node.kind === Kind.LocalDeclaration) {
+        for (const binding of node.bindings || []) note(binding.name, binding.id);
+      }
+      if (node.kind === Kind.LocalFunction && node.binding) note(node.binding.name, node.binding.id);
+      if (node.kind === Kind.Function) {
+        for (const binding of node.bindings || []) note(binding.name, binding.id);
+      }
+      if (node.kind === Kind.GenericFor) {
+        for (const binding of node.bindings || []) note(binding.name, binding.id);
+      }
+      if (node.kind === Kind.NumericFor && node.binding) note(node.binding.name, node.binding.id);
+      return undefined;
+    },
+  });
+  const shared = new Set();
+  for (const [label, seen] of owners) if (seen.size > 1) shared.add(label);
+  return shared;
+}
+
+function boundaries(fixed, reach, lifted, count) {
+  const kept = new Set(fixed);
+  for (let round = 0; round < count; round += 1) {
+    let added = false;
+    let next = count;
+    for (let at = count - 1; at >= 0; at -= 1) {
+      if (kept.has(at)) {
+        next = at;
+        continue;
+      }
+      if (lifted.has(at)) continue;
+      const to = reach.get(at);
+      if (to !== undefined && to >= next) {
+        kept.add(at);
+        next = at;
+        added = true;
+      }
+    }
+    if (!added) break;
+  }
+  return kept;
+}
+
+function runsOf(block, reach, kept, lifted) {
+  const count = block.statements.length;
+  const runs = [];
+  let start = 0;
+  let end = -1;
+  let held = 0;
+  const close = (at) => {
+    if (held && at > start) runs.push([start, at]);
+    start = at + 1;
+    end = at;
+    held = 0;
+  };
+  for (let at = 0; at < count; at += 1) {
+    if (kept.has(at)) {
+      close(at - 1);
+      start = at + 1;
+      end = at;
+      held = 0;
+      continue;
+    }
+    if (!lifted.has(at)) {
+      const to = reach.get(at);
+      if (to !== undefined) {
+        if (to > end) end = to;
+        held += declaredCount(block.statements[at]);
+      }
+    }
+    if (at >= end && at - start + 1 >= RUN) close(at);
+  }
+  close(count - 1);
+  return runs;
+}
+
+function narrow(block, done) {
+  if (done.has(block)) return 0;
+  done.add(block);
+  if (block.statements.length < RUN * 2) return 0;
+  if (jumps(block)) return 0;
+  const holder = sites(block);
+  const reach = reachOf(block, holder);
+  if (!reach.size) return 0;
+  const shared = ambiguous(block);
+  const lifted = new Set();
+  const fixed = new Set();
+  for (const [at, to] of reach) {
+    if (to - at <= WINDOW) continue;
+    const statement = block.statements[at];
+    if (statement.kind !== Kind.LocalDeclaration
+      || statement.names.some((label) => shared.has(label))) {
+      fixed.add(at);
+      continue;
+    }
+    lifted.add(at);
+  }
+  const kept = boundaries(fixed, reach, lifted, block.statements.length);
+  for (const at of kept) lifted.delete(at);
+  const runs = runsOf(block, reach, kept, lifted);
+  if (!runs.length) return 0;
+  const names = [];
+  const rewritten = new Map();
+  for (const at of lifted) {
+    const statement = block.statements[at];
+    for (const label of statement.names) names.push(label);
+    rewritten.set(at, statement.expressions.length
+      ? assignment(statement.names.map((label) => makeName(label)), statement.expressions)
+      : null);
+  }
+  const out = [];
+  if (names.length) out.push(localDecl(names));
+  const put = (list, at) => {
+    const statement = rewritten.has(at) ? rewritten.get(at) : block.statements[at];
+    if (statement) list.push(statement);
+  };
+  let cursor = 0;
+  for (const [from, to] of runs) {
+    while (cursor < from) {
+      put(out, cursor);
+      cursor += 1;
+    }
+    const inner = [];
+    while (cursor <= to) {
+      put(inner, cursor);
+      cursor += 1;
+    }
+    if (inner.length) out.push(doStatement(makeBlock(inner)));
+  }
+  while (cursor < block.statements.length) {
+    put(out, cursor);
+    cursor += 1;
+  }
+  block.statements = out;
+  return runs.length;
+}
+
+function fit(chunk, resolve, limit = LIMIT) {
+  let wrapped = 0;
+  const bodies = [{ body: chunk.body, base: 0 }];
+  walk(chunk, {
+    enter(node) {
+      if (node.kind === Kind.Function) {
+        bodies.push({ body: node.body, base: (node.params || []).length });
+      }
+      return undefined;
+    },
+  });
+  const done = new Set();
+  for (const holder of bodies) {
+    for (let round = 0; round < 16; round += 1) {
+      const seen = survey(holder.body, holder.base);
+      if (seen.peak <= limit) break;
+      const heavy = seen.blocks
+        .filter((one) => !one.sealed && one.direct > 0 && !done.has(one.block))
+        .sort((one, other) => other.direct - one.direct)[0];
+      if (!heavy) break;
+      const moved = narrow(heavy.block, done);
+      if (!moved) continue;
+      wrapped += moved;
+      resolve();
+    }
+  }
+  return wrapped;
+}
+
+module.exports = { fit, survey, LIMIT };
+
+};
+
+__modules["src/beautify/services.js"] = function(module, exports, require) {
+'use strict';
+
+const A = require("src/lua/ast.js");
+const { Kind } = A;
+const { walk, transform, collect } = require("src/lua/walk.js");
+const { isLocalBinding } = require("src/lua/scope.js");
+const { bare } = require("src/util/flow.js");
+
+const METHOD = 'GetService';
+
+function serviceOf(node) {
+  if (!node || node.kind !== Kind.MethodCall || node.method !== METHOD) return null;
+  const args = node.args || [];
+  if (args.length !== 1) return null;
+  const argument = bare(args[0]);
+  if (!argument || argument.kind !== Kind.String) return null;
+  const host = bare(node.base);
+  if (!host || host.kind !== Kind.Name || isLocalBinding(host.binding)) return null;
+  return argument.value;
+}
+
+const isLookup = (node) => serviceOf(bare(node)) !== null;
+
+function declared(statement) {
+  if (!statement || statement.kind !== Kind.LocalDeclaration) return null;
+  if ((statement.names || []).length !== 1) return…"
+ https://p16-flow-file-sign.ibyteimg.com/tos-mya-i-u8dpqn1f20/rc/pc/super_tool/6d185ccadb30415ab84a15a1b90599e1.txt?rcl=20260926105718E56F81E61DD2D7B9B042&rk3s=8e244e95&rrcfp=f512b60b&x-expires=1790996436&x-signature=yJMRCiZOF8cPfBQzzixiPMvCUbU%3D#:~:text=const%20%7B%0A%20%20Client%2C%0A%20%20GatewayIntentBits,process.exit(1)%3B%20%7D)%3B
