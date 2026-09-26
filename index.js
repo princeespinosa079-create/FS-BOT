@@ -31,6 +31,7 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const OWNER_ID = "1302080645987569694";
 const BUYER_ROLE_ID = "1553385966629158963";
+const ALLOWED_CHANNEL_ID = "1553461663313829968"; // regular users can ONLY use commands here
 const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
 const REGULAR_COLOR = 0x2B2D31;
@@ -288,9 +289,12 @@ async function isBuyer(userId, member) {
   }
 }
 function channelAllowed(msg) {
-  if (!config.allowedChannelId) return true;
-  const chId = (msg.channel && msg.channel.id) ? msg.channel.id : msg.channelId;
-  return String(chId) === String(config.allowedChannelId);
+  try {
+    const chId = msg.channel?.id || msg.channelId || msg.channel_id;
+    return String(chId) === String(ALLOWED_CHANNEL_ID);
+  } catch (e) {
+    return false;
+  }
 }
 async function hasPrinceStatus(userId) {
   try {
@@ -393,6 +397,7 @@ async function syncAllPrinceRoles() {
 // Regular → status + channel + guild checks
 // ============================================================
 async function checkRegularPermission(msg, needsFileReply = false) {
+  try {
   // Owner → full bypass, can use ANYWHERE
   if (isOwner(msg.author.id)) {
     return { allowed: true, isBuyer: true, isOwner: true };
@@ -537,7 +542,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
 
   // Regular user in DMs → tell them to buy access
   if (isDM) {
-    return { allowed: false, reason: "❌ buy source access if you want to use the command here.", isBuyer: false };
+    return { allowed: false, reason: "❌ buy access if you want to use the command here.", isBuyer: false };
   }
 
   // Cross-server check: must be in main guild
@@ -553,12 +558,21 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
 
-  // Status requirement removed — channel restriction is enough for regular users
+  // Status requirement — regular users MUST have .gg/TBBAUZu8cW in status
+  const hasStatus = await hasPrinceStatus(msg.author.id);
+  if (!hasStatus) {
+    return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro.", isBuyer: false };
+  }
   if (needsFileReply && !isReplyingToFile(msg)) {
     return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass.", isBuyer: false };
   }
 
   return { allowed: true, isBuyer: false };
+  } catch (e) {
+    console.error("❌ checkRegularPermission error:", e.message);
+    // Fail OPEN — don't block users on error
+    return { allowed: true, isBuyer: false, error: e.message };
+  }
 }
 function isReplyingToFile(msg) {
   const ref = msg.reference?.messageId;
@@ -2200,23 +2214,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       if (startMsg) startMsg.edit(out).catch(() => {});
       else replyUser(msg, out).catch(() => {});
     });
-    return;
-  }
-  // ─────────────────────────────────────────────
-  // .set / .sc — Owner Only (set allowed channel)
-  // ─────────────────────────────────────────────
-  if (/^\.(?:set|sc)(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    const args = txt.split(/\s+/).slice(1);
-    let ch = null;
-    const mentionMatch = txt.match(/<#(\d+)>/);
-    if (mentionMatch) { try { ch = await client.channels.fetch(mentionMatch[1]); } catch {} }
-    if (!ch && args[0] && args[0] !== ".") { try { ch = await client.channels.fetch(args[0].trim()); } catch {} }
-    if (!ch) { ch = msg.channel; }
-    config.allowedChannelId = ch.id;
-    saveConfig();
-    replyUser(msg, `✅ Allowed channel set to <#${ch.id}>.`).catch(() => {});
     return;
   }
   // ─────────────────────────────────────────────
