@@ -861,18 +861,8 @@ function cleanLuaScript(text) {
 
   var cleaned = [];
 
-  // IP logger / grabber domains — ONLY these get lines deleted
-  var ipGrabberDomains = [
-    "iplogger.org","iplogger.com","grabify.link","grabify.xyz","nipiscan.com",
-    "spiderip.com","blasze.tk","blasze.com","ip-api.com","ipify.org",
-    "icanhazip.com","ifconfig.co","ifconfig.me","whatismyip.com","ipinfo.io",
-    "ipgeolocation.io","freegeoip.net","freegeoip.app","checkip.amazonaws.com",
-    "bit.ly","tinyurl.com","is.gd","t.co","ow.ly","rb.gy","cutt.ly",
-    "bc.vc","adf.ly","linkvertise.com","shorte.st","bcvc.one",
-    "pornhub.com","discord.media","iplogger","grabify","logmyip","ipgrabber",
-    "stealip","ip-logger","ipgrab","iplog","logger","grabip","trackip",
-    "ip-tracker","ip-trace","ipgrabbed","iplogged","ip-logger","ip-grabber"
-  ];
+  // IP logger/grabber domains
+  var ipGrabberDomains = ["iplogger.org","iplogger.com","grabify.link","grabify.xyz","nipiscan.com","spiderip.com","blasze.tk","blasze.com","ip-api.com","ipify.org","icanhazip.com","ifconfig.co","ifconfig.me","whatismyip.com","ipinfo.io","ipgeolocation.io","freegeoip.net","freegeoip.app","checkip.amazonaws.com","bit.ly","tinyurl.com","is.gd","t.co","ow.ly","rb.gy","cutt.ly","bc.vc","adf.ly","linkvertise.com","shorte.st","bcvc.one","pornhub.com","discord.media","iplogger","grabify","logmyip","ipgrabber","stealip","ip-logger","ipgrab","iplog","logger","grabip","trackip","ip-tracker","ip-trace","ipgrabbed","iplogged","ip-logger","ip-grabber"];
 
   function isGrabber(text) {
     if (!text) return false;
@@ -887,6 +877,7 @@ function cleanLuaScript(text) {
     try { if (/discord\.(gg|com\/invite)\//i.test(text)) return true; } catch {}
     try { if (/files\.catbox\.moe\//i.test(text)) return true; } catch {}
     try { if (/rbxassetid:\/\/\d+/i.test(text)) return true; } catch {}
+    try { if (/rbxthumb:\/\//i.test(text)) return true; } catch {}
     return false;
   }
 
@@ -914,15 +905,50 @@ function cleanLuaScript(text) {
     return false;
   }
 
-  // Lua keywords to detect if line is actual Lua code
-  var luaKw = ["local","function","if","then","end","return","for","while","repeat","until","do","print","warn","game","workspace","script","Players","Instance","Vector3","CFrame","Color3","UDim2","Enum","task","spawn","pcall","xpcall","require","loadstring","getgenv","gethui","hookfunction","hookmetamethod","getrawmetatable","setreadonly","getnamecallmethod","getconnections","firesignal","fireclickdetector","getobjects","isnetworkowner","setclipboard","writefile","readfile","listfiles","isfolder","makefolder","delfolder","delfile","loadfile","dofile"];
+  // Junk/obfuscation patterns (Luraph-style)
+  var junkPatterns = [
+    /["'][A-Za-z0-9]{2,6}["']\s*\/\s*\(\s*\d+\s*-\s*["'][A-Za-z0-9]{3,8}["']\s*\^\s*\d+/,
+    /return\s+["'][A-Za-z0-9]{2,6}["']\s*\/\s*\(/,
+    /local\s+[a-z]\d*\s*=\s*random\(/,
+    /local\s+[a-z]\d*\s*=\s*math\.random\(/,
+    /local\s+[a-z]\d*\s*=\s*gmatch/,
+    /local\s+_\s*=\s*table\.concat/,
+    /local\s+[a-z]\d*\s*=\s*unpack/,
+    /local\s+[a-z]\d*\s*=\s*table\.unpack/,
+    /error\(["'][A-Za-z0-9]+["']\s*,\s*0\)/,
+    /You Are Lost/,
+    /local\s+[a-z]+\d*\s*=\s*random\(\d+,\s*\d+\)\s*==\s*1/,
+    /\^\s*\d{5,}/,
+    /:\(%d*\):/,
+    // More aggressive: simple junk aliases
+    /^\s*local\s+[a-z]\d*\s*=\s*[a-z]+\.?[a-z]*\d*\s*$/,  // local v1 = string.gmatch
+    /^\s*local\s+[a-z]\d*\s*=\s*(true|false|0|nil|{})\s*$/,  // local u2 = true
+    /^\s*local\s+[a-z]\d*\s*=\s*[a-z]+\d*\s*or\s+[a-z]+\.?[a-z]*\d*/,  // local v1 = unpack or table.unpack
+    /local\s+[a-z]\d*\s*=\s*tonumber\(.*tostring/,  // local num = tonumber(v5(tostring(...)))
+    /tostring\(result\)/,  // junk parsing
+    /local\s+[a-z]\d*\s*=\s*\{\s*pcall\(function/,  // local t2 = { pcall(function()
+    /if\s+not\s+pcall\(function\(\)\s*$/,  // if not pcall(function()
+    /if\s+[a-z]\d*\s+then\s*$/,  // if v19 then
+    /[a-z]\d*\s*=\s*[a-z]\d*\s*and\s+[a-z]\d*/,  // u2 = u2 and t2[1]
+    /[a-z]\d*\s*=\s*\([a-z]\d*\s*\+\s*[a-z]\d*\)\s*%\s*256/,  // n1 = (n1 + t2[...]) % 256
+    /repeat\s+task\.wait\(\)\s+until\s+game:IsLoaded\(\)/,  // keep this, it's real
+  ];
+
+  function isJunkLine(text) {
+    if (!text) return false;
+    for (var i = 0; i < junkPatterns.length; i++) {
+      try { if (junkPatterns[i].test(text)) return true; } catch {}
+    }
+    return false;
+  }
+
+  var luaKw = ["local","function","if","then","end","return","for","while","repeat","until","do","print","warn","game","workspace","script","Players","Instance","Vector3","CFrame","Color3","UDim2","Enum","task","spawn","pcall","xpcall","require","loadstring","getgenv","gethui","hookfunction","hookmetamethod","getrawmetatable","setreadonly","getnamecallmethod","getconnections","firesignal","fireclickdetector","getobjects","isnetworkowner","setclipboard","writefile","readfile","listfiles","isfolder","makefolder","delfolder","delfile","loadfile","dofile","TweenService","UserInputService","RunService","ReplicatedStorage","StarterGui","CoreGui","Lighting","TeleportService","MarketplaceService","HttpService","InsertService","Selection","RbxUtility","MegaMorph","Valkyrie","Synapse","ScriptWare","KRNL","Fluxus","Delta","Hydrogen","Codex","Wave"];
 
   function isLuaLine(text) {
     if (!text) return false;
     for (var i = 0; i < luaKw.length; i++) {
       if (text.indexOf(luaKw[i]) !== -1) return true;
     }
-    // Also check for common Lua patterns
     if (/=|==|~=|<=|>=|<|>/.test(text)) return true;
     if (/\(|\)|\{|\}/.test(text)) return true;
     if (/local\s+\w+/.test(text)) return true;
@@ -943,23 +969,23 @@ function cleanLuaScript(text) {
       if (!isSafeUrl(t)) continue;
     }
 
-    // 2. DELETE line if it's an IP logger/grabber
+    // 2. DELETE IP logger/grabber lines
     if (isGrabber(t)) continue;
 
-    // 3. DELETE line if it's a script loader
+    // 3. DELETE script loader lines
     if (hasLoader(t)) continue;
 
-    // 4. DELETE scrambled/garbage lines that aren't Lua (short random strings)
+    // 4. DELETE junk/obfuscation lines (anti-tamper, Luraph-style)
+    if (isJunkLine(t)) continue;
+
+    // 5. DELETE scrambled/garbage (not Lua)
     if (!isLuaLine(t) && t.length > 3) {
-      // Check if it's just random garbage (no spaces, high entropy)
       if (!/\s/.test(t) && t.length > 20 && !/^https?:\/\//.test(t)) {
-        // Long unbroken string with no spaces = likely garbage/scramble
-        // But keep if it's a string literal or safe URL
         if (!isSafeUrl(t) && !/^["'].*["']$/.test(t)) continue;
       }
     }
 
-    // 5. Remove inline comments (preserve indent)
+    // 6. Remove inline comments (preserve indent)
     var inStrS = false, inStrD = false;
     var cutAt = -1;
     for (var ci = 0; ci < originalLine.length - 1; ci++) {
@@ -973,20 +999,20 @@ function cleanLuaScript(text) {
     if (cutAt >= 0) lineToKeep = originalLine.substring(0, cutAt).replace(/\s+$/, "");
     if (!lineToKeep.trim()) continue;
 
-    // 6. Remove any remaining loader code inline
+    // 7. Remove any remaining loader code inline
     for (var pi = 0; pi < loaderPatterns.length; pi++) {
       try { lineToKeep = lineToKeep.replace(loaderPatterns[pi], ""); } catch {}
     }
     if (!lineToKeep.trim() || lineToKeep.trim().length < 3) continue;
     if (/^[\s();,{}]+$/.test(lineToKeep.trim())) continue;
 
-    // 7. Change ALL print/warn to "leak by" message
+    // 8. Change ALL print/warn to leak message
     try {
       lineToKeep = lineToKeep.replace(/\bprint\s*\([^)]*\)/g, 'print("leak by https://discord.gg/TBBAUZu8cW")');
       lineToKeep = lineToKeep.replace(/\bwarn\s*\([^)]*\)/g, 'print("leak by https://discord.gg/TBBAUZu8cW")');
     } catch {}
 
-    // 8. Replace Discord invites
+    // 9. Replace Discord invites
     try {
       lineToKeep = lineToKeep.replace(/(https?:\/\/)?discord\.(gg|com\/invite)\/[a-zA-Z0-9-]+/gi, "https://discord.gg/TBBAUZu8cW");
     } catch {}
@@ -1823,6 +1849,7 @@ client.on("messageCreate", async msg => {
           )
           .setFooter({ text: `Suspicion score: ${score}/100+` });
         
+        if (score >= 25) { await applyAltRole(targetMember); }
         replyUser(msg, { embeds: [userEmbed] }).catch(() => {});
         return;
       } catch (e) {
@@ -1900,6 +1927,7 @@ client.on("messageCreate", async msg => {
             ageDays,
             created
           });
+          await applyAltRole(member);
         }
       }
       
