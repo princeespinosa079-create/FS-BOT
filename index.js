@@ -474,6 +474,35 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
     return;
   }
 
+
+  // .removekey — Owner Only (removes key + strips buyer role)
+  if (/^\.removekey(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const key = txt.replace(/^\.removekey\s+/i, "").trim();
+    if (!key) { replyUser(msg, "❌ usage: \`.removekey <key>\`").catch(() => {}); return; }
+    const rec = keyStore.keys.find(k => k.key === key);
+    if (!rec) { replyUser(msg, "❌ key not found.").catch(() => {}); return; }
+    const redeemedBy = rec.redeemedBy;
+    // Remove from keyStore
+    keyStore.keys = keyStore.keys.filter(k => k.key !== key);
+    const tmp = `${KEYS_FILE}.tmp`;
+    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
+    // Strip buyer role from user if redeemed
+    if (redeemedBy) {
+      try {
+        const g = await client.guilds.fetch(GUILD_ID);
+        const m = await g.members.fetch(redeemedBy);
+        await m.roles.remove(BUYER_ROLE_ID);
+        replyUser(msg, `✅ Key removed! Buyer role stripped from <@${redeemedBy}>.`).catch(() => {});
+      } catch (e) {
+        replyUser(msg, `✅ Key removed! (Failed to strip role: ${e.message.slice(0,80)})`).catch(() => {});
+      }
+    } else {
+      replyUser(msg, `✅ Key removed! (was not redeemed yet)`).catch(() => {});
+    }
+    return;
+  }
+
   // .redeem / .red — EVERYONE can use
   if (/^\.redeem(?:\s|$)|^\.red(?:\s|$)/i.test(txt)) {
     const key = txt.replace(/^\.redeem\s+|^\.red\s+/i, "").trim();
@@ -1869,6 +1898,35 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
     const timeText = durMs === null ? "♾️ INFINITE" : `${timeStr}`;
     const keyList = generatedKeys.map(k => `\`${k}\``).join("\n");
     replyUser(msg, `✅ Generated ${amount} key(s) — ${timeText} expiry:\n${keyList}`).catch(() => {});
+    return;
+  }
+
+
+  // .removekey — Owner Only (removes key + strips buyer role)
+  if (/^\.removekey(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const key = txt.replace(/^\.removekey\s+/i, "").trim();
+    if (!key) { replyUser(msg, "❌ usage: \`.removekey <key>\`").catch(() => {}); return; }
+    const rec = keyStore.keys.find(k => k.key === key);
+    if (!rec) { replyUser(msg, "❌ key not found.").catch(() => {}); return; }
+    const redeemedBy = rec.redeemedBy;
+    // Remove from keyStore
+    keyStore.keys = keyStore.keys.filter(k => k.key !== key);
+    const tmp = `${KEYS_FILE}.tmp`;
+    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
+    // Strip buyer role from user if redeemed
+    if (redeemedBy) {
+      try {
+        const g = await client.guilds.fetch(GUILD_ID);
+        const m = await g.members.fetch(redeemedBy);
+        await m.roles.remove(BUYER_ROLE_ID);
+        replyUser(msg, `✅ Key removed! Buyer role stripped from <@${redeemedBy}>.`).catch(() => {});
+      } catch (e) {
+        replyUser(msg, `✅ Key removed! (Failed to strip role: ${e.message.slice(0,80)})`).catch(() => {});
+      }
+    } else {
+      replyUser(msg, `✅ Key removed! (was not redeemed yet)`).catch(() => {});
+    }
     return;
   }
 
