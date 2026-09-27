@@ -34,7 +34,7 @@ const BUYER_ROLE_ID = "1553385966629158963";
 const ALLOWED_CHANNEL_ID = "1553461663313829968"; // regular users can ONLY use commands here
 const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
-const REGULAR_COLOR = 0x808080; // gray
+const REGULAR_COLOR = 0x2B2D31; // black gray
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
@@ -190,6 +190,7 @@ const whsWebhookUrls = new Map(); // messageId -> webhookUrl
 const whsPanelOwners = new Map(); // messageId -> authorId
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
+const renamePanels = new Map(); // messageId -> { authorId, fileUrl, fileName, isBuyerUser }
 const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false;
 let lastReady = Date.now();
@@ -1055,6 +1056,40 @@ function extractFilesFromZip(zipBuffer) {
   return extractedFiles;
 }
 // ============================================================
+// VARIABLE RENAMER — renames local variables & params
+// ============================================================
+function renameVariables(source) {
+  if (!source || typeof source !== "string") return source;
+  const reserved = new Set(["string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber","loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error","warn","print","select","unpack","require","game","workspace","script","bit","bit32","true","false","nil","and","or","not","if","then","else","elseif","end","for","while","do","repeat","until","return","function","local","in","break","self"]);
+  const varMap = new Map();
+  const randName = () => {
+    const chars = "abcdefghijklmnopqrstuvwxyz";
+    let n = "_";
+    for (let i = 0; i < 5; i++) n += chars.charAt(Math.floor(Math.random() * chars.length));
+    return n;
+  };
+  const localRegex = /\blocal\s+(?:function\s+)?([a-zA-Z_]\w*)/g;
+  let m;
+  while ((m = localRegex.exec(source)) !== null) {
+    const name = m[1];
+    if (!reserved.has(name) && !varMap.has(name)) varMap.set(name, randName());
+  }
+  const paramRegex = /function[\s\w.:]*\(\s*([^)]*)\)/g;
+  while ((m = paramRegex.exec(source)) !== null) {
+    const params = m[1].split(",").map(p => p.trim().split("=")[0].trim()).filter(Boolean);
+    for (const p of params) {
+      if (/^[a-zA-Z_]\w*$/.test(p) && !reserved.has(p) && !varMap.has(p)) varMap.set(p, randName());
+    }
+  }
+  let result = source;
+  const sorted = [...varMap.entries()].sort((a, b) => b[0].length - a[0].length);
+  for (const [oldName, newName] of sorted) {
+    const re = new RegExp("\\b" + oldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "g");
+    result = result.replace(re, newName);
+  }
+  return result;
+}
+// ============================================================
 // LUA SCRIPT CLEANER
 // ============================================================
 function cleanLuaScript(text) {
@@ -1524,6 +1559,96 @@ const helpSessions = new Map();
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
   const uid = interaction.user.id;
+  // ─── RENAME MODE BUTTONS ───
+  if (interaction.customId?.startsWith("rename_")) {
+    const parts = interaction.customId.split("_");
+    const mode = parts[1]; // "var" or "readable"
+    const ownerId = parts.slice(2).join("_");
+    if (interaction.user.id !== ownerId) {
+      return interaction.reply({ content: "❌ not yours, bro.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const ctx = renamePanels.get(interaction.message.id);
+    if (!ctx) {
+      return interaction.reply({ content: "⏳ panel expired, run `.rename` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    renamePanels.delete(interaction.message.id);
+    
+    // Edit to loading embed
+    const loadingEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("Renaming...")
+      .setDescription("⏳ Processing...");
+    await interaction.update({ embeds: [loadingEmbed], components: [] }).catch(() => {});
+    
+    // Process in background
+    (async () => {
+      try {
+        const res = await fetch(ctx.fileUrl);
+        const text = await res.text();
+        const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
+        const foundUrls = text.match(urlRegex) || [];
+        
+        let finalOutput;
+        if (mode === "var") {
+          finalOutput = renameVariables(text);
+        } else {
+          finalOutput = cleanLuaScript(text);
+        }
+        
+        // Preview (5 lines / 50 words max)
+        const allLines = finalOutput.split("\n");
+        let previewWords = [];
+        let wordCount = 0, lineCount = 0;
+        for (const line of allLines) {
+          if (lineCount >= 5 || wordCount >= 50) break;
+          const words = line.trim().split(/\s+/).filter(Boolean);
+          for (const w of words) {
+            if (wordCount >= 50) break;
+            previewWords.push(w);
+            wordCount++;
+          }
+          previewWords.push("\n");
+          lineCount++;
+        }
+        let previewText = previewWords.join(" ").replace(/ \n /g, "\n").trim();
+        if (previewText.endsWith("\n")) previewText = previewText.slice(0, -1);
+        if (wordCount >= 50 || lineCount >= 5) previewText += "\n...";
+        if (previewText.length > 1000) previewText = previewText.slice(0, 1000) + "\n...";
+        
+        let description = "```lua\n" + previewText + "\n```";
+        if (foundUrls.length > 0) {
+          const uniqueUrls = [...new Set(foundUrls)];
+          const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
+          let urlSection = `\n\n**URL Found:**\n${urlList}`;
+          if (uniqueUrls.length > 10) urlSection += `\n- ...and ${uniqueUrls.length - 10} more`;
+          description += urlSection.slice(0, 800);
+        }
+        
+        const randChars = "abcdefghijklmnopqrstuvwxyz";
+        let outputName = "";
+        for (let i = 0; i < 20; i++) outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
+        outputName += ".lua";
+        
+        const resultEmbed = new EmbedBuilder()
+          .setColor(REGULAR_COLOR)
+          .setTitle("File Preview")
+          .setDescription(description)
+          .setFooter({ text: `Request by @${interaction.user.username}│Clean & Fixed`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
+        const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput, "utf-8"), { name: outputName });
+        
+        await interaction.message.delete().catch(() => {});
+        await interaction.channel.send({
+          content: `<@${interaction.user.id}> Here you go twin!`,
+          files: [fixedFile],
+          embeds: [resultEmbed]
+        }).catch(() => {});
+      } catch (e) {
+        await interaction.message.delete().catch(() => {});
+        interaction.channel.send(`❌ error: ${e.message.slice(0, 150)}`).catch(() => {});
+      }
+    })();
+    return;
+  }
   // ─── HELP PAGINATION BUTTONS ───
   if (interaction.customId?.startsWith("help_")) {
     const parts = interaction.customId.split("_");
@@ -2883,7 +3008,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // .rename / .rn
+  // .rename / .rn — mode selection panel
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
@@ -2903,92 +3028,21 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const file = attachments[0];
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
-    const workingEmbed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Renaming...")
-      .setDescription("⏳ Processing...")
-      .setFooter({ text: timeFooter });
-    const startTime = Date.now();
-    const sentMsg = await replyUser(msg, { embeds: [workingEmbed] }).catch(() => {});
-    // NO DELAY — FAST response
-    (async () => {
-      try {
-        const res = await fetch(file.url);
-        const text = await res.text();
-        // Extract URLs from original file content
-        const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
-        const foundUrls = text.match(urlRegex) || [];
-        const cleaned = cleanLuaScript(text);
-        
-        // Stats
-        const originalLines = text.split("\n").length;
-        const cleanedLines = cleaned.split("\n").length;
-        const linesRemoved = originalLines - cleanedLines;
-        const originalSize = Buffer.byteLength(text, "utf8");
-        const cleanedSize = Buffer.byteLength(cleaned, "utf8");
-        
-        // Filename: 20 random chars + .lua
-        const randChars = "abcdefghijklmnopqrstuvwxyz";
-        let outputName = "";
-        for (let i = 0; i < 20; i++) {
-          outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
-        }
-        outputName += ".lua";
-        
-        const finalOutput = cleaned;
-        
-        const allLines = cleaned.split("\n");
-        // Limit preview to MAX 50 words (or 5 lines, whichever comes first)
-        let previewWords = [];
-        let wordCount = 0;
-        let lineCount = 0;
-        for (const line of allLines) {
-          if (lineCount >= 5 || wordCount >= 50) break;
-          const words = line.trim().split(/\s+/).filter(Boolean);
-          for (const w of words) {
-            if (wordCount >= 50) break;
-            previewWords.push(w);
-            wordCount++;
-          }
-          previewWords.push("\n");
-          lineCount++;
-        }
-        let previewText = previewWords.join(" ").replace(/ \n /g, "\n").trim();
-        if (previewText.endsWith("\n")) previewText = previewText.slice(0, -1);
-        if (wordCount >= 50 || lineCount >= 5) previewText += "\n...";
-        // Safety truncation
-        if (previewText.length > 1000) previewText = previewText.slice(0, 1000) + "\n...";
-        
-        // Build description with URL section if links found
-        let description = `CODE:\n\`\`\`lua\n${previewText}\n\`\`\``;
-        if (foundUrls.length > 0) {
-          const uniqueUrls = [...new Set(foundUrls)];
-          const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
-          let urlSection = `\n\n**URL Found:**\n${urlList}`;
-          if (uniqueUrls.length > 10) urlSection += `\n- ...and ${uniqueUrls.length - 10} more`;
-          description += urlSection.slice(0, 800);
-        }
-        
-        const avatarURL = msg.author.displayAvatarURL({ dynamic: true, size: 128 });
-        const resultEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("File Preview")
-          .setDescription(description)
-          .setFooter({ text: `Request by @${msg.author.username}│Clean & Fixed`, iconURL: avatarURL });
-        const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput), { name: outputName });
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        const elapsed = Date.now() - startTime;
-        await msg.channel.send({
-          content: `<@${msg.author.id}> readable and executable`,
-          files: [fixedFile],
-          embeds: [resultEmbed]
-        }).catch(() => {});
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
-      }
-    })();
+    
+    // Mode selection panel
+    const panelEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("Choose Rename Mode")
+      .setDescription("Select how you want to rename the code:");
+    const panelRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`rename_var_${msg.author.id}`).setLabel("Variable Renamer").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`rename_readable_${msg.author.id}`).setLabel("Readable & Executable").setStyle(ButtonStyle.Primary)
+    );
+    const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [panelRow] }).catch(() => {});
+    if (panelMsg) {
+      renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, isBuyerUser });
+      setTimeout(() => renamePanels.delete(panelMsg.id), 30 * 60 * 1000);
+    }
     return;
   }
   // .get
