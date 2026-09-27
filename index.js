@@ -34,7 +34,7 @@ const BUYER_ROLE_ID = "1553385966629158963";
 const ALLOWED_CHANNEL_ID = "1553461663313829968"; // regular users can ONLY use commands here
 const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
-const REGULAR_COLOR = 0x000000; // black
+const REGULAR_COLOR = 0x808080; // gray
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
@@ -1616,10 +1616,6 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       return interaction.reply({ content: "❌ not yours, do `.find` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     const menu = paginationMenus.get(uid);
-    if (Date.now() - menu.createdAt > EXPIRY_MS) {
-      paginationMenus.delete(uid);
-      return interaction.reply({ content: "❌ not yours, do `.find` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
     if (interaction.message.id !== menu.messageId) return;
     if (interaction.user.id !== menu.authorId) {
       return interaction.reply({ content: "❌ not yours, do `.find` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -2965,7 +2961,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         if (previewText.length > 1000) previewText = previewText.slice(0, 1000) + "\n...";
         
         // Build description with URL section if links found
-        let description = `\`\`\`lua\n${previewText}\n\`\`\``;
+        let description = `CODE:\n\`\`\`lua\n${previewText}\n\`\`\``;
         if (foundUrls.length > 0) {
           const uniqueUrls = [...new Set(foundUrls)];
           const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
@@ -2984,7 +2980,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         if (sentMsg) await sentMsg.delete().catch(() => {});
         const elapsed = Date.now() - startTime;
         await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**`,
+          content: `<@${msg.author.id}> readable and executable`,
           files: [fixedFile],
           embeds: [resultEmbed]
         }).catch(() => {});
