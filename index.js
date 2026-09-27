@@ -34,7 +34,7 @@ const BUYER_ROLE_ID = "1553385966629158963";
 const ALLOWED_CHANNEL_ID = "1553461663313829968"; // regular users can ONLY use commands here
 const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
-const REGULAR_COLOR = 0x2B2D31;
+const REGULAR_COLOR = 0x000000; // black
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
@@ -130,6 +130,64 @@ function cleanupExpiredKeys() {
 setInterval(cleanupExpiredKeys, 10 * 1000);
 
 // ============================================================
+// BALANCE SYSTEM (Tokens for regular users)
+// ============================================================
+const BALANCE_FILE = path.join(DATA_DIR, "balance.json");
+let balanceStore = readJSON(BALANCE_FILE, { users: {} });
+if (!balanceStore || typeof balanceStore !== "object") balanceStore = { users: {} };
+if (!balanceStore.users) balanceStore.users = {};
+const DAILY_BALANCE = 10;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function saveBalance() {
+  const tmp = `${BALANCE_FILE}.tmp`;
+  try { fs.writeFileSync(tmp, JSON.stringify(balanceStore, null, 2)); fs.renameSync(tmp, BALANCE_FILE); } catch {}
+}
+function getBalance(userId) {
+  const now = Date.now();
+  let u = balanceStore.users[userId];
+  if (!u) {
+    u = { balance: DAILY_BALANCE, lastReset: now };
+    balanceStore.users[userId] = u;
+    saveBalance();
+  }
+  // Daily reset
+  if (now - u.lastReset >= DAY_MS) {
+    u.balance = DAILY_BALANCE;
+    u.lastReset = now;
+    saveBalance();
+  }
+  return u.balance;
+}
+function getTimeUntilReset(userId) {
+  const u = balanceStore.users[userId];
+  if (!u) return "24h 0m";
+  const elapsed = Date.now() - u.lastReset;
+  const remaining = Math.max(0, DAY_MS - elapsed);
+  const h = Math.floor(remaining / 3600000);
+  const m = Math.floor((remaining % 3600000) / 60000);
+  return `${h}h ${m}m`;
+}
+function deductBalance(userId) {
+  const u = balanceStore.users[userId];
+  if (!u) return DAILY_BALANCE - 1;
+  u.balance = Math.max(0, u.balance - 1);
+  saveBalance();
+  return u.balance;
+}
+function addBalance(userId, amount) {
+  let u = balanceStore.users[userId];
+  if (!u) {
+    u = { balance: DAILY_BALANCE, lastReset: Date.now() };
+    balanceStore.users[userId] = u;
+  }
+  u.balance += amount;
+  saveBalance();
+  return u.balance;
+}
+
+
+// ============================================================
 // COOLDOWN TRACKER
 // ============================================================
 const rnCooldown = new Map();
@@ -140,7 +198,7 @@ const COOLDOWNS = {
   upload: 60 * 60,      // 1 hour
   find: 15,             // 15 seconds
   get: 15,              // 15 seconds
-  rename: 5 * 60,       // 5 minutes
+  rename: 5,              // 5 seconds
   dl: 10 * 60,          // 10 minutes
   et: 30 * 60,          // 30 minutes
   obf: 60 * 60,         // 1 hour
@@ -410,6 +468,47 @@ async function checkRegularPermission(msg, needsFileReply = false) {
 
   const isDM = !msg.guild;
 
+
+  // .coinflip — regular users can win/lose tokens
+  if (/^\.coinflip(?:\s|$)/i.test(txt)) {
+    const isBuyerUser = isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member);
+    if (isBuyerUser) { replyUser(msg, "❌ premium users have unlimited balance, no need to gamble.").catch(() => {}); return; }
+    const arg = txt.replace(/^\.coinflip\s+/i, "").trim();
+    let bet = 1;
+    if (arg && /^\d+$/.test(arg)) bet = Math.max(1, Math.min(10, parseInt(arg)));
+    const currentBal = getBalance(msg.author.id);
+    if (currentBal < bet) { replyUser(msg, `❌ you only have ${currentBal} tokens, can't bet ${bet}.`).catch(() => {}); return; }
+    // 40% chance to win (small chance as requested)
+    const win = Math.random() < 0.4;
+    if (win) {
+      addBalance(msg.author.id, bet);
+      const newBal = getBalance(msg.author.id);
+      replyUser(msg, `🎰 **You won!** +${bet} tokens\n-# You have ${newBal} balance left.`).catch(() => {});
+    } else {
+      for (let i = 0; i < bet; i++) deductBalance(msg.author.id);
+      const newBal = getBalance(msg.author.id);
+      replyUser(msg, `🎰 **You lost!** -${bet} tokens\n-# You have ${newBal} balance left.`).catch(() => {});
+    }
+    return;
+  }
+
+  // .give @user <amount> — give balance to another user (everyone)
+  if (/^\.give(?:\s|$)/i.test(txt)) {
+    const mention = msg.mentions.users.first();
+    const args = txt.split(/\s+/);
+    const amount = parseInt(args[args.length - 1]) || 0;
+    if (!mention || amount <= 0) { replyUser(msg, "❌ usage: \`.give @user <amount>\`").catch(() => {}); return; }
+    if (mention.id === msg.author.id) { replyUser(msg, "❌ can't give to yourself, dumbass.").catch(() => {}); return; }
+    const myBal = getBalance(msg.author.id);
+    if (myBal < amount) { replyUser(msg, `❌ you only have ${myBal} tokens.`).catch(() => {}); return; }
+    // Deduct from giver, add to receiver
+    for (let i = 0; i < amount; i++) deductBalance(msg.author.id);
+    addBalance(mention.id, amount);
+    const newBal = getBalance(msg.author.id);
+    replyUser(msg, `✅ Gave ${amount} tokens to <@${mention.id}>!\n-# You have ${newBal} balance left.`).catch(() => {});
+    return;
+  }
+
   // .help — works EVERYWHERE for EVERYONE
   if (/^\.help(?:\s|$)/i.test(txt)) {
     const page = 0;
@@ -521,7 +620,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
     const rec = keyStore.keys.find(k => k.key === key);
     if (!rec) { replyUser(msg, "❌ Invalid key.").catch(() => {}); return; }
     if (rec.redeemedBy || (rec.expiresAt !== null && rec.expiresAt < Date.now())) {
-      replyUser(msg, "❌ this key was already redeem or expired.").catch(() => {});
+      replyUser(msg, "❌ this key was already redeem.").catch(() => {});
       return;
     }
     rec.redeemedBy = msg.author.id;
@@ -535,7 +634,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       replyUser(msg, "❌ Key saved but failed to assign role: " + e.message).catch(() => {});
       return;
     }
-    replyUser(msg, "✅ Key redeemed! Buyer role applied.").catch(() => {});
+    replyUser(msg, "✅ key redeemed successfully.").catch(() => {});
     return;
   }
 
@@ -567,7 +666,19 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
     return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass.", isBuyer: false };
   }
 
-  return { allowed: true, isBuyer: false };
+  // Balance check — regular users only (buyers/owner unlimited)
+  const bal = getBalance(msg.author.id);
+  if (bal <= 0) {
+    const resetTime = getTimeUntilReset(msg.author.id);
+    const errEmbed = new EmbedBuilder()
+      .setColor(0xFF0000)
+      .setTitle("Error")
+      .setDescription(`You have no available tokens.\nTokens reset in: ${resetTime}`);
+    return { allowed: false, noBalance: true, errEmbed, resetTime, isBuyer: false };
+  }
+  // Deduct 1 balance
+  const newBal = deductBalance(msg.author.id);
+  return { allowed: true, isBuyer: false, balance: newBal };
   } catch (e) {
     console.error("❌ checkRegularPermission error:", e.message);
     // Fail OPEN — don't block users on error
@@ -1500,7 +1611,11 @@ const helpPages = [
 
 **\`.delwh\`** Delete a webhook using its URL.
 
-**\`.whs\`** Webhook Spammer — Raid a Webhook using its URL.`
+**\`.whs\`** Webhook Spammer — Raid a Webhook using its URL.
+
+**\`.coinflip\`** Gamble your tokens — win or lose!
+
+**\`.give\`** Give tokens to another user.`
     ),
   new EmbedBuilder()
     .setTitle("Help Menu")
@@ -1509,7 +1624,8 @@ const helpPages = [
 `**\`.redeem\`** [\`.red\`] - Redeem a premium key.
 
 > Premium users can use all commands in DMs.
-> Premium users bypass cooldown.`
+> Premium users bypass cooldown.
+> Premium users have unlimited balance.`
     )
 ];
 const helpSessions = new Map();
@@ -1594,7 +1710,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     return `**${idx}.** ${s.member.user.tag} <@${s.member.id}>\n   ${riskLevel} | Score: \`${s.score}\` | Created: ${createdDate}\n   ${s.flags.join(" │ ")}`;
   });
   const altEmbed = new EmbedBuilder()
-    .setColor(0x2B2D31)
+    .setColor(REGULAR_COLOR)
     .setTitle(`🔍 Suspicious Accounts — ${altMenu.results.length} found`)
     .setDescription(altLines.join("\n\n"))
     .setFooter({ text: `Page ${altMenu.page}/${altMenu.totalPages} │ ${altMenu.guildName} │ ${altMenu.memberCount} total members` });
@@ -1642,9 +1758,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
   }
   // ─── WHS START BUTTON ───
   if (interaction.customId === "whs_start") {
-    if (!interaction.member) {
-      return interaction.reply({ content: "❌ use in server.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
+    // Works in DMs and servers — no member check needed
     // Only the person who ran .whs can click Start
     const ownerId = whsPanelOwners.get(interaction.message.id);
     if (ownerId && interaction.user.id !== ownerId) {
@@ -1735,7 +1849,7 @@ client.on("interactionCreate", async interaction => {
     }
     
     const resultEmbed = new EmbedBuilder()
-      .setColor(0x2B2D31)
+      .setColor(REGULAR_COLOR)
       .setTitle("Webhook Raid Complete")
       .setDescription(`✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n🌐 **Status:** Done`)
       .setFooter({ text: `Request by @${interaction.user.username}│Webhook Spammer`, iconURL: avatarURL });
@@ -1841,6 +1955,47 @@ client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
   const txt = (msg.content || "").trim();
   const isDM = !msg.guild;
+
+
+  // .coinflip — regular users can win/lose tokens
+  if (/^\.coinflip(?:\s|$)/i.test(txt)) {
+    const isBuyerUser = isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member);
+    if (isBuyerUser) { replyUser(msg, "❌ premium users have unlimited balance, no need to gamble.").catch(() => {}); return; }
+    const arg = txt.replace(/^\.coinflip\s+/i, "").trim();
+    let bet = 1;
+    if (arg && /^\d+$/.test(arg)) bet = Math.max(1, Math.min(10, parseInt(arg)));
+    const currentBal = getBalance(msg.author.id);
+    if (currentBal < bet) { replyUser(msg, `❌ you only have ${currentBal} tokens, can't bet ${bet}.`).catch(() => {}); return; }
+    // 40% chance to win (small chance as requested)
+    const win = Math.random() < 0.4;
+    if (win) {
+      addBalance(msg.author.id, bet);
+      const newBal = getBalance(msg.author.id);
+      replyUser(msg, `🎰 **You won!** +${bet} tokens\n-# You have ${newBal} balance left.`).catch(() => {});
+    } else {
+      for (let i = 0; i < bet; i++) deductBalance(msg.author.id);
+      const newBal = getBalance(msg.author.id);
+      replyUser(msg, `🎰 **You lost!** -${bet} tokens\n-# You have ${newBal} balance left.`).catch(() => {});
+    }
+    return;
+  }
+
+  // .give @user <amount> — give balance to another user (everyone)
+  if (/^\.give(?:\s|$)/i.test(txt)) {
+    const mention = msg.mentions.users.first();
+    const args = txt.split(/\s+/);
+    const amount = parseInt(args[args.length - 1]) || 0;
+    if (!mention || amount <= 0) { replyUser(msg, "❌ usage: \`.give @user <amount>\`").catch(() => {}); return; }
+    if (mention.id === msg.author.id) { replyUser(msg, "❌ can't give to yourself, dumbass.").catch(() => {}); return; }
+    const myBal = getBalance(msg.author.id);
+    if (myBal < amount) { replyUser(msg, `❌ you only have ${myBal} tokens.`).catch(() => {}); return; }
+    // Deduct from giver, add to receiver
+    for (let i = 0; i < amount; i++) deductBalance(msg.author.id);
+    addBalance(mention.id, amount);
+    const newBal = getBalance(msg.author.id);
+    replyUser(msg, `✅ Gave ${amount} tokens to <@${mention.id}>!\n-# You have ${newBal} balance left.`).catch(() => {});
+    return;
+  }
 
   // .help — works EVERYWHERE for EVERYONE
   if (/^\.help(?:\s|$)/i.test(txt)) {
@@ -1953,7 +2108,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
     const rec = keyStore.keys.find(k => k.key === key);
     if (!rec) { replyUser(msg, "❌ Invalid key.").catch(() => {}); return; }
     if (rec.redeemedBy || (rec.expiresAt !== null && rec.expiresAt < Date.now())) {
-      replyUser(msg, "❌ this key was already redeem or expired.").catch(() => {});
+      replyUser(msg, "❌ this key was already redeem.").catch(() => {});
       return;
     }
     rec.redeemedBy = msg.author.id;
@@ -1967,7 +2122,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       replyUser(msg, "❌ Key saved but failed to assign role: " + e.message).catch(() => {});
       return;
     }
-    replyUser(msg, "✅ Key redeemed! Buyer role applied.").catch(() => {});
+    replyUser(msg, "✅ key redeemed successfully.").catch(() => {});
     return;
   }
 
@@ -2161,7 +2316,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       });
       
       const embed = new EmbedBuilder()
-        .setColor(0x2B2D31)
+        .setColor(REGULAR_COLOR)
         .setTitle(`🔍 Suspicious Accounts — ${suspicious.length} found`)
         .setDescription(lines.join("\n\n"))
         .setFooter({ text: `Page 1/${totalPages} │ ${msg.guild.name} │ ${msg.guild.memberCount} total members` });
@@ -2214,6 +2369,23 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       if (startMsg) startMsg.edit(out).catch(() => {});
       else replyUser(msg, out).catch(() => {});
     });
+    return;
+  }
+  // ─────────────────────────────────────────────
+  // .set / .sc — Owner Only (set allowed channel)
+  // ─────────────────────────────────────────────
+  if (/^\.(?:set|sc)(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
+    const args = txt.split(/\s+/).slice(1);
+    let ch = null;
+    const mentionMatch = txt.match(/<#(\d+)>/);
+    if (mentionMatch) { try { ch = await client.channels.fetch(mentionMatch[1]); } catch {} }
+    if (!ch && args[0] && args[0] !== ".") { try { ch = await client.channels.fetch(args[0].trim()); } catch {} }
+    if (!ch) { ch = msg.channel; }
+    config.allowedChannelId = ch.id;
+    saveConfig();
+    replyUser(msg, `✅ Allowed channel set to <#${ch.id}>.`).catch(() => {});
     return;
   }
   // ─────────────────────────────────────────────
@@ -2435,7 +2607,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
   // ─────────────────────────────────────────────
   if (/^\.delwh(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!perm.allowed) {
+      if (perm.noBalance) {
+        replyUser(msg, { content: "if you can't wait, - buy premium right now https://discord.com/channels/1509484518766018711/1539090234354962505", embeds: [perm.errEmbed] }).catch(() => {});
+        return;
+      }
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "whs", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
@@ -2494,7 +2672,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
   // ─────────────────────────────────────────────
   if (/^\.whs(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!perm.allowed) {
+      if (perm.noBalance) {
+        replyUser(msg, { content: "if you can't wait, - buy premium right now https://discord.com/channels/1509484518766018711/1539090234354962505", embeds: [perm.errEmbed] }).catch(() => {});
+        return;
+      }
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
     
     const panelEmbed = new EmbedBuilder()
       .setColor(getEmbedColor(perm.isBuyer))
@@ -2520,7 +2704,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
 
   if (/^\.upload(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!perm.allowed) {
+      if (perm.noBalance) {
+        replyUser(msg, { content: "if you can't wait, - buy premium right now https://discord.com/channels/1509484518766018711/1539090234354962505", embeds: [perm.errEmbed] }).catch(() => {});
+        return;
+      }
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "upload", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
@@ -2616,7 +2806,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
   // ─────────────────────────────────────────────
   if (/^\.obf(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!perm.allowed) {
+      if (perm.noBalance) {
+        replyUser(msg, { content: "if you can't wait, - buy premium right now https://discord.com/channels/1509484518766018711/1539090234354962505", embeds: [perm.errEmbed] }).catch(() => {});
+        return;
+      }
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "obf", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
@@ -2713,7 +2909,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
   // .et — carousel mode
   if (/^\.et(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, true);
-    if (!perm.allowed) { if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!perm.allowed) {
+      if (perm.noBalance) {
+        replyUser(msg, { content: "if you can't wait, - buy premium right now https://discord.com/channels/1509484518766018711/1539090234354962505", embeds: [perm.errEmbed] }).catch(() => {});
+        return;
+      }
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
     if (isDM && !perm.isBuyer) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
     const cd = checkCommandCooldown(msg.author.id, "et", perm.isBuyer);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
@@ -2768,7 +2970,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
   // .rename / .rn
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) { if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!perm.allowed) {
+      if (perm.noBalance) {
+        replyUser(msg, { content: "if you can't wait, - buy premium right now https://discord.com/channels/1509484518766018711/1539090234354962505", embeds: [perm.errEmbed] }).catch(() => {});
+        return;
+      }
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "rename", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
@@ -2874,7 +3082,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
   // .get
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!perm.allowed) {
+      if (perm.noBalance) {
+        replyUser(msg, { content: "if you can't wait, - buy premium right now https://discord.com/channels/1509484518766018711/1539090234354962505", embeds: [perm.errEmbed] }).catch(() => {});
+        return;
+      }
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
     const cd = checkCommandCooldown(msg.author.id, "get", perm.isBuyer);
     if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     const id = txt.split(/\s+/)[1];
@@ -2888,7 +3102,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
   // .dl / .download — gives file from library ID OR downloads from Discord CDN link
   if (/^\.(?:dl|download)(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!perm.allowed) {
+      if (perm.noBalance) {
+        replyUser(msg, { content: "if you can't wait, - buy premium right now https://discord.com/channels/1509484518766018711/1539090234354962505", embeds: [perm.errEmbed] }).catch(() => {});
+        return;
+      }
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
     const arg = txt.split(/\s+/)[1];
     if (!arg) { replyUser(msg, "❌ put file link, idiot.").catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
@@ -3030,7 +3250,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
   // .find
   if (/^\.find(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) { if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return; }
+    if (!perm.allowed) {
+      if (perm.noBalance) {
+        replyUser(msg, { content: "if you can't wait, - buy premium right now https://discord.com/channels/1509484518766018711/1539090234354962505", embeds: [perm.errEmbed] }).catch(() => {});
+        return;
+      }
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
     const query = txt.slice(5).trim();
     if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
     const results = findFiles(query);
