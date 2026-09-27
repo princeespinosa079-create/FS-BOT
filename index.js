@@ -1056,31 +1056,144 @@ function extractFilesFromZip(zipBuffer) {
   return extractedFiles;
 }
 // ============================================================
-// VARIABLE RENAMER — renames local variables & params
+// VARIABLE RENAMER — readable renamer (renames only generic/ambiguous names)
 // ============================================================
 function renameVariables(source) {
   if (!source || typeof source !== "string") return source;
   const reserved = new Set(["string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber","loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error","warn","print","select","unpack","require","game","workspace","script","bit","bit32","true","false","nil","and","or","not","if","then","else","elseif","end","for","while","do","repeat","until","return","function","local","in","break","self"]);
-  const varMap = new Map();
-  const randName = () => {
-    const chars = "abcdefghijklmnopqrstuvwxyz";
-    let n = "_";
-    for (let i = 0; i < 5; i++) n += chars.charAt(Math.floor(Math.random() * chars.length));
-    return n;
+  
+  // Generic name → descriptive replacement dictionary
+  const genericMap = {
+    parent: "container", child: "childElement", old: "existingInstance", new: "newInstance",
+    value: "val", data: "payload", result: "output", handle: "element", index: "idx",
+    count: "total", flag: "state", obj: "object", arr: "list", tbl: "tableRef",
+    cb: "callback", fn: "callbackFunc", tmp: "tempVal", temp: "tempVal",
+    str: "text", num: "numberVal", bool: "flagState", pos: "position", vel: "velocity",
+    acc: "accumulator", len: "length", wid: "width", hgt: "height", btn: "button",
+    lbl: "label", img: "image", snd: "sound", sfx: "soundEffect", mus: "music",
+    vol: "volumeVal", spd: "speedVal", cfg: "config", settings: "AppSettings",
+    config: "appConfig", opts: "options", args: "params", arg: "param",
+    input: "userInput", output: "resultOutput", msg: "message", err: "errorMsg",
+    res: "response", req: "request", url: "link", path: "filePath",
+    frame: "uiFrame", panel: "uiPanel", gui: "uiContainer", screen: "screenGui",
+    scroll: "scrollFrame", list: "itemList", items: "itemList", tracks: "TrackList",
+    players: "playerList", id: "identifier", key: "mapKey", val: "mapValue",
+    dragStart: "dragStartInputPos", startPos: "dragStartFramePos",
+    dragging: "isDragging", running: "isRunning", active: "isActive", visible: "isVisible",
+    enabled: "isEnabled", loaded: "isLoaded", playing: "isPlaying", paused: "isPaused",
+    selected: "isSelected", hovered: "isHovered", clicked: "isClicked",
+    open: "isOpen", closed: "isClosed", ready: "isReady", done: "isDone",
+    exists: "doesExist", valid: "isValid", invalid: "isInvalid",
+    success: "didSucceed", failed: "didFail", ok: "isOk",
+    parentFrame: "parentContainer", childFrame: "childContainer",
+    mainFrame: "mainContainer", titleBar: "titleBarFrame",
+    closeBtn: "closeButton", playBtn: "playButton", stopBtn: "stopButton",
+    menu: "menuPanel", tab: "tabPanel", page: "pageView",
+    current: "currentItem", previous: "previousItem", next: "nextItem",
+    first: "firstItem", last: "lastItem", target: "targetElement",
+    source: "sourceRef", dest: "destinationRef", from: "fromRef", to: "toRef",
+    x: "xCoord", y: "yCoord", z: "zCoord", w: "widthVal", h: "heightVal",
+    dx: "deltaX", dy: "deltaY", dt: "deltaTime", t: "timeVal",
+    i: "i", j: "j", k: "k", v: "itemValue", e: "eventData", event: "eventData",
+    hit: "didHit", touch: "didTouch", click: "didClick",
+    mouse: "mouseInput", keyboard: "keyboardInput", touchInput: "touchInput",
+    camera: "cameraRef", player: "playerRef", char: "characterRef",
+    humanoid: "humanoidRef", root: "rootPart", torso: "torsoPart",
+    head: "headPart", arm: "armPart", leg: "legPart",
+    tool: "toolRef", weapon: "weaponRef", ammo: "ammoCount",
+    health: "healthVal", maxHealth: "maxHealthVal", shield: "shieldVal",
+    mana: "manaVal", stamina: "staminaVal", xp: "experience", level: "levelNum",
+    gold: "goldAmount", coins: "coinAmount", cash: "cashAmount",
+    score: "scoreVal", time: "timeElapsed", timer: "timerRef",
+    cooldown: "cooldownTime", delay: "delayTime", duration: "durationTime",
+    interval: "intervalTime", rate: "rateVal", speed: "speedVal",
+    distance: "distanceVal", range: "rangeVal", radius: "radiusVal",
+    angle: "angleVal", rotation: "rotationVal", scale: "scaleVal",
+    size: "sizeVal", position: "positionVal", velocity: "velocityVal",
+    acceleration: "accelerationVal", force: "forceVal", mass: "massVal",
+    color: "colorVal", colour: "colorVal", transparency: "transparencyVal",
+    opacity: "opacityVal", brightness: "brightnessVal", contrast: "contrastVal",
+    saturation: "saturationVal", hue: "hueVal",
+    title: "titleText", subtitle: "subtitleText", text: "textContent",
+    label: "labelText", caption: "captionText", description: "descText",
+    tooltip: "tooltipText", placeholder: "placeholderText",
+    icon: "iconImage", logo: "logoImage", banner: "bannerImage",
+    thumbnail: "thumbnailImage", avatar: "avatarImage",
+    username: "userName", password: "passWord", email: "emailAddress",
+    token: "authToken", session: "sessionId", cookie: "cookieData",
+    cache: "cacheStore", storage: "storageRef", database: "dbRef",
+    api: "apiEndpoint", endpoint: "apiUrl", host: "hostAddress",
+    port: "portNumber", protocol: "protocolType", domain: "domainName",
   };
+  
+  // Boolean suffixes that indicate a boolean variable
+  const boolIndicators = ["ing", "ed", "able", "ible", "ent", "ant"];
+  const boolPrefixes = ["is", "has", "can", "should", "will", "did", "was", "were"];
+  
+  function isBooleanName(name) {
+    const lower = name.toLowerCase();
+    for (const p of boolPrefixes) if (lower.startsWith(p)) return true;
+    return /(ing|ed|able|ible)$/.test(name) && name.length > 4;
+  }
+  
+  function getBetterName(name) {
+    const lower = name.toLowerCase();
+    // Check generic map (case-insensitive match, preserve original case style)
+    if (genericMap[lower]) {
+      const replacement = genericMap[lower];
+      // Preserve original capitalization
+      if (name[0] === name[0].toUpperCase() && name[1] && name[1] === name[1].toLowerCase()) {
+        return replacement.charAt(0).toUpperCase() + replacement.slice(1);
+      }
+      return replacement;
+    }
+    // Boolean names get "is" prefix
+    if (isBooleanName(name) && !name.toLowerCase().startsWith("is")) {
+      return "is" + name.charAt(0).toUpperCase() + name.slice(1);
+    }
+    // Plural generic collections get "List" suffix (only short names)
+    if (name.length <= 8 && name.endsWith("s") && !name.endsWith("ss") && !name.endsWith("us") && !name.endsWith("is")) {
+      const singular = name.slice(0, -1);
+      if (genericMap[singular.toLowerCase()]) {
+        return name + "List";
+      }
+    }
+    return null; // keep original name
+  }
+  
+  const varMap = new Map();
+  
+  // Find local variable declarations
   const localRegex = /\blocal\s+(?:function\s+)?([a-zA-Z_]\w*)/g;
   let m;
   while ((m = localRegex.exec(source)) !== null) {
     const name = m[1];
-    if (!reserved.has(name) && !varMap.has(name)) varMap.set(name, randName());
+    if (reserved.has(name) || varMap.has(name)) continue;
+    const better = getBetterName(name);
+    if (better && better !== name) varMap.set(name, better);
   }
+  
+  // Find function parameters
   const paramRegex = /function[\s\w.:]*\(\s*([^)]*)\)/g;
   while ((m = paramRegex.exec(source)) !== null) {
     const params = m[1].split(",").map(p => p.trim().split("=")[0].trim()).filter(Boolean);
     for (const p of params) {
-      if (/^[a-zA-Z_]\w*$/.test(p) && !reserved.has(p) && !varMap.has(p)) varMap.set(p, randName());
+      if (!/^[a-zA-Z_]\w*$/.test(p) || reserved.has(p) || varMap.has(p)) continue;
+      const better = getBetterName(p);
+      if (better && better !== p) varMap.set(p, better);
     }
   }
+  
+  // Also detect for-loop variables: for <var> = ... or for <var> in ...
+  const forRegex = /\bfor\s+([a-zA-Z_]\w*)\s*(?:=|in)/g;
+  while ((m = forRegex.exec(source)) !== null) {
+    const name = m[1];
+    if (reserved.has(name) || varMap.has(name)) continue;
+    const better = getBetterName(name);
+    if (better && better !== name) varMap.set(name, better);
+  }
+  
+  // Replace all occurrences (longest first to avoid partial matches)
   let result = source;
   const sorted = [...varMap.entries()].sort((a, b) => b[0].length - a[0].length);
   for (const [oldName, newName] of sorted) {
@@ -1633,7 +1746,7 @@ client.on("interactionCreate", async interaction => {
           .setColor(REGULAR_COLOR)
           .setTitle("File Preview")
           .setDescription(description)
-          .setFooter({ text: `Request by @${interaction.user.username}│Clean & Fixed`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
+          .setFooter({ text: `Request by @${interaction.user.username}│Prince Renamer`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
         const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput, "utf-8"), { name: outputName });
         
         await interaction.message.delete().catch(() => {});
