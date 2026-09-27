@@ -188,44 +188,8 @@ function addBalance(userId, amount) {
 
 
 // ============================================================
-// COOLDOWN TRACKER
+// (cooldowns removed)
 // ============================================================
-const rnCooldown = new Map();
-const RN_COOLDOWN_SEC = 10;
-// Unified command cooldowns (regular users only, buyers bypass)
-const commandCooldowns = new Map(); // key: "cmd:userId" → expiry timestamp
-const COOLDOWNS = {
-  upload: 60 * 60,      // 1 hour
-  find: 15,             // 15 seconds
-  get: 15,              // 15 seconds
-  rename: 5,              // 5 seconds
-  dl: 10 * 60,          // 10 minutes
-  et: 30 * 60,          // 30 minutes
-  obf: 60 * 60,         // 1 hour
-  fetch: 15,            // 15 seconds
-  delwh: 10 * 60        // 10 minutes
-};
-function formatCooldown(remainingSec) {
-  const m = Math.floor(remainingSec / 60);
-  const s = remainingSec % 60;
-  if (m > 0 && s > 0) return `${m}m ${s}s`;
-  if (m > 0) return `${m}m`;
-  return `${s}s`;
-}
-function checkCommandCooldown(userId, cmd, isBuyerUser) {
-  if (isBuyerUser) return { onCooldown: false };
-  const cdSec = COOLDOWNS[cmd];
-  if (!cdSec) return { onCooldown: false };
-  const key = `${cmd}:${userId}`;
-  const now = Date.now();
-  const expiry = commandCooldowns.get(key);
-  if (expiry && now < expiry) {
-    const remaining = Math.ceil((expiry - now) / 1000);
-    return { onCooldown: true, message: `you're on ${formatCooldown(remaining)} cooldown.` };
-  }
-  commandCooldowns.set(key, now + cdSec * 1000);
-  return { onCooldown: false };
-}
 // ============================================================
 // DISCORD CLIENT
 // ============================================================
@@ -349,7 +313,8 @@ async function isBuyer(userId, member) {
 function channelAllowed(msg) {
   try {
     const chId = msg.channel?.id || msg.channelId || msg.channel_id;
-    return String(chId) === String(ALLOWED_CHANNEL_ID);
+    const allowed = config.allowedChannelId || ALLOWED_CHANNEL_ID;
+    return String(chId) === String(allowed);
   } catch (e) {
     return false;
   }
@@ -454,7 +419,7 @@ async function syncAllPrinceRoles() {
 // Owner / Buyer → bypass all
 // Regular → status + channel + guild checks
 // ============================================================
-async function checkRegularPermission(msg, needsFileReply = false) {
+async function checkRegularPermission(msg, needsFileReply = false, noDeduct = false) {
   try {
   // Owner → full bypass, can use ANYWHERE
   if (isOwner(msg.author.id)) {
@@ -519,7 +484,9 @@ async function checkRegularPermission(msg, needsFileReply = false) {
       new ButtonBuilder().setCustomId(`help_${msg.author.id}_prev`).setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId(`help_${msg.author.id}_next`).setLabel("Next").setStyle(ButtonStyle.Primary).setDisabled(helpPages.length === 1)
     );
-    replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+    const helpIsBuyer = isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member);
+    const helpBal = getBalance(msg.author.id);
+    replyUser(msg, { content: balSuffix(helpIsBuyer, helpBal).replace(/^\n/, ""), embeds: [embed], components: [row] }).catch(() => {});
     return;
   }
 
@@ -533,6 +500,7 @@ async function checkRegularPermission(msg, needsFileReply = false) {
       if (idMatch) targetId = idMatch[1];
     }
     const activeKey = findActiveKeyForUser(targetId);
+    const targetBal = getBalance(targetId);
     let displayName = `<@${targetId}>`;
     try {
       const u = await client.users.fetch(targetId);
@@ -542,8 +510,8 @@ async function checkRegularPermission(msg, needsFileReply = false) {
     const embed = new EmbedBuilder()
       .setTitle("Profile Status")
       .setDescription(
-`User: ${displayName} (\`${targetId}\`)
-Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
+`Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}
+Token left: ${activeKey ? "Unlimited" : targetBal}`
       )
       .setColor(REGULAR_COLOR)
       .setFooter({ text: timeFooter });
@@ -676,7 +644,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       .setDescription(`You have no available tokens.\nTokens reset in: ${resetTime}`);
     return { allowed: false, noBalance: true, errEmbed, resetTime, isBuyer: false };
   }
-  // Deduct 1 balance
+  // Deduct 1 balance (unless noDeduct — e.g. .find)
+  if (noDeduct) {
+    return { allowed: true, isBuyer: false, balance: bal };
+  }
   const newBal = deductBalance(msg.author.id);
   return { allowed: true, isBuyer: false, balance: newBal };
   } catch (e) {
@@ -701,6 +672,11 @@ function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
   return message.reply(body);
+}
+// Balance suffix for regular users (empty for buyers/owner)
+function balSuffix(isBuyerUser, balance) {
+  if (isBuyerUser) return "";
+  return `\n-# You have ${balance} balance left.`;
 }
 
 // Detect obfuscator type and confidence
@@ -1624,8 +1600,7 @@ const helpPages = [
 `**\`.redeem\`** [\`.red\`] - Redeem a premium key.
 
 > Premium users can use all commands in DMs.
-> Premium users bypass cooldown.
-> Premium users have unlimited balance.`
+> Premium users have unlimited token.`
     )
 ];
 const helpSessions = new Map();
@@ -1955,7 +1930,14 @@ client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
   const txt = (msg.content || "").trim();
   const isDM = !msg.guild;
-
+  // DM access: only owner + buyer can use commands in DMs (except .help and .redeem/.red)
+  if (isDM && !isOwner(msg.author.id)) {
+    const buyerInDm = await isBuyer(msg.author.id, msg.member);
+    if (!buyerInDm && !/^\.help(?:\s|$)/i.test(txt) && !/^\.(?:redeem|red)(?:\s|$)/i.test(txt)) {
+      replyUser(msg, "❌ buy access if you want to use the command here.").catch(() => {});
+      return;
+    }
+  }
 
   // .coinflip — regular users can win/lose tokens
   if (/^\.coinflip(?:\s|$)/i.test(txt)) {
@@ -2007,7 +1989,9 @@ client.on("messageCreate", async msg => {
       new ButtonBuilder().setCustomId(`help_${msg.author.id}_prev`).setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId(`help_${msg.author.id}_next`).setLabel("Next").setStyle(ButtonStyle.Primary).setDisabled(helpPages.length === 1)
     );
-    replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+    const helpIsBuyer = isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member);
+    const helpBal = getBalance(msg.author.id);
+    replyUser(msg, { content: balSuffix(helpIsBuyer, helpBal).replace(/^\n/, ""), embeds: [embed], components: [row] }).catch(() => {});
     return;
   }
 
@@ -2021,6 +2005,7 @@ client.on("messageCreate", async msg => {
       if (idMatch) targetId = idMatch[1];
     }
     const activeKey = findActiveKeyForUser(targetId);
+    const targetBal = getBalance(targetId);
     let displayName = `<@${targetId}>`;
     try {
       const u = await client.users.fetch(targetId);
@@ -2030,8 +2015,8 @@ client.on("messageCreate", async msg => {
     const embed = new EmbedBuilder()
       .setTitle("Profile Status")
       .setDescription(
-`User: ${displayName} (\`${targetId}\`)
-Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
+`Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}
+Token left: ${activeKey ? "Unlimited" : targetBal}`
       )
       .setColor(REGULAR_COLOR)
       .setFooter({ text: timeFooter });
@@ -2615,8 +2600,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "whs", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     
     const arg = txt.split(/\s+/)[1]?.trim();
     if (!arg) {
@@ -2655,7 +2638,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
         }
         
         await msg.channel.send({
-          content: `<@${msg.author.id}> done, delete the webhook bro!`,
+          content: `<@${msg.author.id}> done, delete the webhook bro!` + balSuffix(isBuyerUser, perm.balance),
           embeds: [resultEmbed]
         }).catch(() => {});
       }
@@ -2691,7 +2674,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
         .setStyle(ButtonStyle.Success)
     );
     
-    const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [row] }).catch(() => {});
+    const panelMsg = await replyUser(msg, { content: balSuffix(perm.isBuyer, perm.balance).replace(/^\n/, ""), embeds: [panelEmbed], components: [row] }).catch(() => {});
     if (panelMsg) {
       whsPanelOwners.set(panelMsg.id, msg.author.id);
       setTimeout(() => whsPanelOwners.delete(panelMsg.id), 10 * 60 * 1000);
@@ -2712,8 +2695,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "upload", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     let attachments = [...(msg.attachments?.values() || [])].filter(a => {
       const e = ext(a.name);
       return e === "txt" || e === "lua";
@@ -2792,7 +2773,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
         .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
         .setFooter({ text: `Request by @${msg.author.username}│File → Script`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
       await msg.channel.send({
-        content: `<@${msg.author.id}> Here is the script bro!`,
+        content: `<@${msg.author.id}> Here is the script bro!` + balSuffix(isBuyerUser, perm.balance),
         embeds: [embed]
       }).catch(() => {});
     } catch (e) {
@@ -2814,8 +2795,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "obf", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     let attachments = [...(msg.attachments?.values() || [])].filter(a => {
       const e = ext(a.name);
       return e === "txt" || e === "lua";
@@ -2892,7 +2871,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       const obfAttachment = new AttachmentBuilder(Buffer.from(obfuscated, "utf-8"), { name: obfFileName });
       if (sentMsg) await sentMsg.delete().catch(() => {});
       await msg.channel.send({
-        content: `<@${msg.author.id}>\n\`\`\`lua\n${loadstring}\n\`\`\``,
+        content: `<@${msg.author.id}>\n\`\`\`lua\n${loadstring}\n\`\`\`` + balSuffix(isBuyerUser, perm.balance),
         files: [obfAttachment]
       }).catch(() => {});
     } catch (e) {
@@ -2917,8 +2896,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     if (isDM && !perm.isBuyer) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
-    const cd = checkCommandCooldown(msg.author.id, "et", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     let attachments = extractAttachmentsOf(msg);
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -2954,7 +2931,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
         new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
         new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
       );
-      const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
+      const carouselMsg = await msg.channel.send({ content: balSuffix(perm.isBuyer, perm.balance).replace(/^\n/, ""), files: [attachment], components: [row] }).catch(() => {});
       if (carouselMsg) {
         extractCarouselMenus.set(msg.author.id, {
           files, index: 0, sourceType: "zip",
@@ -2978,8 +2955,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "rename", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     let attachments = [...(msg.attachments?.values() || [])];
     if (!attachments.length && msg.reference?.messageId) {
       try {
@@ -3068,7 +3043,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
         if (sentMsg) await sentMsg.delete().catch(() => {});
         const elapsed = Date.now() - startTime;
         await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
+          content: `<@${msg.author.id}> **Here you go bro!**` + balSuffix(isBuyerUser, perm.balance),
           files: [fixedFile],
           embeds: [resultEmbed]
         }).catch(() => {});
@@ -3089,14 +3064,12 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       }
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
-    const cd = checkCommandCooldown(msg.author.id, "get", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     const id = txt.split(/\s+/)[1];
     if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const file = getFile(id);
     if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
     const freshUrl = await getFreshUrl(file);
-    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
+    replyUser(msg, { content: "**Here is the file twin!**" + balSuffix(perm.isBuyer, perm.balance), files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
     return;
   }
   // .dl / .download — gives file from library ID OR downloads from Discord CDN link
@@ -3112,8 +3085,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
     const arg = txt.split(/\s+/)[1];
     if (!arg) { replyUser(msg, "❌ put file link, idiot.").catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "dl", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
 
     // Check if Instagram URL
     if (/instagram\.com|instagr\.am|ig\.me/i.test(arg)) {
@@ -3153,7 +3124,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
         if (sentMsg) await sentMsg.delete().catch(() => {});
         const elapsed = Date.now() - startTime;
         await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
+          content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\`` + balSuffix(isBuyerUser, perm.balance),
           embeds: [resEmbed]
         }).catch(() => {});
       } catch (e) {
@@ -3199,7 +3170,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
         if (sentMsg) await sentMsg.delete().catch(() => {});
         const elapsed = Date.now() - startTime;
         await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
+          content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\`` + balSuffix(isBuyerUser, perm.balance),
           embeds: [resEmbed]
         }).catch(() => {});
       } catch (e) {
@@ -3224,7 +3195,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
         if (sentMsg) await sentMsg.delete().catch(() => {});
         const elapsed = Date.now() - startTime;
         await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
+          content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\`` + balSuffix(isBuyerUser, perm.balance),
           files: [attachment]
         }).catch(() => {});
       } catch (e) {
@@ -3242,14 +3213,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
     const fileAttachment = { attachment: fileUrl, name: file.filename || "file.lua" };
     
     await msg.channel.send({
-      content: `<@${msg.author.id}> **Here is the file twin!**`,
+      content: `<@${msg.author.id}> **Here is the file twin!**` + balSuffix(isBuyerUser, perm.balance),
       files: [fileAttachment]
     }).catch(() => {});
     return;
   }
   // .find
   if (/^\.find(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
+    const perm = await checkRegularPermission(msg, false, true);
     if (!perm.allowed) {
       if (perm.noBalance) {
         replyUser(msg, { content: "if you can't wait, - buy premium right now https://discord.com/channels/1509484518766018711/1539090234354962505", embeds: [perm.errEmbed] }).catch(() => {});
@@ -3262,8 +3233,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
     const results = findFiles(query);
     if (!results.length) { replyUser(msg, "❌ no found for that, dumbass.").catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
-    const cd = checkCommandCooldown(msg.author.id, "find", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ ${cd.message}`).catch(() => {}); return; }
     const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
     const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
@@ -3276,7 +3245,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key"}`
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
     );
-    const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+    const sent = await replyUser(msg, { content: balSuffix(isBuyerUser, perm.balance).replace(/^\n/, ""), embeds: [embed], components: [row] }).catch(() => {});
     if (sent) paginationMenus.set(msg.author.id, {
       results, page: 1, totalPages, messageId: sent.id,
       authorId: msg.author.id, createdAt: Date.now(), isBuyer: isBuyerUser
