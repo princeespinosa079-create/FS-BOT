@@ -622,7 +622,7 @@ Token left: ${activeKey ? "Unlimited" : targetBal}`
 
   // If channel is restricted → SILENT (no response at all)
   if (!channelAllowed(msg)) {
-    return { allowed: false, reason: null, silent: true, isBuyer: false };
+    return { allowed: false, reason: "❌ not here bro.", silent: false, isBuyer: false };
   }
 
   // Status requirement — regular users MUST have .gg/TBBAUZu8cW in status
@@ -653,7 +653,7 @@ Token left: ${activeKey ? "Unlimited" : targetBal}`
   } catch (e) {
     console.error("❌ checkRegularPermission error:", e.message);
     // Fail OPEN — don't block users on error
-    return { allowed: true, isBuyer: false, error: e.message };
+    return { allowed: true, isBuyer: false, error: e.message, balance: getBalance(msg.author.id) };
   }
 }
 function isReplyingToFile(msg) {
@@ -676,6 +676,7 @@ function replyUser(message, payload) {
 // Balance suffix for regular users (empty for buyers/owner)
 function balSuffix(isBuyerUser, balance) {
   if (isBuyerUser) return "";
+  if (typeof balance !== "number" || isNaN(balance)) return "";
   return `\n-# You have ${balance} balance left.`;
 }
 
@@ -1719,7 +1720,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     const pageItems = menu.results.slice(start, start + 8);
     const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
     const embed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
+      .setColor(0x010101)
       .setTitle(getFinderTitle(menu.isBuyer))
       .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
       .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
@@ -3237,7 +3238,7 @@ Token left: ${activeKey ? "Unlimited" : targetBal}`
     const pageItems = results.slice(0, perPage);
     const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
     const embed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
+      .setColor(0x010101)
       .setTitle(getFinderTitle(isBuyerUser))
       .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
       .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeNow}` });
