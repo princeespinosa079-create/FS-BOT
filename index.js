@@ -1447,13 +1447,24 @@ function balanceLuaBlocks(code) {
 // ============================================================
 // GROQ AI CLEANER — smart renaming + fixing via Groq API
 // ============================================================
-async function aiCleanScript(source) {
+async function aiCleanScript(source, mode) {
+  // Fallback to regex methods if Groq not configured
   if (!groqClient) {
-    console.warn("⚠️ GROQ_API_KEY not set — falling back to regex clean.");
-    return balanceLuaBlocks(cleanLuaScript(source));
+    console.warn("⚠️ GROQ_API_KEY not set — falling back to regex.");
+    return mode === "var" ? renameVariables(source) : balanceLuaBlocks(cleanLuaScript(source));
   }
   try {
-    const prompt = `You are a Lua/Roblox script cleaning expert. Clean the script below with these rules:
+    const varPrompt = `You are a Lua/Roblox variable renaming expert. Rename variables in the script below with these rules:
+1. Rename ALL variables, functions, and parameters from generic/obfuscated names to meaningful descriptive names
+2. Keep the EXACT same logic, structure, and behavior — do NOT add, remove, or change any functionality
+3. Do NOT remove comments, loaders, or any code — only rename identifiers
+4. Do NOT add or remove any lines
+5. Output ONLY the renamed Lua code — no explanations, no markdown fences, no extra text
+
+SCRIPT:
+${source}`;
+
+    const readablePrompt = `You are a Lua/Roblox script cleaning expert (like an AI code assistant). Clean the script below with these rules:
 1. Rename all variables/functions/parameters to meaningful descriptive names (keep EXACT same logic)
 2. Remove ALL comments, IP logger/grabber code, script loaders (loadstring, HttpGet, request, syn.request), junk/obfuscation lines, and dead code
 3. Fix any missing "end" or "until" statements so the code is 100% syntactically valid Lua
@@ -1464,6 +1475,8 @@ async function aiCleanScript(source) {
 
 SCRIPT TO CLEAN:
 ${source}`;
+
+    const prompt = mode === "var" ? varPrompt : readablePrompt;
 
     const completion = await groqClient.chat.completions.create({
       messages: [{ role: "user", content: prompt }],
@@ -1478,7 +1491,7 @@ ${source}`;
     return output;
   } catch (e) {
     console.warn("⚠️ Groq AI clean failed, falling back to regex:", e.message?.slice(0, 120));
-    return balanceLuaBlocks(cleanLuaScript(source));
+    return mode === "var" ? renameVariables(source) : balanceLuaBlocks(cleanLuaScript(source));
   }
 }
 
@@ -1802,14 +1815,9 @@ client.on("interactionCreate", async interaction => {
         const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
         const foundUrls = text.match(urlRegex) || [];
         
-        let finalOutput;
-        if (mode === "var") {
-          finalOutput = renameVariables(text);
-        } else if (mode === "ai") {
-          finalOutput = await aiCleanScript(text);
-        } else {
-          finalOutput = balanceLuaBlocks(cleanLuaScript(text));
-        }
+        const startTime = Date.now();
+        const finalOutput = await aiCleanScript(text, mode);
+        const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
         
         // Preview (5 lines / 50 words max)
         const allLines = finalOutput.split("\n");
@@ -1854,7 +1862,7 @@ client.on("interactionCreate", async interaction => {
         
         await interaction.message.delete().catch(() => {});
         await interaction.channel.send({
-          content: `<@${interaction.user.id}> Here you go twin!`,
+          content: `<@${interaction.user.id}> Here you go twin!\n**Finish in:** \`${finishSec}s\``,
           files: [fixedFile],
           embeds: [resultEmbed]
         }).catch(() => {});
@@ -3255,8 +3263,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       .setDescription("Select how you want to rename the code:");
     const panelRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`rename_var_${msg.author.id}`).setLabel("Variable Renamer").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`rename_readable_${msg.author.id}`).setLabel("Readable & Executable").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`rename_ai_${msg.author.id}`).setLabel("AI Clean (Groq)").setStyle(ButtonStyle.Danger)
+      new ButtonBuilder().setCustomId(`rename_readable_${msg.author.id}`).setLabel("Readable & Executable").setStyle(ButtonStyle.Primary)
     );
     const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [panelRow] }).catch(() => {});
     if (panelMsg) {
