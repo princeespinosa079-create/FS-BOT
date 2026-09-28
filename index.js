@@ -1501,6 +1501,27 @@ function removeDangerousLines(code) {
   return cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+// Check if text contains any script loader or IP logger (webhooks excluded)
+function hasDangerousContent(text) {
+  if (!text) return false;
+  for (const line of text.split("\n")) {
+    if (/discord(?:app)?\.com\/api\/webhooks/i.test(line)) continue;
+    if (/loadstring\s*\(\s*(?:game|_G|env|HttpService)\s*[:.]\s*HttpGet/i.test(line)) return true;
+    if (/loadstring\s*\(\s*HttpGet/i.test(line)) return true;
+    if (/\bHttpGet\s*\(\s*["']http/i.test(line)) return true;
+    if (/getcustomasset|getsynasset/i.test(line)) return true;
+    if (/synapse|script-?ware|krnl|fluxus|delta|celery|electron|comet|vega\s*x|ironbrew/i.test(line)) return true;
+    if (/loadlib|loadfile|dofile.*http/i.test(line)) return true;
+    if (/syn\s*\.\s*request\s*\(/i.test(line)) return true;
+    if (/iplogger|ipgrablog|ipify|whatismyip|grabify|logmyip|ipgrabber|stealip/i.test(line)) return true;
+    if (/webhook\.site|hook\.billy|iplog\.xyz/i.test(line)) return true;
+    if (/\/api\/v[0-9]+\/track|\/log\?|\/grab\?/i.test(line)) return true;
+    if (/ip\s*[=:]\s*["']?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/i.test(line)) return true;
+    if (/(?:new\s+)?WebSocket\s*\(/i.test(line)) return true;
+  }
+  return false;
+}
+
 // ============================================================
 // GROQ AI CLEANER — smart renaming + fixing via Groq API
 // ============================================================
@@ -1882,14 +1903,14 @@ client.on("interactionCreate", async interaction => {
         outputName += ".lua";
         
         // If URLs found → ask Yes/No before sending result
-        if (foundUrls.length > 0) {
+        if (foundUrls.length > 0 && hasDangerousContent(text)) {
           await interaction.message.delete().catch(() => {});
           const uniqueUrls = [...new Set(foundUrls)];
           const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
           const urlQuestionEmbed = new EmbedBuilder()
             .setColor(REGULAR_COLOR)
             .setTitle("URL Found:")
-            .setDescription(`${urlList}\n\n**Click one of button if you want to remove URL from the file.**`)
+            .setDescription(`${urlList}\n\nDo you want to remove URL from the file?\n\n**What this button does:**\n> - **Yes** – Remove Script Loaders & IP Logger.\n> - **No** – Cancel removing Script Loaders & IP Logger.`)
             .setFooter({ text: `Request by @${interaction.user.username}│Prince Renamer`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
           const urlRow = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`urlremove_yes_${interaction.user.id}`).setLabel("Yes").setStyle(ButtonStyle.Success),
@@ -2253,7 +2274,7 @@ client.on("interactionCreate", async interaction => {
       const text = interaction.options.getString("text");
       const type = interaction.options.getString("type") || "good";
       const title = interaction.options.getString("title");
-      const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" })}`;
+      const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Manila" })}`;
       await interaction.deleteReply().catch(() => {});
       const targetChannel = interaction.channel || interaction.user.dmChannel || await interaction.user.createDM().catch(() => null);
       if (!targetChannel) {
@@ -3567,28 +3588,44 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const cd = checkCommandCooldown(msg.author.id, "dl", perm.isBuyer);
     if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
     const startTime = Date.now();
-    const sentMsg = await replyUser(msg, "🔄 Fetching...").catch(() => {});
+    // PH time — no leading zero on hour
+    const phTime = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Manila" });
+    // Loading embed — title Fetching URL..., description = URL only
+    const loadingEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("Fetching URL...")
+      .setDescription(fetchUrl)
+      .setFooter({ text: `Today at ${phTime}` });
+    const sentMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
     try {
       const buf = await downloadURL(fetchUrl);
       const content = buf.toString("utf8");
       if (!content || content.length < 1) throw new Error("Empty response");
       // Random 20-char filename
       const fileName = crypto.randomBytes(10).toString("hex") + ".lua";
-      // Preview — first 5 lines
+      // Preview — first 5 lines (no **Preview:** label)
       const previewLines = content.split("\n").slice(0, 5).join("\n");
       const previewDisplay = previewLines.length > 800 ? previewLines.slice(0, 800) + "\n..." : previewLines;
+      // Find URLs in fetched content
+      const foundFetchUrls = [...new Set(content.match(/https?:\/\/[^\s)"']+/g) || [])];
+      let description = "```lua\n" + previewDisplay + "\n```";
+      if (foundFetchUrls.length > 0) {
+        const urlList = foundFetchUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
+        let urlSection = `\n\n**URL Found:**\n${urlList}`;
+        if (foundFetchUrls.length > 10) urlSection += `\n- ...and ${foundFetchUrls.length - 10} more`;
+        description += urlSection.slice(0, 800);
+      }
       const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
-      // PH time — no leading zero on hour
-      const phTime = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Manila" });
-      const embed = new EmbedBuilder()
+      const resultEmbed = new EmbedBuilder()
         .setColor(REGULAR_COLOR)
-        .setDescription(`**Preview:**\n\`\`\`lua\n${previewDisplay}\n\`\`\``)
+        .setTitle("File Preview")
+        .setDescription(description)
         .setFooter({ text: `Today at ${phTime}` });
       const attachment = new AttachmentBuilder(Buffer.from(content, "utf-8"), { name: fileName });
       if (sentMsg) await sentMsg.delete().catch(() => {});
       await replyUser(msg, {
-        content: `Here you go!\n**Finish in:** \`${finishSec}s\``,
-        embeds: [embed],
+        content: `<@${msg.author.id}> Here you go!\n**Finish in:** \`${finishSec}s\``,
+        embeds: [resultEmbed],
         files: [attachment]
       }).catch(() => {});
     } catch (e) {
