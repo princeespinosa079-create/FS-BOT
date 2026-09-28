@@ -194,6 +194,7 @@ const whsPanelOwners = new Map(); // messageId -> authorId
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const renamePanels = new Map(); // messageId -> { authorId, fileUrl, fileName, isBuyerUser }
+const urlRemovePanels = new Map(); // messageId -> { authorId, finalOutput, foundUrls, outputName, finishSec, username, avatarURL }
 const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false;
 let lastReady = Date.now();
@@ -1445,6 +1446,56 @@ function balanceLuaBlocks(code) {
 }
 
 // ============================================================
+// RENAMER HELPERS — preview builder, URL stripper
+// ============================================================
+function buildPreviewText(finalOutput) {
+  const allLines = finalOutput.split("\n");
+  const previewWords = [];
+  let wordCount = 0, lineCount = 0;
+  for (const line of allLines) {
+    if (lineCount >= 5 || wordCount >= 50) break;
+    const words = line.trim().split(/\s+/).filter(Boolean);
+    for (const w of words) {
+      if (wordCount >= 50) break;
+      previewWords.push(w);
+      wordCount++;
+    }
+    previewWords.push("\n");
+    lineCount++;
+  }
+  let previewText = previewWords.join(" ").replace(/ \n /g, "\n").trim();
+  if (previewText.endsWith("\n")) previewText = previewText.slice(0, -1);
+  if (wordCount >= 50 || lineCount >= 5) previewText += "\n...";
+  if (previewText.length > 1000) previewText = previewText.slice(0, 1000) + "\n...";
+  return previewText;
+}
+
+function buildRenamerDescription(previewText, foundUrls, urlsRemoved) {
+  let description = "```lua\n" + previewText + "\n```";
+  if (urlsRemoved) {
+    description += `\n\n✅ **URLs removed from file.**`;
+  } else if (foundUrls.length > 0) {
+    const uniqueUrls = [...new Set(foundUrls)];
+    const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
+    let urlSection = `\n\n**URL Found:**\n${urlList}`;
+    if (uniqueUrls.length > 10) urlSection += `\n- ...and ${uniqueUrls.length - 10} more`;
+    description += urlSection.slice(0, 800);
+  }
+  return description;
+}
+
+function stripUrlsFromCode(code) {
+  return code
+    .replace(/https?:\/\/[^\s"'()\]]+/g, "")
+    .split("\n")
+    .map(l => l.replace(/["']\s*["']/g, '""').trim())
+    .filter(l => l.length > 0 && !/^["',;\s=]*$/.test(l))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// ============================================================
 // GROQ AI CLEANER — smart renaming + fixing via Groq API
 // ============================================================
 async function aiCleanScript(source, mode) {
@@ -1819,40 +1870,43 @@ client.on("interactionCreate", async interaction => {
         const finalOutput = await aiCleanScript(text, mode);
         const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
         
-        // Preview (5 lines / 50 words max)
-        const allLines = finalOutput.split("\n");
-        let previewWords = [];
-        let wordCount = 0, lineCount = 0;
-        for (const line of allLines) {
-          if (lineCount >= 5 || wordCount >= 50) break;
-          const words = line.trim().split(/\s+/).filter(Boolean);
-          for (const w of words) {
-            if (wordCount >= 50) break;
-            previewWords.push(w);
-            wordCount++;
-          }
-          previewWords.push("\n");
-          lineCount++;
-        }
-        let previewText = previewWords.join(" ").replace(/ \n /g, "\n").trim();
-        if (previewText.endsWith("\n")) previewText = previewText.slice(0, -1);
-        if (wordCount >= 50 || lineCount >= 5) previewText += "\n...";
-        if (previewText.length > 1000) previewText = previewText.slice(0, 1000) + "\n...";
-        
-        let description = "```lua\n" + previewText + "\n```";
-        if (foundUrls.length > 0) {
-          const uniqueUrls = [...new Set(foundUrls)];
-          const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
-          let urlSection = `\n\n**URL Found:**\n${urlList}`;
-          if (uniqueUrls.length > 10) urlSection += `\n- ...and ${uniqueUrls.length - 10} more`;
-          description += urlSection.slice(0, 800);
-        }
-        
         const randChars = "abcdefghijklmnopqrstuvwxyz";
         let outputName = "";
         for (let i = 0; i < 20; i++) outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
         outputName += ".lua";
         
+        // If URLs found → ask Yes/No before sending result
+        if (foundUrls.length > 0) {
+          await interaction.message.delete().catch(() => {});
+          const uniqueUrls = [...new Set(foundUrls)];
+          const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
+          const urlQuestionEmbed = new EmbedBuilder()
+            .setColor(REGULAR_COLOR)
+            .setTitle("URL Detected")
+            .setDescription(`**URL Found in file:**\n${urlList}\n\nClick one of button if you want to remove URL from the file.`)
+            .setFooter({ text: `Request by @${interaction.user.username}│Prince Renamer`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
+          const urlRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`urlremove_yes_${interaction.user.id}`).setLabel("Yes").setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`urlremove_no_${interaction.user.id}`).setLabel("No").setStyle(ButtonStyle.Danger)
+          );
+          const questionMsg = await interaction.channel.send({ embeds: [urlQuestionEmbed], components: [urlRow] }).catch(() => {});
+          if (questionMsg) {
+            urlRemovePanels.set(questionMsg.id, {
+              authorId: interaction.user.id,
+              finalOutput,
+              foundUrls,
+              outputName,
+              finishSec,
+              username: interaction.user.username,
+              avatarURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 })
+            });
+          }
+          return;
+        }
+        
+        // No URLs → send result directly (Panel → Loading → Result)
+        const previewText = buildPreviewText(finalOutput);
+        const description = buildRenamerDescription(previewText, foundUrls, false);
         const resultEmbed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
           .setTitle("File Preview")
@@ -1871,6 +1925,45 @@ client.on("interactionCreate", async interaction => {
         interaction.channel.send(`❌ error: ${e.message.slice(0, 150)}`).catch(() => {});
       }
     })();
+    return;
+  }
+  // ─── URL REMOVE Yes/No BUTTONS ───
+  if (interaction.customId?.startsWith("urlremove_")) {
+    const parts = interaction.customId.split("_");
+    const choice = parts[1]; // "yes" or "no"
+    const ownerId = parts.slice(2).join("_");
+    if (interaction.user.id !== ownerId) {
+      return interaction.reply({ content: "❌ not yours, bro.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const ctx = urlRemovePanels.get(interaction.message.id);
+    if (!ctx) {
+      return interaction.reply({ content: "⏳ panel expired, run `.rename` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    urlRemovePanels.delete(interaction.message.id);
+    await interaction.deferUpdate().catch(() => {});
+    
+    let finalOutput = ctx.finalOutput;
+    let urlsRemoved = false;
+    if (choice === "yes") {
+      finalOutput = stripUrlsFromCode(finalOutput);
+      urlsRemoved = true;
+    }
+    
+    const previewText = buildPreviewText(finalOutput);
+    const description = buildRenamerDescription(previewText, ctx.foundUrls, urlsRemoved);
+    const resultEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("File Preview")
+      .setDescription(description)
+      .setFooter({ text: `Request by @${ctx.username}│Prince Renamer`, iconURL: ctx.avatarURL });
+    const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput, "utf-8"), { name: ctx.outputName });
+    
+    await interaction.message.delete().catch(() => {});
+    await interaction.channel.send({
+      content: `<@${interaction.user.id}> Here you go twin!\n**Finish in:** \`${ctx.finishSec}s\``,
+      files: [fixedFile],
+      embeds: [resultEmbed]
+    }).catch(() => {});
     return;
   }
   // ─── HELP PAGINATION BUTTONS ───
