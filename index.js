@@ -27,6 +27,7 @@ const { execFile } = require("child_process");
 const { Groq } = require("groq-sdk");
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const groqClient = GROQ_API_KEY ? new Groq({ apiKey: GROQ_API_KEY }) : null;
+const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const DEOBF_DIR = path.join(DATA_DIR, "Deobfuscator");
 const DEOBF_SCRIPT = path.join(DEOBF_DIR, "deobf", "deob.py");
 // ============================================================
@@ -49,7 +50,6 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 // ============================================================
 // STORAGE
 // ============================================================
-const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 function readJSON(file, fallback) {
