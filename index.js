@@ -23,9 +23,12 @@ const path = require("path");
 const AdmZip = require("adm-zip");
 const os = require("os");
 const crypto = require("crypto");
+const { execFile } = require("child_process");
 const { Groq } = require("groq-sdk");
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const groqClient = GROQ_API_KEY ? new Groq({ apiKey: GROQ_API_KEY }) : null;
+const DEOBF_DIR = path.join(DATA_DIR, "Deobfuscator");
+const DEOBF_SCRIPT = path.join(DEOBF_DIR, "deobf", "deob.py");
 // ============================================================
 // ENV
 // ============================================================
@@ -3631,6 +3634,85 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
       replyUser(msg, `❌ failed to fetch: ${e.message.slice(0, 100)}`).catch(() => {});
+    }
+    return;
+  }
+  // .l — deobfuscate (file or link), result = file only
+  if (/^\.l(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    // Collect attachments (.lua .txt .luau) — upload, reply, or forwarded
+    let attachments = [...(msg.attachments?.values() || [])].filter(a => {
+      const e = ext(a.name);
+      return e === "txt" || e === "lua" || e === "luau";
+    });
+    if (!attachments.length && msg.reference?.messageId) {
+      try {
+        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
+        for (const a of refMsg.attachments?.values?.() || []) {
+          const e = ext(a.name);
+          if (e === "txt" || e === "lua" || e === "luau") attachments.push(a);
+        }
+        for (const s of refMsg.messageSnapshots?.values?.() || []) {
+          for (const a of s.attachments?.values?.() || []) {
+            const e = ext(a.name);
+            if (e === "txt" || e === "lua" || e === "luau") attachments.push(a);
+          }
+        }
+      } catch {}
+    }
+    // Check for link in text
+    let fetchUrl = null;
+    const rawArg = txt.replace(/^\.l\s+/i, "").trim();
+    const urlMatch = rawArg.match(/https?:\/\/[^\s)\]}>"']+/i);
+    if (urlMatch) fetchUrl = urlMatch[0];
+
+    if (!attachments.length && !fetchUrl) {
+      replyUser(msg, "❌ reply to a file or upload .lua .txt .luau").catch(() => {});
+      return;
+    }
+    const sentMsg = await replyUser(msg, "🔄 Deobfuscating...").catch(() => {});
+    try {
+      let content, origName;
+      if (attachments.length) {
+        const a = attachments[0];
+        const buf = await downloadURL(a.url);
+        content = buf.toString("utf8");
+        origName = a.name || "script.lua";
+      } else {
+        const buf = await downloadURL(fetchUrl);
+        content = buf.toString("utf8");
+        origName = "script.lua";
+      }
+      if (!content || content.length < 1) throw new Error("Empty file");
+      // Save to temp dir
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "deobf-"));
+      const inputPath = path.join(tmpDir, origName);
+      fs.writeFileSync(inputPath, content, "utf8");
+      const outDir = path.join(tmpDir, "output");
+      // Run deobfuscator (python3 then python fallback)
+      const runDeobf = (pyBin) => new Promise((resolve, reject) => {
+        execFile(pyBin, [DEOBF_SCRIPT, inputPath], {
+          timeout: 120000, maxBuffer: 50 * 1024 * 1024, cwd: DEOBF_DIR
+        }, (err) => { err ? reject(err) : resolve(); });
+      });
+      try { await runDeobf("python3"); }
+      catch { await runDeobf("python"); }
+      // Read output
+      const outFiles = fs.existsSync(outDir) ? fs.readdirSync(outDir).filter(f => !f.startsWith(".")) : [];
+      if (!outFiles.length) throw new Error("No output produced");
+      const outPath = path.join(outDir, outFiles[0]);
+      const outContent = fs.readFileSync(outPath, "utf8");
+      const outName = "deobfuscated_" + crypto.randomBytes(5).toString("hex") + ".lua";
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      // Result: just file, no text, no embed — replyUser
+      await replyUser(msg, { files: [new AttachmentBuilder(Buffer.from(outContent, "utf8"), { name: outName })] }).catch(() => {});
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ deobfuscate failed: ${e.message.slice(0, 120)}`).catch(() => {});
     }
     return;
   }
