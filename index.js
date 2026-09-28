@@ -1864,12 +1864,11 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     if (menu.page > menu.totalPages) menu.page = menu.totalPages;
     const start = (menu.page - 1) * 8;
     const pageItems = menu.results.slice(start, start + 8);
-    const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
     const embed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle(getFinderTitle(menu.isBuyer))
       .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
-      .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Today at ${timeNow}` });
+      .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Prince Finder` });
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
@@ -2897,7 +2896,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
     const file = attachments[0];
-    if (file.size > 200 * 1024) { replyUser(msg, "❌ max is 200kb lol.").catch(() => {}); return; }
+    const maxUploadSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
+    const maxUploadLabel = isBuyerUser ? "1MB" : "200KB";
+    if (file.size > maxUploadSize) { replyUser(msg, `❌ max is ${maxUploadLabel} lol.`).catch(() => {}); return; }
     const sentMsg = await replyUser(msg, "⏳ Uploading...").catch(() => {});
     try {
       const res = await fetch(file.url);
@@ -2952,7 +2953,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         .setColor(getEmbedColor(isBuyerUser))
         .setTitle("Script Copy")
         .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
-        .setFooter({ text: `Request by @${msg.author.username}│File → Script`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
+        .setFooter({ text: `Request by @${msg.author.username}│Prince Loader`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
       await msg.channel.send({
         content: `<@${msg.author.id}> Here is the script bro!`,
         embeds: [embed]
@@ -2995,7 +2996,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     if (!attachments.length) { replyUser(msg, "❌ upload a file so i can make it obfuscate file.").catch(() => {}); return; }
     const file = attachments[0];
-    if (file.size > 200 * 1024) { replyUser(msg, "❌ max is 200kb lol.").catch(() => {}); return; }
+    const maxObfSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
+    const maxObfLabel = isBuyerUser ? "1MB" : "200KB";
+    if (file.size > maxObfSize) { replyUser(msg, `❌ max is ${maxObfLabel} lol.`).catch(() => {}); return; }
     const sentMsg = await replyUser(msg, "🔒 Obfuscating...").catch(() => {});
     try {
       const res = await fetch(file.url);
@@ -3154,24 +3157,43 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [panelRow] }).catch(() => {});
     if (panelMsg) {
       renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, isBuyerUser });
-      setTimeout(() => renamePanels.delete(panelMsg.id), 30 * 60 * 1000);
+      // Buttons never expire — no auto-delete timeout
     }
     return;
   }
-  // .get
+  // .get — buyer only, supports multiple IDs (max 10)
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
-    const cd = checkCommandCooldown(msg.author.id, "get", perm.isBuyer);
+    const isBuyerUser = perm.isBuyer;
+    if (!isBuyerUser) {
+      replyUser(msg, "❌ buy premium if you want it.").catch(() => {});
+      return;
+    }
+    const cd = checkCommandCooldown(msg.author.id, "get", true);
     if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
-    const id = txt.split(/\s+/)[1];
-    if (!id) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
-    const file = getFile(id);
-    if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
-    const freshUrl = await getFreshUrl(file);
-    replyUser(msg, { content: "**Here is the file twin!**", files: [{ attachment: freshUrl || file.url, name: file.filename || "file" }] }).catch(() => {});
+    const args = txt.split(/\s+/).slice(1).filter(Boolean);
+    if (!args.length) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
+    if (args.length > 10) { replyUser(msg, "❌ max 10 id only, dumbass.").catch(() => {}); return; }
+    const filesToSend = [];
+    const notFound = [];
+    for (const id of args) {
+      const file = getFile(id);
+      if (!file) { notFound.push(id); continue; }
+      const freshUrl = await getFreshUrl(file);
+      filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
+    }
+    if (!filesToSend.length) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
+    // Send in batches of 10 (Discord file limit per message)
+    for (let i = 0; i < filesToSend.length; i += 10) {
+      const batch = filesToSend.slice(i, i + 10);
+      const content = i === 0
+        ? "**Here is the file twin!**" + (notFound.length ? `\n❌ Not found: \`${notFound.join("`, `")}\`` : "")
+        : null;
+      await msg.channel.send({ content, files: batch }).catch(() => {});
+    }
     return;
   }
   // .dl / .download — gives file from library ID OR downloads from Discord CDN link
@@ -3333,12 +3355,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const isBuyerUser = perm.isBuyer;
     const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
-    const timeNow = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Manila" });
     const embed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle(getFinderTitle(isBuyerUser))
       .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
-      .setFooter({ text: `Pages 1/${totalPages} │ Today at ${timeNow}` });
+      .setFooter({ text: `Pages 1/${totalPages} │ Prince Finder` });
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
