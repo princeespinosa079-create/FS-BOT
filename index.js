@@ -1542,16 +1542,16 @@ async function aiCleanScript(source, mode) {
 SCRIPT:
 ${source}`;
 
-    const readablePrompt = `You are a Lua/Roblox script cleaning expert (like an AI code assistant). Clean the script below with these rules:
-1. Rename all variables/functions/parameters to meaningful descriptive names (keep EXACT same logic)
-2. Remove ONLY comments and junk/obfuscation lines — DO NOT remove any script loaders, HttpGet, URLs, webhooks, IP loggers, or any real code
-3. Fix any missing "end" or "until" statements so the code is 100% syntactically valid Lua
-4. Replace any Discord invite links with https://discord.gg/TBBAUZu8cW
-5. Keep the EXACT same functionality — never add, remove, or change any real features or behavior
-6. Add proper indentation for readability
-7. Output ONLY the cleaned Lua code — no explanations, no markdown code fences, no extra text whatsoever
+    const readablePrompt = `You are a Lua/Roblox code RECONSTRUCTION expert. FULLY RECONSTRUCT the script below into clean, readable, properly structured code with these rules:
+1. COMPLETELY REWRITE / RECONSTRUCT the code — reorganize, restructure, add proper indentation, meaningful variable/function/parameter names, and clean formatting
+2. Rename ALL variables/functions/parameters from generic/obfuscated names to meaningful descriptive names (keep EXACT same logic)
+3. Remove ONLY comments and junk/obfuscation lines — DO NOT remove any script loaders, HttpGet, URLs, webhooks, IP loggers, or any real functional code
+4. Fix any missing "end" or "until" statements so the code is 100% syntactically valid Lua
+5. Replace any Discord invite links with https://discord.gg/TBBAUZu8cW
+6. Keep the EXACT same functionality — never add, remove, or change any real features or behavior
+7. Output ONLY the reconstructed Lua code — no explanations, no markdown code fences, no extra text whatsoever
 
-SCRIPT TO CLEAN:
+SCRIPT TO RECONSTRUCT:
 ${source}`;
 
     const prompt = mode === "var" ? varPrompt : readablePrompt;
