@@ -1381,6 +1381,66 @@ function cleanLuaScript(text) {
   return result || "";
 }
 
+// ============================================================
+// LUA BLOCK BALANCER — auto-adds missing `end` / `until`
+// ============================================================
+function balanceLuaBlocks(code) {
+  if (!code || typeof code !== "string") return code;
+  const lines = code.split("\n");
+  const stack = []; // each entry: "end" or "until"
+  let pendingIf = false, pendingForWhile = false;
+  for (let line of lines) {
+    // Strip long strings [[...]]
+    let s = line.replace(/\[\[[\s\S]*?\]\]/g, "");
+    // Strip quoted strings
+    s = s.replace(/"(?:\\.|[^"\\])*"/g, '""').replace(/'(?:\\.|[^'\\])*'/g, "''");
+    // Strip comments
+    const ci = s.indexOf("--");
+    if (ci >= 0) s = s.slice(0, ci);
+    // Tokenize block keywords
+    const tokens = s.match(/\b(function|if|then|for|while|do|repeat|end|until|elseif|else)\b/g) || [];
+    let i = 0;
+    while (i < tokens.length) {
+      const t = tokens[i];
+      if (t === "function") {
+        stack.push("end");
+      } else if (t === "repeat") {
+        stack.push("until");
+      } else if (t === "if") {
+        // Look ahead for `then` on same line
+        let j = i + 1;
+        while (j < tokens.length && tokens[j] !== "then" && tokens[j] !== "end" && tokens[j] !== "until" && tokens[j] !== "function" && tokens[j] !== "if" && tokens[j] !== "for" && tokens[j] !== "while" && tokens[j] !== "repeat") j++;
+        if (tokens[j] === "then") { stack.push("end"); i = j; }
+        else { pendingIf = true; }
+      } else if (t === "then") {
+        if (pendingIf) { stack.push("end"); pendingIf = false; }
+      } else if (t === "for" || t === "while") {
+        let j = i + 1;
+        while (j < tokens.length && tokens[j] !== "do" && tokens[j] !== "end" && tokens[j] !== "until" && tokens[j] !== "function" && tokens[j] !== "if" && tokens[j] !== "for" && tokens[j] !== "while" && tokens[j] !== "repeat") j++;
+        if (tokens[j] === "do") { stack.push("end"); i = j; }
+        else { pendingForWhile = true; }
+      } else if (t === "do") {
+        if (pendingForWhile) { stack.push("end"); pendingForWhile = false; }
+        else { stack.push("end"); } // standalone do
+      } else if (t === "end") {
+        if (stack.length) stack.pop();
+      } else if (t === "until") {
+        if (stack.length) stack.pop();
+      }
+      // else / elseif — ignore
+      i++;
+    }
+  }
+  if (!stack.length) return code;
+  // Append missing closers — innermost (last pushed) closes first
+  let appended = "";
+  while (stack.length) {
+    const closer = stack.pop();
+    appended += closer === "until" ? "\nuntil true" : "\nend";
+  }
+  return code + appended;
+}
+
 
 // GOOFYSCATOR Obfuscator
 // ============================================================
@@ -1705,7 +1765,7 @@ client.on("interactionCreate", async interaction => {
         if (mode === "var") {
           finalOutput = renameVariables(text);
         } else {
-          finalOutput = cleanLuaScript(text);
+          finalOutput = balanceLuaBlocks(cleanLuaScript(text));
         }
         
         // Preview (5 lines / 50 words max)
@@ -3192,7 +3252,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const content = i === 0
         ? "**Here is the file twin!**" + (notFound.length ? `\n❌ Not found: \`${notFound.join("`, `")}\`` : "")
         : null;
-      await msg.channel.send({ content, files: batch }).catch(() => {});
+      if (i === 0) {
+        await replyUser(msg, { content, files: batch }).catch(() => {});
+      } else {
+        await msg.channel.send({ content, files: batch }).catch(() => {});
+      }
     }
     return;
   }
