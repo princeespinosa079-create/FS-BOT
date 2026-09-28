@@ -1470,29 +1470,35 @@ function buildPreviewText(finalOutput) {
   return previewText;
 }
 
-function buildRenamerDescription(previewText, foundUrls, urlsRemoved) {
-  let description = "```lua\n" + previewText + "\n```";
-  if (urlsRemoved) {
-    description += `\n\n✅ **URLs removed from file.**`;
-  } else if (foundUrls.length > 0) {
-    const uniqueUrls = [...new Set(foundUrls)];
-    const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
-    let urlSection = `\n\n**URL Found:**\n${urlList}`;
-    if (uniqueUrls.length > 10) urlSection += `\n- ...and ${uniqueUrls.length - 10} more`;
-    description += urlSection.slice(0, 800);
-  }
-  return description;
+function buildRenamerDescription(previewText) {
+  // Only File Preview (5 lines) — no URL list, no removed message
+  return "```lua\n" + previewText + "\n```";
 }
 
-function stripUrlsFromCode(code) {
-  return code
-    .replace(/https?:\/\/[^\s"'()\]]+/g, "")
-    .split("\n")
-    .map(l => l.replace(/["']\s*["']/g, '""').trim())
-    .filter(l => l.length > 0 && !/^["',;\s=]*$/.test(l))
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+// Remove ONLY script loaders + IP loggers — Discord webhooks & normal URLs are KEPT
+function removeDangerousLines(code) {
+  if (!code) return code;
+  const lines = code.split("\n");
+  const cleaned = lines.filter(line => {
+    // Keep Discord webhooks — ALWAYS allowed
+    if (/discord(?:app)?\.com\/api\/webhooks/i.test(line)) return true;
+    // Script loaders
+    if (/loadstring\s*\(\s*(?:game|_G|env|HttpService)\s*[:.]\s*HttpGet/i.test(line)) return false;
+    if (/loadstring\s*\(\s*HttpGet/i.test(line)) return false;
+    if (/\bHttpGet\s*\(\s*["']http/i.test(line)) return false;
+    if (/getcustomasset|getsynasset/i.test(line)) return false;
+    if (/synapse|script-?ware|krnl|fluxus|delta|celery|electron|comet|vega\s*x|ironbrew/i.test(line)) return false;
+    if (/loadlib|loadfile|dofile.*http/i.test(line)) return false;
+    if (/syn\s*\.\s*request\s*\(/i.test(line)) return false;
+    // IP loggers / grabbers
+    if (/iplogger|ipgrablog|ipify|whatismyip|grabify|logmyip|ipgrabber|stealip/i.test(line)) return false;
+    if (/webhook\.site|hook\.billy|iplog\.xyz/i.test(line)) return false;
+    if (/\/api\/v[0-9]+\/track|\/log\?|\/grab\?/i.test(line)) return false;
+    if (/ip\s*[=:]\s*["']?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/i.test(line)) return false;
+    if (/(?:new\s+)?WebSocket\s*\(/i.test(line)) return false;
+    return true;
+  });
+  return cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 // ============================================================
@@ -1517,7 +1523,7 @@ ${source}`;
 
     const readablePrompt = `You are a Lua/Roblox script cleaning expert (like an AI code assistant). Clean the script below with these rules:
 1. Rename all variables/functions/parameters to meaningful descriptive names (keep EXACT same logic)
-2. Remove ALL comments, IP logger/grabber code, script loaders (loadstring, HttpGet, request, syn.request), junk/obfuscation lines, and dead code
+2. Remove ONLY comments and junk/obfuscation lines — DO NOT remove any script loaders, HttpGet, URLs, webhooks, IP loggers, or any real code
 3. Fix any missing "end" or "until" statements so the code is 100% syntactically valid Lua
 4. Replace any Discord invite links with https://discord.gg/TBBAUZu8cW
 5. Keep the EXACT same functionality — never add, remove, or change any real features or behavior
@@ -1882,8 +1888,8 @@ client.on("interactionCreate", async interaction => {
           const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
           const urlQuestionEmbed = new EmbedBuilder()
             .setColor(REGULAR_COLOR)
-            .setTitle("URL Detected")
-            .setDescription(`**URL Found in file:**\n${urlList}\n\nClick one of button if you want to remove URL from the file.`)
+            .setTitle("URL Found:")
+            .setDescription(`${urlList}\n\n**Click one of button if you want to remove URL from the file.**`)
             .setFooter({ text: `Request by @${interaction.user.username}│Prince Renamer`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
           const urlRow = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`urlremove_yes_${interaction.user.id}`).setLabel("Yes").setStyle(ButtonStyle.Success),
@@ -1906,7 +1912,7 @@ client.on("interactionCreate", async interaction => {
         
         // No URLs → send result directly (Panel → Loading → Result)
         const previewText = buildPreviewText(finalOutput);
-        const description = buildRenamerDescription(previewText, foundUrls, false);
+        const description = buildRenamerDescription(previewText);
         const resultEmbed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
           .setTitle("File Preview")
@@ -1943,14 +1949,13 @@ client.on("interactionCreate", async interaction => {
     await interaction.deferUpdate().catch(() => {});
     
     let finalOutput = ctx.finalOutput;
-    let urlsRemoved = false;
     if (choice === "yes") {
-      finalOutput = stripUrlsFromCode(finalOutput);
-      urlsRemoved = true;
+      // YES = remove ONLY script loaders + IP loggers (webhooks kept)
+      finalOutput = removeDangerousLines(finalOutput);
     }
     
     const previewText = buildPreviewText(finalOutput);
-    const description = buildRenamerDescription(previewText, ctx.foundUrls, urlsRemoved);
+    const description = buildRenamerDescription(previewText);
     const resultEmbed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle("File Preview")
@@ -3546,6 +3551,50 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       content: `<@${msg.author.id}> **Here is the file twin!**`,
       files: [fileAttachment]
     }).catch(() => {});
+    return;
+  }
+  // .fetch — fetch script from URL, auto-clean URL, preview + file
+  if (/^\.fetch(?:\s|$)/i.test(txt)) {
+    let rawArg = txt.replace(/^\.fetch\s+/i, "").trim();
+    if (!rawArg) { replyUser(msg, "❌ usage: `.fetch <url>`.").catch(() => {}); return; }
+    // Extract clean URL — strips ))() quotes parentheses etc.
+    const urlMatch = rawArg.match(/https?:\/\/[^\s)\]}>"']+/i);
+    const fetchUrl = urlMatch ? urlMatch[0] : rawArg;
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    const cd = checkCommandCooldown(msg.author.id, "dl", perm.isBuyer);
+    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    const startTime = Date.now();
+    const sentMsg = await replyUser(msg, "🔄 Fetching...").catch(() => {});
+    try {
+      const buf = await downloadURL(fetchUrl);
+      const content = buf.toString("utf8");
+      if (!content || content.length < 1) throw new Error("Empty response");
+      // Random 20-char filename
+      const fileName = crypto.randomBytes(10).toString("hex") + ".lua";
+      // Preview — first 5 lines
+      const previewLines = content.split("\n").slice(0, 5).join("\n");
+      const previewDisplay = previewLines.length > 800 ? previewLines.slice(0, 800) + "\n..." : previewLines;
+      const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
+      // PH time — no leading zero on hour
+      const phTime = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Manila" });
+      const embed = new EmbedBuilder()
+        .setColor(REGULAR_COLOR)
+        .setDescription(`**Preview:**\n\`\`\`lua\n${previewDisplay}\n\`\`\``)
+        .setFooter({ text: `Today at ${phTime}` });
+      const attachment = new AttachmentBuilder(Buffer.from(content, "utf-8"), { name: fileName });
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      await replyUser(msg, {
+        content: `Here you go!\n**Finish in:** \`${finishSec}s\``,
+        embeds: [embed],
+        files: [attachment]
+      }).catch(() => {});
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ failed to fetch: ${e.message.slice(0, 100)}`).catch(() => {});
+    }
     return;
   }
   // .find
