@@ -23,13 +23,9 @@ const path = require("path");
 const AdmZip = require("adm-zip");
 const os = require("os");
 const crypto = require("crypto");
-const { execFile } = require("child_process");
 const { Groq } = require("groq-sdk");
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const groqClient = GROQ_API_KEY ? new Groq({ apiKey: GROQ_API_KEY }) : null;
-const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
-const DEOBF_DIR = path.join(DATA_DIR, "Deobfuscator");
-const DEOBF_SCRIPT = path.join(DEOBF_DIR, "deobf", "deob.py");
 // ============================================================
 // ENV
 // ============================================================
@@ -50,6 +46,7 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 // ============================================================
 // STORAGE
 // ============================================================
+const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 function readJSON(file, fallback) {
@@ -942,11 +939,11 @@ function zipAttachmentsOf(message) {
 function extractAttachmentsOf(message) {
   const result = [];
   for (const a of message.attachments?.values?.() || []) {
-    if (isZipFile(a.name, a.contentType)) result.push(a);
+    if (isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType)) result.push(a);
   }
   for (const s of message.messageSnapshots?.values?.() || []) {
     for (const a of s.attachments?.values?.() || []) {
-      if (isZipFile(a.name, a.contentType)) result.push(a);
+      if (isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType)) result.push(a);
     }
   }
   return result;
@@ -1525,6 +1522,56 @@ function hasDangerousContent(text) {
   return false;
 }
 
+// Precise check: returns true ONLY when actual script-loader URLs or IP-logger URLs are found.
+// Unlike hasDangerousContent, this does NOT trigger on executor names (synapse/fluxus/krnl/etc.),
+// WebSocket constructors, or bare IP-address patterns — only on URL-based loaders & loggers.
+function hasScriptLoaderOrIpLogger(text) {
+  if (!text) return false;
+  const urlRegex = /https?:\/\/[^\s"'()\]]+/gi;
+  const urls = text.match(urlRegex) || [];
+  const ipLoggerDomains = [
+    "iplogger.org","iplogger.com","iplogger.ru","iplogger.info","iplogger.net",
+    "grabify.link","grabify.xyz","grabify.tk","nipiscan.com","spiderip.com",
+    "blasze.tk","blasze.com","ip-api.com","ipify.org","icanhazip.com","ifconfig.co","ifconfig.me",
+    "whatismyip.com","ipinfo.io","ipgeolocation.io","freegeoip.net","freegeoip.app",
+    "checkip.amazonaws.com","webhook.site","hook.billy","iplog.xyz","logmyip.com",
+    "ipgrabber","stealip","ip-logger","ipgrab","iplog","logger","grabip","trackip",
+    "ip-tracker","ip-trace","ipgrabbed","iplogged","ip-grabber","iplogger","grabify"
+  ];
+  // 1) Check every URL found in the text against known IP-logger / grabber domains
+  for (const u of urls) {
+    const lower = u.toLowerCase();
+    // Discord webhooks & safe CDN links are always allowed
+    if (/discord(?:app)?\.com\/api\/webhooks/i.test(lower)) continue;
+    if (/discord\.(gg|com\/invite)\//i.test(lower)) continue;
+    if (/files\.catbox\.moe\//i.test(lower)) continue;
+    for (const dom of ipLoggerDomains) {
+      if (lower.includes(dom)) return true;
+    }
+    // URL shorteners often hide loggers — flag them
+    if (/^(?:https?:\/\/)?(?:bit\.ly|tinyurl\.com|is\.gd|t\.co|ow\.ly|rb\.gy|cutt\.ly|bc\.vc|adf\.ly|linkvertise\.com|shorte\.st|bcvc\.one)\/?/i.test(lower)) return true;
+  }
+  // 2) Check for script-loader patterns that fetch from a URL (webhooks excluded)
+  for (const line of text.split("\n")) {
+    if (/discord(?:app)?\.com\/api\/webhooks/i.test(line)) continue;
+    // loadstring(game:HttpGet("http...")) / loadstring(HttpGet("http..."))
+    if (/loadstring\s*\(\s*(?:game|_G|env|HttpService)\s*[:.]\s*HttpGet\s*\(\s*["']https?:\/\//i.test(line)) return true;
+    if (/loadstring\s*\(\s*HttpGet\s*\(\s*["']https?:\/\//i.test(line)) return true;
+    if (/\bHttpGet\s*\(\s*["']https?:\/\//i.test(line)) return true;
+    // HttpService:GetAsync("http...")
+    if (/HttpService\s*[:.]\s*GetAsync\s*\(\s*["']https?:\/\//i.test(line)) return true;
+    // syn.request({ Url = "http..." }) / http.get("http...")
+    if (/syn\s*\.\s*request\s*\([^)]*https?:\/\//i.test(line)) return true;
+    if (/http\s*\.\s*(?:get|request)\s*\(\s*["']https?:\/\//i.test(line)) return true;
+    // require("http...") / loadlib / loadfile / dofile with http
+    if (/require\s*\(\s*["']https?:\/\//i.test(line)) return true;
+    if (/(?:loadlib|loadfile|dofile)\s*\([^)]*https?:\/\//i.test(line)) return true;
+    // pcall/xpcall wrapping loadstring with a URL fetch
+    if (/(?:pcall|xpcall)\s*\(\s*loadstring[^)]*https?:\/\//i.test(line)) return true;
+  }
+  return false;
+}
+
 // ============================================================
 // GROQ AI CLEANER — smart renaming + fixing via Groq API
 // ============================================================
@@ -1905,8 +1952,9 @@ client.on("interactionCreate", async interaction => {
         for (let i = 0; i < 20; i++) outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
         outputName += ".lua";
         
-        // If URLs found → ask Yes/No before sending result
-        if (foundUrls.length > 0 && hasDangerousContent(text)) {
+        // Only ask Yes/No if actual script-loaders or IP-logger URLs were found.
+        // Otherwise (clean file) — send the result directly, no confirmation button.
+        if (hasScriptLoaderOrIpLogger(text)) {
           await interaction.message.delete().catch(() => {});
           const uniqueUrls = [...new Set(foundUrls)];
           const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
@@ -2860,15 +2908,21 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     if (!attachments.length && msg.reference?.messageId) {
       try { const ref = await msg.channel.messages.fetch(msg.reference.messageId); attachments = extractAttachmentsOf(ref); } catch {}
     }
-    if (!attachments.length) { replyUser(msg, "❌ upload a .zip file or reply to one, dumbass.").catch(() => {}); return; }
+    if (!attachments.length) { replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {}); return; }
     const sourceFile = attachments[0];
     const maxInfo = getMaxFileSize(msg.guild);
     if (sourceFile.size > maxInfo.size) { replyUser(msg, `❌ max file is ${maxInfo.label}, lol.`).catch(() => {}); return; }
     const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
     try {
       const buf = await downloadURL(sourceFile.url);
-      let files = extractFilesFromZip(buf);
-      if (!files.length) { if (sentMsg) await sentMsg.delete().catch(() => {}); replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {}); return; }
+      let files;
+      if (isHtmlFile(sourceFile.name, sourceFile.contentType)) {
+        // Standalone HTML file — export it directly
+        files = [{ name: path.basename(sourceFile.name || "export.html"), data: buf }];
+      } else {
+        files = extractFilesFromZip(buf);
+      }
+      if (!files.length) { if (sentMsg) await sentMsg.delete().catch(() => {}); replyUser(msg, "❌ file is empty or has no extractable content, bro.").catch(() => {}); return; }
       if (sentMsg) await sentMsg.delete().catch(() => {});
       for (let i = 0; i < files.length; i += 10) {
         const batch = files.slice(i, i + 10);
@@ -3317,7 +3371,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       } catch {}
     }
     if (!attachments.length) {
-      replyUser(msg, "❌ upload a .zip file or reply to one, dumbass.").catch(() => {});
+      replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {});
       return;
     }
     const sourceFile = attachments[0];
@@ -3329,10 +3383,16 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
     try {
       const buf = await downloadURL(sourceFile.url);
-      let files = extractFilesFromZip(buf);
+      let files;
+      if (isHtmlFile(sourceFile.name, sourceFile.contentType)) {
+        // Standalone HTML file — export it directly (single-file carousel)
+        files = [{ name: path.basename(sourceFile.name || "export.html"), data: buf }];
+      } else {
+        files = extractFilesFromZip(buf);
+      }
       if (!files.length) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, "❌ zip is empty or has no extractable files, bro.").catch(() => {});
+        replyUser(msg, "❌ file is empty or has no extractable content, bro.").catch(() => {});
         return;
       }
       if (sentMsg) await sentMsg.delete().catch(() => {});
@@ -3634,85 +3694,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
       replyUser(msg, `❌ failed to fetch: ${e.message.slice(0, 100)}`).catch(() => {});
-    }
-    return;
-  }
-  // .l — deobfuscate (file or link), result = file only
-  if (/^\.l(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    // Collect attachments (.lua .txt .luau) — upload, reply, or forwarded
-    let attachments = [...(msg.attachments?.values() || [])].filter(a => {
-      const e = ext(a.name);
-      return e === "txt" || e === "lua" || e === "luau";
-    });
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        for (const a of refMsg.attachments?.values?.() || []) {
-          const e = ext(a.name);
-          if (e === "txt" || e === "lua" || e === "luau") attachments.push(a);
-        }
-        for (const s of refMsg.messageSnapshots?.values?.() || []) {
-          for (const a of s.attachments?.values?.() || []) {
-            const e = ext(a.name);
-            if (e === "txt" || e === "lua" || e === "luau") attachments.push(a);
-          }
-        }
-      } catch {}
-    }
-    // Check for link in text
-    let fetchUrl = null;
-    const rawArg = txt.replace(/^\.l\s+/i, "").trim();
-    const urlMatch = rawArg.match(/https?:\/\/[^\s)\]}>"']+/i);
-    if (urlMatch) fetchUrl = urlMatch[0];
-
-    if (!attachments.length && !fetchUrl) {
-      replyUser(msg, "❌ reply to a file or upload .lua .txt .luau").catch(() => {});
-      return;
-    }
-    const sentMsg = await replyUser(msg, "🔄 Deobfuscating...").catch(() => {});
-    try {
-      let content, origName;
-      if (attachments.length) {
-        const a = attachments[0];
-        const buf = await downloadURL(a.url);
-        content = buf.toString("utf8");
-        origName = a.name || "script.lua";
-      } else {
-        const buf = await downloadURL(fetchUrl);
-        content = buf.toString("utf8");
-        origName = "script.lua";
-      }
-      if (!content || content.length < 1) throw new Error("Empty file");
-      // Save to temp dir
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "deobf-"));
-      const inputPath = path.join(tmpDir, origName);
-      fs.writeFileSync(inputPath, content, "utf8");
-      const outDir = path.join(tmpDir, "output");
-      // Run deobfuscator (python3 then python fallback)
-      const runDeobf = (pyBin) => new Promise((resolve, reject) => {
-        execFile(pyBin, [DEOBF_SCRIPT, inputPath], {
-          timeout: 120000, maxBuffer: 50 * 1024 * 1024, cwd: DEOBF_DIR
-        }, (err) => { err ? reject(err) : resolve(); });
-      });
-      try { await runDeobf("python3"); }
-      catch { await runDeobf("python"); }
-      // Read output
-      const outFiles = fs.existsSync(outDir) ? fs.readdirSync(outDir).filter(f => !f.startsWith(".")) : [];
-      if (!outFiles.length) throw new Error("No output produced");
-      const outPath = path.join(outDir, outFiles[0]);
-      const outContent = fs.readFileSync(outPath, "utf8");
-      const outName = "deobfuscated_" + crypto.randomBytes(5).toString("hex") + ".lua";
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      // Result: just file, no text, no embed — replyUser
-      await replyUser(msg, { files: [new AttachmentBuilder(Buffer.from(outContent, "utf8"), { name: outName })] }).catch(() => {});
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ deobfuscate failed: ${e.message.slice(0, 120)}`).catch(() => {});
     }
     return;
   }
