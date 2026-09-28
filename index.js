@@ -23,6 +23,9 @@ const path = require("path");
 const AdmZip = require("adm-zip");
 const os = require("os");
 const crypto = require("crypto");
+const { Groq } = require("groq-sdk");
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
+const groqClient = GROQ_API_KEY ? new Groq({ apiKey: GROQ_API_KEY }) : null;
 // ============================================================
 // ENV
 // ============================================================
@@ -1441,6 +1444,44 @@ function balanceLuaBlocks(code) {
   return code + appended;
 }
 
+// ============================================================
+// GROQ AI CLEANER — smart renaming + fixing via Groq API
+// ============================================================
+async function aiCleanScript(source) {
+  if (!groqClient) {
+    console.warn("⚠️ GROQ_API_KEY not set — falling back to regex clean.");
+    return balanceLuaBlocks(cleanLuaScript(source));
+  }
+  try {
+    const prompt = `You are a Lua/Roblox script cleaning expert. Clean the script below with these rules:
+1. Rename all variables/functions/parameters to meaningful descriptive names (keep EXACT same logic)
+2. Remove ALL comments, IP logger/grabber code, script loaders (loadstring, HttpGet, request, syn.request), junk/obfuscation lines, and dead code
+3. Fix any missing "end" or "until" statements so the code is 100% syntactically valid Lua
+4. Replace any Discord invite links with https://discord.gg/TBBAUZu8cW
+5. Keep the EXACT same functionality — never add, remove, or change any real features or behavior
+6. Add proper indentation for readability
+7. Output ONLY the cleaned Lua code — no explanations, no markdown code fences, no extra text whatsoever
+
+SCRIPT TO CLEAN:
+${source}`;
+
+    const completion = await groqClient.chat.completions.create({
+      messages: [{ role: "user", content: prompt }],
+      model: "llama-3.3-70b-versatile",
+      temperature: 0.3,
+      max_tokens: 8000,
+    });
+    let output = completion.choices[0]?.message?.content || "";
+    // Strip markdown fences if AI added them
+    output = output.replace(/^```(?:lua)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+    if (!output) throw new Error("Empty AI response");
+    return output;
+  } catch (e) {
+    console.warn("⚠️ Groq AI clean failed, falling back to regex:", e.message?.slice(0, 120));
+    return balanceLuaBlocks(cleanLuaScript(source));
+  }
+}
+
 
 // GOOFYSCATOR Obfuscator
 // ============================================================
@@ -1764,6 +1805,8 @@ client.on("interactionCreate", async interaction => {
         let finalOutput;
         if (mode === "var") {
           finalOutput = renameVariables(text);
+        } else if (mode === "ai") {
+          finalOutput = await aiCleanScript(text);
         } else {
           finalOutput = balanceLuaBlocks(cleanLuaScript(text));
         }
@@ -3212,7 +3255,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       .setDescription("Select how you want to rename the code:");
     const panelRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`rename_var_${msg.author.id}`).setLabel("Variable Renamer").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`rename_readable_${msg.author.id}`).setLabel("Readable & Executable").setStyle(ButtonStyle.Primary)
+      new ButtonBuilder().setCustomId(`rename_readable_${msg.author.id}`).setLabel("Readable & Executable").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`rename_ai_${msg.author.id}`).setLabel("AI Clean (Groq)").setStyle(ButtonStyle.Danger)
     );
     const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [panelRow] }).catch(() => {});
     if (panelMsg) {
@@ -3221,22 +3265,22 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // .get — buyer only, supports multiple IDs (max 10)
+  // .get — regular: 1 ID max, buyer: up to 10 IDs
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    if (!isBuyerUser) {
-      replyUser(msg, "❌ buy premium if you want it.").catch(() => {});
-      return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "get", true);
+    const cd = checkCommandCooldown(msg.author.id, "get", isBuyerUser);
     if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1).filter(Boolean);
     if (!args.length) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
-    if (args.length > 10) { replyUser(msg, "❌ max 10 id only, dumbass.").catch(() => {}); return; }
+    const maxGetIds = isBuyerUser ? 10 : 1;
+    if (args.length > maxGetIds) {
+      replyUser(msg, isBuyerUser ? "❌ max 10 id only, dumbass." : "❌ buy premium if you want multiple id.").catch(() => {});
+      return;
+    }
     const filesToSend = [];
     const notFound = [];
     for (const id of args) {
