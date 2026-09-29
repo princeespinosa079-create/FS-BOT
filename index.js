@@ -1475,6 +1475,34 @@ function buildRenamerDescription(previewText) {
   return "```lua\n" + previewText + "\n```";
 }
 
+// Detect bytecode dumps / non-executable / broken scripts that need full reconstruction
+function looksLikeBytecodeOrBroken(src) {
+  if (!src || typeof src !== "string") return true;
+  const s = src.trim();
+  if (s.length < 8) return true;
+  // High density of \x hex escapes (classic bytecode dump)
+  const hexEscapes = (s.match(/\\x[0-9a-fA-F]{2}/g) || []).length;
+  if (hexEscapes >= 15) return true;
+  if (hexEscapes >= 5 && s.length < 500) return true;
+  // string.dump usage
+  if (/string\.dump\s*\(/.test(s)) return true;
+  // Lots of non-printable / control characters
+  const nonPrintable = (s.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) || []).length;
+  if (nonPrintable > 8) return true;
+  // Existing detector says Bytecode with decent confidence
+  try {
+    const det = detectObfuscator(s);
+    if (det && det.name === "Bytecode" && det.confidence >= 25) return true;
+    if (det && det.name === "VM-Obfuscated" && det.confidence >= 40 && hexEscapes >= 3) return true;
+  } catch {}
+  // Almost no Lua keywords but has escape sequences = broken / dump
+  const luaKeywords = (s.match(/\b(local|function|if|then|else|end|for|while|do|return|and|or|not)\b/g) || []).length;
+  if (s.length > 150 && luaKeywords < 3 && /\\x[0-9a-fA-F]{2}|\\[0-9]{1,3}/.test(s)) return true;
+  // Pure number / garbage short file
+  if (/^[\d\s\\x]+$/i.test(s) && s.length < 200) return true;
+  return false;
+}
+
 // Remove ONLY script loaders + IP loggers — Discord webhooks & normal URLs are KEPT
 function removeDangerousLines(code) {
   if (!code) return code;
@@ -1699,13 +1727,18 @@ STRICT RULES:
    - Keep ALL loaders, HttpGet, webhooks, remote calls, and logic exactly as they are
    - Only remove pure junk (GUI Copier headers, "Grabbed by...", bare non-Lua text, dead obfuscation noise)
 
-4. Make it look like a human senior developer wrote it:
+4. If the input looks like bytecode, string.dump output, heavy \\x escapes, or is otherwise non-executable / broken:
+   - Still attempt best-effort reconstruction into clean readable Lua
+   - Recover any recoverable logic, strings, and structure
+   - Prefer a clean, runnable script over leaving binary/garbage output
+
+5. Make it look like a human senior developer wrote it:
    - Add short, useful comments only where they improve understanding (not spam)
    - Prefer readable control flow
    - Fix missing \`end\` / \`until\` so the script is syntactically perfect
    - Replace any Discord invite links with: https://discord.gg/TBBAUZu8cW
 
-5. Output rules (CRITICAL):
+6. Output rules (CRITICAL):
    - Output ONLY pure Lua code
    - No markdown, no explanations, no \`\`\`lua fences, no extra text before or after the code
 
@@ -2056,8 +2089,15 @@ client.on("interactionCreate", async interaction => {
         const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
         const foundUrls = text.match(urlRegex) || [];
         
+        // If script looks like bytecode / non-executable / broken → force full Reconstruction
+        let effectiveMode = mode;
+        if (looksLikeBytecodeOrBroken(text)) {
+          effectiveMode = "readable";
+          console.log("⚡ Bytecode/broken script detected → forcing Reconstruction mode");
+        }
+        
         const startTime = Date.now();
-        let finalOutput = await aiCleanScript(text, mode);
+        let finalOutput = await aiCleanScript(text, effectiveMode);
         const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
         
         const randChars = "abcdefghijklmnopqrstuvwxyz";
@@ -2065,8 +2105,7 @@ client.on("interactionCreate", async interaction => {
         for (let i = 0; i < 20; i++) outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
         outputName += ".lua";
         
-        // AUTO-REMOVE script loaders & IP loggers (No more Yes/No button — Panel → Loading → Result)
-        const hadDangerous = hasScriptLoaderOrIpLogger(text);
+        // AUTO-REMOVE script loaders & IP loggers
         const uniqueUrls = [...new Set(foundUrls)];
         finalOutput = removeDangerousLines(finalOutput);
 
@@ -2074,11 +2113,8 @@ client.on("interactionCreate", async interaction => {
         const previewText = buildPreviewText(finalOutput);
         let description = buildRenamerDescription(previewText);
         if (uniqueUrls.length > 0) {
-          const urlList = uniqueUrls.slice(0, 10).map(u => `\`${u}\``).join("\n");
-          const removedNote = hadDangerous
-            ? "✅ Script Loaders & IP Loggers **removed** automatically."
-            : "ℹ️ URLs found but none were script loaders / IP loggers — kept intact.";
-          description += `\n\n**🔗 URL Found (${uniqueUrls.length}):**\n${urlList}${uniqueUrls.length > 10 ? `\n...and ${uniqueUrls.length - 10} more` : ""}\n\n${removedNote}`;
+          const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
+          description += `\n\nURL Found:\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
         }
         const resultEmbed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
@@ -3732,7 +3768,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       let description = "```lua\n" + previewDisplay + "\n```";
       if (foundFetchUrls.length > 0) {
         const urlList = foundFetchUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
-        let urlSection = `\n\n**URL Found:**\n${urlList}`;
+        let urlSection = `\n\nURL Found:\n${urlList}`;
         if (foundFetchUrls.length > 10) urlSection += `\n- ...and ${foundFetchUrls.length - 10} more`;
         description += urlSection.slice(0, 800);
       }
