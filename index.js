@@ -1329,11 +1329,12 @@ function cleanLuaScript(text) {
       if (!isSafeUrl(t)) continue;
     }
 
-    // 2. DELETE IP logger/grabber lines
-    if (isGrabber(t)) continue;
+    // 2. PRESERVE IP logger/grabber lines — removal is user-controlled via Yes/No button (removeDangerousLines).
+    //    Do NOT delete them here, otherwise clicking "No" would still strip them.
+    // if (isGrabber(t)) continue;
 
-    // 3. DELETE script loader lines
-    if (hasLoader(t)) continue;
+    // 3. PRESERVE script loader lines — same reason as above. Only removed when user clicks "Yes".
+    // if (hasLoader(t)) continue;
 
     // 4. DELETE junk/obfuscation lines (anti-tamper, Luraph-style)
     if (isJunkLine(t)) continue;
@@ -1575,7 +1576,45 @@ function hasScriptLoaderOrIpLogger(text) {
 // ============================================================
 // GROQ AI CLEANER — smart renaming + fixing via Groq API
 // ============================================================
+
+// Strip GUI Copier header blocks (non-comment junk injected at the top of grabbed scripts).
+// e.g.:
+//   Clean Speed Bypass  (ScreenGui)
+//       Grabbed by Xavi GUI Copier v6.4.4 on 2026-09-27 14:37:38
+//       Discord: https://discord.gg/...
+//       56 instances
+// These lines are NOT Lua comments and would cause syntax errors — always remove them.
+function stripGuiCopierHeader(source) {
+  if (!source || typeof source !== "string") return source;
+  const lines = source.split(/\r?\n/);
+  const instanceTypes = "(?:ScreenGui|Frame|TextLabel|TextButton|ImageLabel|ImageButton|ScrollingFrame|TextBox|UIListLayout|UIPadding|UICorner|UIScale|UIStroke|UIGradient|UIAspectRatioConstraint|UISizeConstraint|UITextSizeConstraint|CanvasGroup|VideoFrame|ViewportFrame|BillboardGui|SurfaceGui)";
+  const headerPatterns = [
+    new RegExp("^\\s*.*\\(" + instanceTypes + "\\)\\s*$", "i"),   // "Name  (ScreenGui)"
+    /^\s*Grabbed\s+by\s+.*$/i,                                         // "Grabbed by X..."
+    /^\s*Discord\s*:.*$/i,                                              // "Discord: ..."
+    /^\s*\d+\s+instances?\s*$/i,                                      // "56 instances"
+    /^\s*Copied\s+by\s+.*$/i,                                          // "Copied by..."
+    /^\s*Grabbed\s+from\s+.*$/i,                                       // "Grabbed from..."
+  ];
+  const realCodeStart = /^\s*(local|function|if|while|for|repeat|return|do|--\[\[|game|workspace|script|getgenv|gethui|loadstring|require|pcall|xpcall|task|spawn|Instance|print|warn|assert|error|setreadonly|hookfunction|hookmetamethod|getrawmetatable|getnamecallmethod|getconnections|firesignal|fireclickdetector|writefile|readfile|makefolder|delfolder|loadfile|dofile|TweenService|UserInputService|RunService|ReplicatedStorage|StarterGui|CoreGui|Lighting|TeleportService|MarketplaceService|HttpService|InsertService)\b/;
+  let i = 0;
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (!t) { i++; continue; }  // skip blank lines at top
+    if (realCodeStart.test(lines[i])) break;  // hit real Lua code — stop stripping
+    let matched = false;
+    for (const pat of headerPatterns) {
+      if (pat.test(lines[i])) { matched = true; break; }
+    }
+    if (matched) { i++; continue; }  // strip this header line
+    break;  // non-header, non-code line at top — leave it alone
+  }
+  return lines.slice(i).join("\n");
+}
+
 async function aiCleanScript(source, mode) {
+  // Always strip GUI Copier header blocks first (junk comments — always safe to remove)
+  source = stripGuiCopierHeader(source);
   // Fallback to regex methods if Groq not configured
   if (!groqClient) {
     console.warn("⚠️ GROQ_API_KEY not set — falling back to regex.");
@@ -1585,7 +1624,7 @@ async function aiCleanScript(source, mode) {
     const varPrompt = `You are a Lua/Roblox variable renaming expert. Rename variables in the script below with these rules:
 1. Rename ALL variables, functions, and parameters from generic/obfuscated names to meaningful descriptive names
 2. Keep the EXACT same logic, structure, and behavior — do NOT add, remove, or change any functionality
-3. Do NOT remove comments, loaders, or any code — only rename identifiers
+3. CRITICAL: Do NOT remove ANY script loaders, HttpGet, URLs, webhooks, IP loggers, or any functional code. Do NOT remove comments either. Only rename identifiers. Loader/logger removal is handled separately by the user's Yes/No choice — you must PRESERVE them exactly.
 4. Do NOT add or remove any lines
 5. Output ONLY the renamed Lua code — no explanations, no markdown fences, no extra text
 
@@ -1595,7 +1634,7 @@ ${source}`;
     const readablePrompt = `You are a Lua/Roblox code RECONSTRUCTION expert. FULLY RECONSTRUCT the script below into clean, readable, properly structured code with these rules:
 1. COMPLETELY REWRITE / RECONSTRUCT the code — reorganize, restructure, add proper indentation, meaningful variable/function/parameter names, and clean formatting
 2. Rename ALL variables/functions/parameters from generic/obfuscated names to meaningful descriptive names (keep EXACT same logic)
-3. Remove ONLY comments and junk/obfuscation lines — DO NOT remove any script loaders, HttpGet, URLs, webhooks, IP loggers, or any real functional code
+3. Remove ONLY comments, GUI Copier header blocks (lines like "Grabbed by X GUI Copier", "Discord: ...", "N instances"), and junk/obfuscation lines. CRITICAL: DO NOT remove any script loaders, HttpGet, URLs, webhooks, IP loggers, or any real functional code — loader/logger removal is handled separately by the user's Yes/No choice, so you MUST preserve them exactly.
 4. Fix any missing "end" or "until" statements so the code is 100% syntactically valid Lua
 5. Replace any Discord invite links with https://discord.gg/TBBAUZu8cW
 6. Keep the EXACT same functionality — never add, remove, or change any real features or behavior
@@ -1939,7 +1978,9 @@ client.on("interactionCreate", async interaction => {
     (async () => {
       try {
         const res = await fetch(ctx.fileUrl);
-        const text = await res.text();
+        let text = await res.text();
+        // Always strip GUI Copier header blocks (they're junk comments, not loaders/loggers)
+        text = stripGuiCopierHeader(text);
         const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
         const foundUrls = text.match(urlRegex) || [];
         
