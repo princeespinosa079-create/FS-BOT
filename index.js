@@ -299,36 +299,34 @@ function channelAllowed(msg) {
     return false;
   }
 }
-async function hasPrinceStatus(userId) {
+// Check if a user/member has adopted THIS server's Server Tag (primary guild identity)
+function memberHasServerTag(member) {
+  if (!member?.user) return false;
   try {
-    const mainGuild = await client.guilds.fetch(GUILD_ID);
-    const member = await mainGuild.members.fetch(userId, { force: true });
-    if (!member?.presence?.activities) return false;
-    for (const act of member.presence.activities) {
-      if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
-        return true;
-      }
-    }
-    return false;
+    const pg = member.user.primaryGuild;
+    if (!pg) return false;
+    // Must be displaying the tag AND it must be for our guild
+    return pg.identityEnabled === true && String(pg.identityGuildId) === String(GUILD_ID);
   } catch {
     return false;
   }
 }
-// Check if user has Server Tag (guild-specific avatar = server identity/profile)
 function hasServerTag(member) {
-  // Legacy wrapper — now checks status requirement
-  return memberHasPrinceStatus(member);
+  return memberHasServerTag(member);
 }
-// Check if guild supports Server Tag feature
-function guildSupportsServerTag(guild) {
-  if (!guild) return false;
-  // Server Identity/Tag feature is available in all guilds that have it enabled
-  // Check for common features that indicate server identity support
-  const features = guild.features || [];
-  return features.includes("GUILD_SERVER_GUIDE") || 
-         features.includes("MEMBER_VERIFICATION_GATE_ENABLED") ||
-         features.includes("NEWS") ||
-         true; // Most modern guilds support server identity
+// Async — fetch member from main guild then check Server Tag
+async function hasPrinceStatus(userId) {
+  try {
+    const mainGuild = await client.guilds.fetch(GUILD_ID);
+    const member = await mainGuild.members.fetch(userId, { force: true });
+    return memberHasServerTag(member);
+  } catch {
+    return false;
+  }
+}
+// Alias used by older call sites
+function memberHasPrinceStatus(member) {
+  return memberHasServerTag(member);
 }
 async function isInMainGuild(userId) {
   try {
@@ -339,30 +337,22 @@ async function isInMainGuild(userId) {
     return false;
   }
 }
-function memberHasPrinceStatus(member) {
-  if (!member?.presence?.activities) return false;
-  for (const act of member.presence.activities) {
-    if (act.type === 4 && act.state && act.state.toLowerCase().includes(".gg/tbbauzu8cw")) {
-      return true;
-    }
-  }
-  return false;
-}
+// Auto-give / remove PRINCE role based on Server Tag
 async function syncPrinceRole(member) {
   try {
     if (!member || member.guild.id !== GUILD_ID) return;
     if (member.user.bot) return;
-    // Force-fetch to get latest server avatar data (no stale cache)
+    // Force-fetch to get latest user data (primaryGuild / Server Tag)
     try { member = await member.guild.members.fetch(member.id, { force: true }); } catch {}
-    const hasStatus = memberHasPrinceStatus(member);
+    const hasTag = memberHasServerTag(member);
     const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
-    console.log(`👑 Check ${member.user.tag}: hasStatus=${hasStatus} hasRole=${hasRole}`);
-    if (hasStatus && !hasRole) {
-      await member.roles.add(PRINCE_ROLE_ID, "Prince status detected").catch(() => {});
-      console.log(`👑 + Prince role: ${member.user.tag}`);
-    } else if (!hasStatus && hasRole) {
-      await member.roles.remove(PRINCE_ROLE_ID, "Prince status removed").catch(() => {});
-      console.log(`👑 - Prince role: ${member.user.tag}`);
+    console.log(`👑 Check ${member.user.tag}: hasServerTag=${hasTag} hasRole=${hasRole}`);
+    if (hasTag && !hasRole) {
+      await member.roles.add(PRINCE_ROLE_ID, "Server Tag adopted").catch(() => {});
+      console.log(`👑 + Prince role (Server Tag): ${member.user.tag}`);
+    } else if (!hasTag && hasRole) {
+      await member.roles.remove(PRINCE_ROLE_ID, "Server Tag removed").catch(() => {});
+      console.log(`👑 - Prince role (Server Tag): ${member.user.tag}`);
     }
   } catch (e) {
     console.warn(`⚠️ syncPrinceRole: ${e.message}`);
@@ -376,13 +366,13 @@ async function syncAllPrinceRoles() {
     for (const member of mainGuild.members.cache.values()) {
       if (member.user.bot) { skipped++; continue; }
       try {
-        const hasStatus = memberHasPrinceStatus(member);
+        const hasTag = memberHasServerTag(member);
         const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
-        if (hasStatus && !hasRole) {
-          await member.roles.add(PRINCE_ROLE_ID, "Startup sync: status detected").catch(() => {});
+        if (hasTag && !hasRole) {
+          await member.roles.add(PRINCE_ROLE_ID, "Startup sync: Server Tag detected").catch(() => {});
           added++;
-        } else if (!hasStatus && hasRole) {
-          await member.roles.remove(PRINCE_ROLE_ID, "Startup sync: no status").catch(() => {});
+        } else if (!hasTag && hasRole) {
+          await member.roles.remove(PRINCE_ROLE_ID, "Startup sync: no Server Tag").catch(() => {});
           removed++;
         }
       } catch (e) {
@@ -565,11 +555,17 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return { allowed: false, reason: "❌ not here bro.", silent: false, isBuyer: false };
   }
 
-  // Status requirement — regular users MUST have .gg/TBBAUZu8cW in status
-  const hasStatus = await hasPrinceStatus(msg.author.id);
-  if (!hasStatus) {
-    return { allowed: false, reason: "❌ put `.gg/TBBAUZu8cW` in your status first bro.", isBuyer: false };
+  // Server Tag requirement — regular users MUST adopt this server's Server Tag
+  const hasTag = await hasPrinceStatus(msg.author.id);
+  if (!hasTag) {
+    return { allowed: false, reason: "❌ you don’t have the server tag, adopt it first.", isBuyer: false };
   }
+  // Auto-give role when they have the tag (in case sync missed them)
+  try {
+    if (msg.member && msg.guild?.id === GUILD_ID) {
+      await syncPrinceRole(msg.member);
+    }
+  } catch {}
   if (needsFileReply && !isReplyingToFile(msg)) {
     return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass.", isBuyer: false };
   }
@@ -2000,7 +1996,27 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   if (newPresence.guild.id !== GUILD_ID) return;
   await syncPrinceRole(newPresence.member);
 });
-
+// Server Tag changes arrive via userUpdate / guildMemberUpdate
+client.on("userUpdate", async (oldUser, newUser) => {
+  try {
+    const oldPg = oldUser?.primaryGuild;
+    const newPg = newUser?.primaryGuild;
+    const changed =
+      String(oldPg?.identityGuildId || "") !== String(newPg?.identityGuildId || "") ||
+      Boolean(oldPg?.identityEnabled) !== Boolean(newPg?.identityEnabled);
+    if (!changed) return;
+    const mainGuild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID).catch(() => null);
+    if (!mainGuild) return;
+    const member = await mainGuild.members.fetch(newUser.id).catch(() => null);
+    if (member) await syncPrinceRole(member);
+  } catch (e) {
+    console.warn(`⚠️ userUpdate tag sync: ${e.message}`);
+  }
+});
+client.on("guildMemberUpdate", async (oldMember, newMember) => {
+  if (!newMember || newMember.guild.id !== GUILD_ID) return;
+  await syncPrinceRole(newMember);
+});
 
 client.on("error", e => console.error("❌ Discord error:", e));
 client.on("warn", w => console.warn("⚠️ Discord warn:", w));
