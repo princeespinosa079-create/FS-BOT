@@ -1677,15 +1677,37 @@ async function aiCleanScript(source, mode) {
 SCRIPT:
 ${source}`;
 
-    const readablePrompt = `You are a Lua/Roblox code RECONSTRUCTION expert. FULLY RECONSTRUCT the script below into clean, readable, properly structured code with these rules:
-1. COMPLETELY REWRITE / RECONSTRUCT the code — reorganize, restructure, add proper indentation, meaningful variable/function/parameter names, and clean formatting
-2. Rename ALL variables/functions/parameters from generic/obfuscated names to meaningful descriptive names (keep EXACT same logic)
-3. Remove ALL comments, GUI Copier header blocks (Grabbed by..., Discord:..., N instances), bare non-Lua text, markdown, and junk/obfuscation lines. The output must contain ONLY valid executable Lua code — no prose, no markdown, no bare text lines.
-4. CRITICAL: DO NOT remove any script loaders, HttpGet, URLs, webhooks, IP loggers, or any real functional code — loader/logger removal is handled separately, so you MUST preserve them exactly.
-5. Fix any missing "end" or "until" statements so the code is 100% syntactically valid Lua
-6. Replace any Discord invite links with https://discord.gg/TBBAUZu8cW
-7. Keep the EXACT same functionality — never add, remove, or change any real features or behavior
-8. Output ONLY the reconstructed Lua code — no explanations, no markdown code fences, no extra text whatsoever
+    const readablePrompt = `You are an elite Lua/Roblox script reconstruction engineer.
+
+Your job is to FULLY RECONSTRUCT the given script into clean, professional, readable, and 100% executable Lua code.
+
+STRICT RULES:
+
+1. COMPLETELY REWRITE the code structure:
+   - Proper indentation (2 spaces)
+   - Logical grouping of related code
+   - Clear section organization
+   - Modern and clean coding style
+
+2. Rename EVERYTHING meaningfully:
+   - Variables, functions, parameters, upvalues
+   - Use clear, descriptive English names (camelCase for locals, PascalCase for classes/modules if appropriate)
+   - Never leave obfuscated or single-letter names unless they are loop counters (i, j, k)
+
+3. Preserve 100% of the original behavior:
+   - Do NOT remove, break, or alter any real functionality
+   - Keep ALL loaders, HttpGet, webhooks, remote calls, and logic exactly as they are
+   - Only remove pure junk (GUI Copier headers, "Grabbed by...", bare non-Lua text, dead obfuscation noise)
+
+4. Make it look like a human senior developer wrote it:
+   - Add short, useful comments only where they improve understanding (not spam)
+   - Prefer readable control flow
+   - Fix missing \`end\` / \`until\` so the script is syntactically perfect
+   - Replace any Discord invite links with: https://discord.gg/TBBAUZu8cW
+
+5. Output rules (CRITICAL):
+   - Output ONLY pure Lua code
+   - No markdown, no explanations, no \`\`\`lua fences, no extra text before or after the code
 
 SCRIPT TO RECONSTRUCT:
 ${source}`;
@@ -2035,7 +2057,7 @@ client.on("interactionCreate", async interaction => {
         const foundUrls = text.match(urlRegex) || [];
         
         const startTime = Date.now();
-        const finalOutput = await aiCleanScript(text, mode);
+        let finalOutput = await aiCleanScript(text, mode);
         const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
         
         const randChars = "abcdefghijklmnopqrstuvwxyz";
