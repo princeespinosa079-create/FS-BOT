@@ -23,9 +23,9 @@ const path = require("path");
 const AdmZip = require("adm-zip");
 const os = require("os");
 const crypto = require("crypto");
-const { Groq } = require("groq-sdk");
-const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
-const groqClient = GROQ_API_KEY ? new Groq({ apiKey: GROQ_API_KEY }) : null;
+const OpenAI = require("openai");
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const openaiClient = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 // ============================================================
 // ENV
 // ============================================================
@@ -194,7 +194,6 @@ const whsPanelOwners = new Map(); // messageId -> authorId
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const renamePanels = new Map(); // messageId -> { authorId, fileUrl, fileName, isBuyerUser }
-const urlRemovePanels = new Map(); // messageId -> { authorId, finalOutput, foundUrls, outputName, finishSec, username, avatarURL }
 const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false;
 let lastReady = Date.now();
@@ -1612,20 +1611,67 @@ function stripGuiCopierHeader(source) {
   return lines.slice(i).join("\n");
 }
 
+// Post-cleanup: strip any remaining lines that are clearly not Lua code
+// (GUI Copier remnants, bare text, markdown, headers, junk comments that slipped through).
+// Preserves real Lua code, Discord webhooks, and valid URLs inside strings.
+function stripNonLuaJunk(code) {
+  if (!code || typeof code !== "string") return code;
+  const lines = code.split(/\r?\n/);
+  const realLua = /^\s*(local|function|if|then|else|elseif|end|for|while|do|repeat|until|return|break|game|workspace|script|Instance|getgenv|gethui|loadstring|require|pcall|xpcall|task|spawn|delay|print|warn|assert|error|setreadonly|getrawmetatable|hookfunction|hookmetamethod|getnamecallmethod|getconnections|firesignal|fireclickdetector|writefile|readfile|makefolder|delfolder|loadfile|dofile|TweenService|UserInputService|RunService|ReplicatedStorage|StarterGui|CoreGui|Lighting|TeleportService|MarketplaceService|HttpService|InsertService|Players|game|workspace|string|table|math|os|io|debug|coroutine|select|pairs|ipairs|next|rawget|rawset|setmetatable|getmetatable|tonumber|tostring|type|unpack|select|bit|bit32|utf8|--|\[\[|\]\])\b/;
+  const junkPatterns = [
+    /^\s*Grabbed\s+by\s+/i,
+    /^\s*Copied\s+by\s+/i,
+    /^\s*Grabbed\s+from\s+/i,
+    /^\s*Discord\s*:/i,
+    /^\s*\d+\s+instances?\s*$/i,
+    /^\s*Script\s+Copier/i,
+    /^\s*GUI\s+Copier/i,
+    /^\s*Copier\s+v?\d/i,
+    /^\s*```(?:lua)?\s*$/i,          // markdown fences left by AI
+    /^\s*```\s*$/i,
+    /^\s*.*\((?:ScreenGui|Frame|TextLabel|TextButton|ImageLabel|ImageButton|ScrollingFrame|TextBox|UIListLayout|UIPadding|UICorner|UIScale|UIStroke|UIGradient|CanvasGroup|BillboardGui|SurfaceGui)\)\s*$/i,  // GUI Copier instance header
+    /^\s*#\s/,                          // markdown headers
+    /^\s*\*\*.*\*\*\s*$/,             // bold-only markdown lines
+    /^\s*[-*]\s+.*$/,                   // markdown bullet-only lines (no lua)
+    /^\s*Note:|^\s*Here\s+is|^\s*This\s+(?:script|code)|^\s*I\s+(?:have|added|removed)/i,  // AI prose
+  ];
+  const out = [];
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) { out.push(line); continue; }
+    let isJunk = false;
+    for (const pat of junkPatterns) {
+      if (pat.test(line)) { isJunk = true; break; }
+    }
+    if (!isJunk && !realLua.test(line) && !/^\s*--/.test(line)) {
+      // Bare text line with no Lua keyword and no assignment/call — likely junk
+      if (!/[=():{}\[\]]/.test(line) && !/^https?:\/\//.test(t) && !/^["'].*["']$/.test(t)) {
+        // But keep lines that are pure string literals or webhook URLs
+        if (!/discord(?:app)?\.com\/api\/webhooks/i.test(line)) {
+          isJunk = true;
+        }
+      }
+    }
+    if (!isJunk) out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 async function aiCleanScript(source, mode) {
   // Always strip GUI Copier header blocks first (junk comments — always safe to remove)
   source = stripGuiCopierHeader(source);
-  // Fallback to regex methods if Groq not configured
-  if (!groqClient) {
-    console.warn("⚠️ GROQ_API_KEY not set — falling back to regex.");
-    return mode === "var" ? renameVariables(source) : balanceLuaBlocks(cleanLuaScript(source));
+  // Fallback to regex methods if OpenAI not configured
+  if (!openaiClient) {
+    console.warn("⚠️ OPENAI_API_KEY not set — falling back to regex.");
+    let out = mode === "var" ? renameVariables(source) : balanceLuaBlocks(cleanLuaScript(source));
+    return stripNonLuaJunk(out);
   }
   try {
     const varPrompt = `You are a Lua/Roblox variable renaming expert. Rename variables in the script below with these rules:
 1. Rename ALL variables, functions, and parameters from generic/obfuscated names to meaningful descriptive names
 2. Keep the EXACT same logic, structure, and behavior — do NOT add, remove, or change any functionality
-3. CRITICAL: Do NOT remove ANY script loaders, HttpGet, URLs, webhooks, IP loggers, or any functional code. Do NOT remove comments either. Only rename identifiers. Loader/logger removal is handled separately by the user's Yes/No choice — you must PRESERVE them exactly.
-4. Do NOT add or remove any lines
+3. CRITICAL: Do NOT remove ANY script loaders, HttpGet, URLs, webhooks, IP loggers, or any functional code. Loader/logger removal is handled separately — you MUST preserve them exactly.
+4. Do NOT add or remove any lines. Remove ONLY GUI Copier header blocks (Grabbed by..., Discord:..., N instances) and bare non-Lua text.
 5. Output ONLY the renamed Lua code — no explanations, no markdown fences, no extra text
 
 SCRIPT:
@@ -1634,20 +1680,21 @@ ${source}`;
     const readablePrompt = `You are a Lua/Roblox code RECONSTRUCTION expert. FULLY RECONSTRUCT the script below into clean, readable, properly structured code with these rules:
 1. COMPLETELY REWRITE / RECONSTRUCT the code — reorganize, restructure, add proper indentation, meaningful variable/function/parameter names, and clean formatting
 2. Rename ALL variables/functions/parameters from generic/obfuscated names to meaningful descriptive names (keep EXACT same logic)
-3. Remove ONLY comments, GUI Copier header blocks (lines like "Grabbed by X GUI Copier", "Discord: ...", "N instances"), and junk/obfuscation lines. CRITICAL: DO NOT remove any script loaders, HttpGet, URLs, webhooks, IP loggers, or any real functional code — loader/logger removal is handled separately by the user's Yes/No choice, so you MUST preserve them exactly.
-4. Fix any missing "end" or "until" statements so the code is 100% syntactically valid Lua
-5. Replace any Discord invite links with https://discord.gg/TBBAUZu8cW
-6. Keep the EXACT same functionality — never add, remove, or change any real features or behavior
-7. Output ONLY the reconstructed Lua code — no explanations, no markdown code fences, no extra text whatsoever
+3. Remove ALL comments, GUI Copier header blocks (Grabbed by..., Discord:..., N instances), bare non-Lua text, markdown, and junk/obfuscation lines. The output must contain ONLY valid executable Lua code — no prose, no markdown, no bare text lines.
+4. CRITICAL: DO NOT remove any script loaders, HttpGet, URLs, webhooks, IP loggers, or any real functional code — loader/logger removal is handled separately, so you MUST preserve them exactly.
+5. Fix any missing "end" or "until" statements so the code is 100% syntactically valid Lua
+6. Replace any Discord invite links with https://discord.gg/TBBAUZu8cW
+7. Keep the EXACT same functionality — never add, remove, or change any real features or behavior
+8. Output ONLY the reconstructed Lua code — no explanations, no markdown code fences, no extra text whatsoever
 
 SCRIPT TO RECONSTRUCT:
 ${source}`;
 
     const prompt = mode === "var" ? varPrompt : readablePrompt;
 
-    const completion = await groqClient.chat.completions.create({
+    const completion = await openaiClient.chat.completions.create({
+      model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
-      model: "llama-3.3-70b-versatile",
       temperature: 0.3,
       max_tokens: 8000,
     });
@@ -1655,10 +1702,13 @@ ${source}`;
     // Strip markdown fences if AI added them
     output = output.replace(/^```(?:lua)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
     if (!output) throw new Error("Empty AI response");
+    // Final pass: strip any non-Lua junk that slipped through
+    output = stripNonLuaJunk(output);
     return output;
   } catch (e) {
-    console.warn("⚠️ Groq AI clean failed, falling back to regex:", e.message?.slice(0, 120));
-    return mode === "var" ? renameVariables(source) : balanceLuaBlocks(cleanLuaScript(source));
+    console.warn("⚠️ OpenAI clean failed, falling back to regex:", e.message?.slice(0, 120));
+    let out = mode === "var" ? renameVariables(source) : balanceLuaBlocks(cleanLuaScript(source));
+    return stripNonLuaJunk(out);
   }
 }
 
@@ -1993,39 +2043,21 @@ client.on("interactionCreate", async interaction => {
         for (let i = 0; i < 20; i++) outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
         outputName += ".lua";
         
-        // Only ask Yes/No if actual script-loaders or IP-logger URLs were found.
-        // Otherwise (clean file) — send the result directly, no confirmation button.
-        if (hasScriptLoaderOrIpLogger(text)) {
-          await interaction.message.delete().catch(() => {});
-          const uniqueUrls = [...new Set(foundUrls)];
-          const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
-          const urlQuestionEmbed = new EmbedBuilder()
-            .setColor(REGULAR_COLOR)
-            .setTitle("URL Found:")
-            .setDescription(`${urlList}\n\nDo you want to remove URL from the file?\n\n**What this button does:**\n> - **Yes** – Remove Script Loaders & IP Logger.\n> - **No** – Cancel removing Script Loaders & IP Logger.`)
-            .setFooter({ text: `Request by @${interaction.user.username}│Prince Renamer`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
-          const urlRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`urlremove_yes_${interaction.user.id}`).setLabel("Yes").setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId(`urlremove_no_${interaction.user.id}`).setLabel("No").setStyle(ButtonStyle.Danger)
-          );
-          const questionMsg = await interaction.channel.send({ embeds: [urlQuestionEmbed], components: [urlRow] }).catch(() => {});
-          if (questionMsg) {
-            urlRemovePanels.set(questionMsg.id, {
-              authorId: interaction.user.id,
-              finalOutput,
-              foundUrls,
-              outputName,
-              finishSec,
-              username: interaction.user.username,
-              avatarURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 })
-            });
-          }
-          return;
-        }
-        
-        // No URLs → send result directly (Panel → Loading → Result)
+        // AUTO-REMOVE script loaders & IP loggers (No more Yes/No button — Panel → Loading → Result)
+        const hadDangerous = hasScriptLoaderOrIpLogger(text);
+        const uniqueUrls = [...new Set(foundUrls)];
+        finalOutput = removeDangerousLines(finalOutput);
+
+        // Build result with URL Found report
         const previewText = buildPreviewText(finalOutput);
-        const description = buildRenamerDescription(previewText);
+        let description = buildRenamerDescription(previewText);
+        if (uniqueUrls.length > 0) {
+          const urlList = uniqueUrls.slice(0, 10).map(u => `\`${u}\``).join("\n");
+          const removedNote = hadDangerous
+            ? "✅ Script Loaders & IP Loggers **removed** automatically."
+            : "ℹ️ URLs found but none were script loaders / IP loggers — kept intact.";
+          description += `\n\n**🔗 URL Found (${uniqueUrls.length}):**\n${urlList}${uniqueUrls.length > 10 ? `\n...and ${uniqueUrls.length - 10} more` : ""}\n\n${removedNote}`;
+        }
         const resultEmbed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
           .setTitle("File Preview")
@@ -2046,44 +2078,7 @@ client.on("interactionCreate", async interaction => {
     })();
     return;
   }
-  // ─── URL REMOVE Yes/No BUTTONS ───
-  if (interaction.customId?.startsWith("urlremove_")) {
-    const parts = interaction.customId.split("_");
-    const choice = parts[1]; // "yes" or "no"
-    const ownerId = parts.slice(2).join("_");
-    if (interaction.user.id !== ownerId) {
-      return interaction.reply({ content: "❌ not yours, bro.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const ctx = urlRemovePanels.get(interaction.message.id);
-    if (!ctx) {
-      return interaction.reply({ content: "⏳ panel expired, run `.rename` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    urlRemovePanels.delete(interaction.message.id);
-    await interaction.deferUpdate().catch(() => {});
-    
-    let finalOutput = ctx.finalOutput;
-    if (choice === "yes") {
-      // YES = remove ONLY script loaders + IP loggers (webhooks kept)
-      finalOutput = removeDangerousLines(finalOutput);
-    }
-    
-    const previewText = buildPreviewText(finalOutput);
-    const description = buildRenamerDescription(previewText);
-    const resultEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("File Preview")
-      .setDescription(description)
-      .setFooter({ text: `Request by @${ctx.username}│Prince Renamer`, iconURL: ctx.avatarURL });
-    const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput, "utf-8"), { name: ctx.outputName });
-    
-    await interaction.message.delete().catch(() => {});
-    await interaction.channel.send({
-      content: `<@${interaction.user.id}> Here you go twin!\n**Finish in:** \`${ctx.finishSec}s\``,
-      files: [fixedFile],
-      embeds: [resultEmbed]
-    }).catch(() => {});
-    return;
-  }
+
   // ─── HELP PAGINATION BUTTONS ───
   if (interaction.customId?.startsWith("help_")) {
     const parts = interaction.customId.split("_");
