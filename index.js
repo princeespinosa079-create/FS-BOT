@@ -2114,7 +2114,7 @@ client.on("interactionCreate", async interaction => {
         let description = buildRenamerDescription(previewText);
         if (uniqueUrls.length > 0) {
           const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
-          description += `\n\nURL Found:\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
+          description += `\n\n**URL Found:**\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
         }
         const resultEmbed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
@@ -3520,17 +3520,45 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const cd = checkCommandCooldown(msg.author.id, "rename", perm.isBuyer);
     if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
-    let attachments = [...(msg.attachments?.values() || [])];
+    let attachments = [...(msg.attachments?.values() || [])].filter(a => {
+      const e = ext(a.name);
+      return e === "lua" || e === "txt" || e === "luau";
+    });
     if (!attachments.length && msg.reference?.messageId) {
       try {
         const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        attachments = [...allAttachmentsOf(refMsg)];
+        const all = [];
+        for (const a of refMsg.attachments?.values?.() || []) {
+          const e = ext(a.name);
+          if (e === "lua" || e === "txt" || e === "luau") all.push(a);
+        }
+        for (const s of refMsg.messageSnapshots?.values?.() || []) {
+          for (const a of s.attachments?.values?.() || []) {
+            const e = ext(a.name);
+            if (e === "lua" || e === "txt" || e === "luau") all.push(a);
+          }
+        }
+        attachments = all;
       } catch {}
     }
-    if (!attachments.length) { replyUser(msg, "❌ bruh, upload file or reply to a file.").catch(() => {}); return; }
+    if (!attachments.length) {
+      const errEmbed = new EmbedBuilder()
+        .setColor(0xED4245)
+        .setTitle("Input Error")
+        .setDescription("**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
+      replyUser(msg, { embeds: [errEmbed] }).catch(() => {});
+      return;
+    }
     const file = attachments[0];
     const fileExt = ext(file.name);
-    if (fileExt !== "lua" && fileExt !== "txt") { replyUser(msg, "❌ only .lua and .txt is working, idiot.").catch(() => {}); return; }
+    if (fileExt !== "lua" && fileExt !== "txt" && fileExt !== "luau") {
+      const errEmbed = new EmbedBuilder()
+        .setColor(0xED4245)
+        .setTitle("Input Error")
+        .setDescription("**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
+      replyUser(msg, { embeds: [errEmbed] }).catch(() => {});
+      return;
+    }
     
     // Mode selection panel
     const panelEmbed = new EmbedBuilder()
