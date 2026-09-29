@@ -224,10 +224,12 @@ async function applyAltRole(member) {
   }
 }
 async function isBuyer(userId, member) {
+  // ONLY Owner + BUYER_ROLE_ID count as buyer.
+  // PRINCE_ROLE_ID (Server Tag role) does NOT grant buyer/DM access.
   const uid = userId || member?.id;
   if (!uid) return false;
   if (uid === OWNER_ID) return true;
-  // Fast path: local guild member check
+  // Fast path: local guild member check — BUYER role only (never Prince role)
   if (member?.roles?.cache?.has(BUYER_ROLE_ID)) {
     console.log(`👑 isBuyer: ${uid} → YES (local member)`);
     return true;
@@ -292,9 +294,17 @@ async function isBuyer(userId, member) {
 }
 function channelAllowed(msg) {
   try {
-    const chId = msg.channel?.id || msg.channelId || msg.channel_id;
-    const allowed = config.allowedChannelId || ALLOWED_CHANNEL_ID;
-    return String(chId) === String(allowed);
+    // Always re-read from disk so .set changes apply immediately and survive restarts
+    try {
+      const fresh = readJSON(CONFIG_FILE, { allowedChannelId: null });
+      if (fresh && typeof fresh === "object" && fresh.allowedChannelId) {
+        config.allowedChannelId = String(fresh.allowedChannelId);
+      }
+    } catch {}
+    const chId = String(msg.channel?.id || msg.channelId || msg.channel_id || "");
+    const allowed = String(config.allowedChannelId || ALLOWED_CHANNEL_ID || "");
+    if (!chId || !allowed) return false;
+    return chId === allowed;
   } catch (e) {
     return false;
   }
@@ -550,9 +560,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
   }
 
-  // If channel is restricted → SILENT (no response at all)
+  // If channel is restricted → SILENT (no response at all in wrong channel)
   if (!channelAllowed(msg)) {
-    return { allowed: false, reason: "❌ not here bro.", silent: false, isBuyer: false };
+    return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
 
   // Server Tag requirement — regular users MUST adopt this server's Server Tag
@@ -2467,7 +2477,8 @@ client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
   const txt = (msg.content || "").trim();
   const isDM = !msg.guild;
-  // DM access: only owner + buyer can use commands in DMs (except .help and .redeem/.red)
+  // DM access: ONLY Owner + Buyer Role. Prince / Server Tag role CANNOT use commands in DMs.
+  // Exceptions: .help and .redeem/.red work for everyone.
   if (isDM && !isOwner(msg.author.id)) {
     const buyerInDm = await isBuyer(msg.author.id, msg.member);
     if (!buyerInDm && !/^\.help(?:\s|$)/i.test(txt) && !/^\.(?:redeem|red)(?:\s|$)/i.test(txt)) {
@@ -2870,8 +2881,17 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, "❌ invalid channel, mention a text channel or paste its ID.").catch(() => {});
       return;
     }
-    config.allowedChannelId = ch.id;
+    config.allowedChannelId = String(ch.id);
     saveConfig();
+    // Verify it actually saved
+    try {
+      const verify = readJSON(CONFIG_FILE, {});
+      if (String(verify?.allowedChannelId || "") !== String(ch.id)) {
+        // Force write again
+        config.allowedChannelId = String(ch.id);
+        writeJSON(CONFIG_FILE, config);
+      }
+    } catch {}
     const setEmbed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle("✅ Allowed Channel Updated")
@@ -2879,7 +2899,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         `**Old Channel:** ${oldChannelId ? `<#${oldChannelId}>` : "None"}\n` +
         `**New Channel:** <#${ch.id}> (\`${ch.id}\`)\n` +
         `**Channel Name:** ${ch.name || "unknown"}\n\n` +
-        `Regular users can now only use commands in <#${ch.id}>.`
+        `Regular users can now only use commands in <#${ch.id}>.\n` +
+        `Bot will stay silent in every other channel.`
       )
       .setFooter({ text: `Set by @${msg.author.username}`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
     replyUser(msg, { embeds: [setEmbed] }).catch(() => {});
