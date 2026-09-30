@@ -34,7 +34,6 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const OWNER_ID = "1302080645987569694";
 const BUYER_ROLE_ID = "1553385966629158963";
-const ALLOWED_CHANNEL_ID = "1553461663313829968"; // regular users can ONLY use commands here
 const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
 const REGULAR_COLOR = 0x2B2D31; // black gray
@@ -297,12 +296,13 @@ function channelAllowed(msg) {
     // Always re-read from disk so .set changes apply immediately and survive restarts
     try {
       const fresh = readJSON(CONFIG_FILE, { allowedChannelId: null });
-      if (fresh && typeof fresh === "object" && fresh.allowedChannelId) {
-        config.allowedChannelId = String(fresh.allowedChannelId);
+      if (fresh && typeof fresh === "object") {
+        config.allowedChannelId = fresh.allowedChannelId ? String(fresh.allowedChannelId) : null;
       }
     } catch {}
     const chId = String(msg.channel?.id || msg.channelId || msg.channel_id || "");
-    const allowed = String(config.allowedChannelId || ALLOWED_CHANNEL_ID || "");
+    // ONLY the channel set by .set — no hardcoded fallback
+    const allowed = config.allowedChannelId ? String(config.allowedChannelId) : "";
     if (!chId || !allowed) return false;
     return chId === allowed;
   } catch (e) {
@@ -560,15 +560,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
   }
 
-  // If channel is restricted → SILENT (no response at all in wrong channel)
-  if (!channelAllowed(msg)) {
-    return { allowed: false, reason: null, silent: true, isBuyer: false };
-  }
-
   // Server Tag requirement — regular users MUST adopt this server's Server Tag
   const hasTag = await hasPrinceStatus(msg.author.id);
   if (!hasTag) {
     return { allowed: false, reason: "❌ you don’t have the server tag, adopt it first.", isBuyer: false };
+  }
+  // Channel lock — has tag but wrong channel → tell them
+  if (!channelAllowed(msg)) {
+    return { allowed: false, reason: "❌ not here bro.", silent: false, isBuyer: false };
   }
   // Auto-give role when they have the tag (in case sync missed them)
   try {
@@ -1651,7 +1650,28 @@ function stripGuiCopierHeader(source) {
 function stripNonLuaJunk(code) {
   if (!code || typeof code !== "string") return code;
   const lines = code.split(/\r?\n/);
-  const realLua = /^\s*(local|function|if|then|else|elseif|end|for|while|do|repeat|until|return|break|game|workspace|script|Instance|getgenv|gethui|loadstring|require|pcall|xpcall|task|spawn|delay|print|warn|assert|error|setreadonly|getrawmetatable|hookfunction|hookmetamethod|getnamecallmethod|getconnections|firesignal|fireclickdetector|writefile|readfile|makefolder|delfolder|loadfile|dofile|TweenService|UserInputService|RunService|ReplicatedStorage|StarterGui|CoreGui|Lighting|TeleportService|MarketplaceService|HttpService|InsertService|Players|game|workspace|string|table|math|os|io|debug|coroutine|select|pairs|ipairs|next|rawget|rawset|setmetatable|getmetatable|tonumber|tostring|type|unpack|select|bit|bit32|utf8|--|\[\[|\]\])\b/;
+  // Lines that look like real Lua (keywords, comments, assignments, calls, table/index syntax)
+  const looksLikeLua = (line) => {
+    const t = line.trim();
+    if (!t) return true; // keep blank lines (cleaned later)
+    // Lua comments
+    if (/^\s*--/.test(line)) return true;
+    // Long string open/close
+    if (/\[\[|\]\]/.test(line)) return true;
+    // Common Lua / Roblox keywords & globals at start of statement
+    if (/^\s*(local|function|if|then|else|elseif|end|for|while|do|repeat|until|return|break|and|or|not|in|nil|true|false)\b/.test(line)) return true;
+    if (/^\s*(game|workspace|script|Instance|getgenv|gethui|getrenv|getrawmetatable|setreadonly|hookfunction|hookmetamethod|getnamecallmethod|getconnections|firesignal|fireclickdetector|writefile|readfile|makefolder|delfolder|loadfile|dofile|loadstring|require|pcall|xpcall|task|spawn|delay|wait|print|warn|assert|error|tonumber|tostring|type|typeof|pairs|ipairs|next|select|unpack|rawget|rawset|setmetatable|getmetatable|string|table|math|os|io|debug|coroutine|bit|bit32|utf8|buffer)\b/.test(line)) return true;
+    if (/^\s*(TweenService|UserInputService|RunService|ReplicatedStorage|StarterGui|CoreGui|Lighting|TeleportService|MarketplaceService|HttpService|InsertService|Players|Debris|CollectionService|PathfindingService|SoundService|Chat|TextService|ProximityPromptService)\b/.test(line)) return true;
+    // Assignment / method call / indexing
+    if (/[=():{}\[\].]/.test(line) && /[a-zA-Z_]/.test(line)) return true;
+    // String-only line (could be continuation)
+    if (/^["'`].*["'`]$/.test(t)) return true;
+    // Discord webhook URLs kept (functional)
+    if (/discord(?:app)?\.com\/api\/webhooks/i.test(line)) return true;
+    // http(s) URLs inside possible lua string context
+    if (/^https?:\/\//i.test(t) && /discord|paste|raw|github|catbox|roblox/i.test(t)) return true;
+    return false;
+  };
   const junkPatterns = [
     /^\s*Grabbed\s+by\s+/i,
     /^\s*Copied\s+by\s+/i,
@@ -1661,13 +1681,12 @@ function stripNonLuaJunk(code) {
     /^\s*Script\s+Copier/i,
     /^\s*GUI\s+Copier/i,
     /^\s*Copier\s+v?\d/i,
-    /^\s*```(?:lua)?\s*$/i,          // markdown fences left by AI
+    /^\s*```(?:lua)?\s*$/i,
     /^\s*```\s*$/i,
-    /^\s*.*\((?:ScreenGui|Frame|TextLabel|TextButton|ImageLabel|ImageButton|ScrollingFrame|TextBox|UIListLayout|UIPadding|UICorner|UIScale|UIStroke|UIGradient|CanvasGroup|BillboardGui|SurfaceGui)\)\s*$/i,  // GUI Copier instance header
-    /^\s*#\s/,                          // markdown headers
-    /^\s*\*\*.*\*\*\s*$/,             // bold-only markdown lines
-    /^\s*[-*]\s+.*$/,                   // markdown bullet-only lines (no lua)
-    /^\s*Note:|^\s*Here\s+is|^\s*This\s+(?:script|code)|^\s*I\s+(?:have|added|removed)/i,  // AI prose
+    /^\s*.*\((?:ScreenGui|Frame|TextLabel|TextButton|ImageLabel|ImageButton|ScrollingFrame|TextBox|UIListLayout|UIPadding|UICorner|UIScale|UIStroke|UIGradient|CanvasGroup|BillboardGui|SurfaceGui)\)\s*$/i,
+    /^\s*#\s/,
+    /^\s*\*\*.*\*\*\s*$/,
+    /^\s*Note:|^\s*Here\s+is|^\s*This\s+(?:script|code)|^\s*I\s+(?:have|added|removed)/i,
   ];
   const out = [];
   for (const line of lines) {
@@ -1677,15 +1696,8 @@ function stripNonLuaJunk(code) {
     for (const pat of junkPatterns) {
       if (pat.test(line)) { isJunk = true; break; }
     }
-    if (!isJunk && !realLua.test(line) && !/^\s*--/.test(line)) {
-      // Bare text line with no Lua keyword and no assignment/call — likely junk
-      if (!/[=():{}\[\]]/.test(line) && !/^https?:\/\//.test(t) && !/^["'].*["']$/.test(t)) {
-        // But keep lines that are pure string literals or webhook URLs
-        if (!/discord(?:app)?\.com\/api\/webhooks/i.test(line)) {
-          isJunk = true;
-        }
-      }
-    }
+    // Delete any line that does not look like Lua
+    if (!isJunk && !looksLikeLua(line)) isJunk = true;
     if (!isJunk) out.push(line);
   }
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -1711,42 +1723,50 @@ async function aiCleanScript(source, mode) {
 SCRIPT:
 ${source}`;
 
-    const readablePrompt = `You are an elite Lua/Roblox script reconstruction engineer.
+    const readablePrompt = `You are an elite Lua/Roblox script RECONSTRUCTION engineer — not a renamer, not a minifier. You FULLY REBUILD scripts so they look hand-written by a senior developer.
 
-Your job is to FULLY RECONSTRUCT the given script into clean, professional, readable, and 100% executable Lua code.
+GOAL: Output a clean, professional, 100% executable reconstruction — same behavior, far better structure.
 
-STRICT RULES:
+STRUCTURE (REQUIRED):
+1. Start with a short header comment block explaining what the script is (name, purpose, main GUI/root names if any). Example style:
+   --[[
+       ============================================================
+       SCRIPT NAME  (reconstructed)
+       ------------------------------------------------------------
+       Brief description of what it does.
+       ============================================================
+   ]]
+2. Group code into CLEAR SECTIONS with separator comments like:
+   -- ===================== CONFIG =====================
+   -- ===================== STATE =====================
+   -- ===================== CORE LOGIC =====================
+   -- ===================== GUI =====================
+   -- ===================== INTERACTION =====================
+   -- ===================== BOOT =====================
+3. Indentation: 2 spaces. Align related assignments. Keep functions readable.
+4. Order: services → config → state → core functions → GUI build → helpers → event connections → boot/init.
 
-1. COMPLETELY REWRITE the code structure:
-   - Proper indentation (2 spaces)
-   - Logical grouping of related code
-   - Clear section organization
-   - Modern and clean coding style
+NAMING:
+- Rename ALL obfuscated / generic / single-letter names to clear camelCase (locals) or PascalCase (modules/classes).
+- Keep loop counters i, j, k if they are just indexes.
+- Names must describe purpose (e.g. fireBypass, buildBomb, ModeIndicator, saveConfig).
 
-2. Rename EVERYTHING meaningfully:
-   - Variables, functions, parameters, upvalues
-   - Use clear, descriptive English names (camelCase for locals, PascalCase for classes/modules if appropriate)
-   - Never leave obfuscated or single-letter names unless they are loop counters (i, j, k)
+PRESERVE BEHAVIOR (CRITICAL):
+- Do NOT remove, break, or change real functionality.
+- Keep ALL loaders, HttpGet, remote calls, FireServer, webhooks, and logic exactly working.
+- Only strip pure junk: GUI Copier headers, "Grabbed by...", bare non-Lua prose, dead obfuscation noise, markdown fences.
+- Replace any Discord invite links with: https://discord.gg/TBBAUZu8cW
 
-3. Preserve 100% of the original behavior:
-   - Do NOT remove, break, or alter any real functionality
-   - Keep ALL loaders, HttpGet, webhooks, remote calls, and logic exactly as they are
-   - Only remove pure junk (GUI Copier headers, "Grabbed by...", bare non-Lua text, dead obfuscation noise)
+QUALITY:
+- Fix missing end / until so the script is syntactically valid.
+- Prefer readable control flow over clever one-liners.
+- Add short useful comments only on non-obvious logic (not spam).
+- If input is bytecode / heavy \\x / broken: best-effort reconstruct into clean runnable Lua.
 
-4. If the input looks like bytecode, string.dump output, heavy \\x escapes, or is otherwise non-executable / broken:
-   - Still attempt best-effort reconstruction into clean readable Lua
-   - Recover any recoverable logic, strings, and structure
-   - Prefer a clean, runnable script over leaving binary/garbage output
-
-5. Make it look like a human senior developer wrote it:
-   - Add short, useful comments only where they improve understanding (not spam)
-   - Prefer readable control flow
-   - Fix missing \`end\` / \`until\` so the script is syntactically perfect
-   - Replace any Discord invite links with: https://discord.gg/TBBAUZu8cW
-
-6. Output rules (CRITICAL):
-   - Output ONLY pure Lua code
-   - No markdown, no explanations, no \`\`\`lua fences, no extra text before or after the code
+OUTPUT RULES (ABSOLUTE):
+- Output ONLY pure Lua code.
+- No markdown, no \`\`\` fences, no explanations before or after the code.
+- No "Here is the script" or similar prose.
 
 SCRIPT TO RECONSTRUCT:
 ${source}`;
@@ -1756,8 +1776,8 @@ ${source}`;
     const completion = await openaiClient.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
-      temperature: 0.3,
-      max_tokens: 8000,
+      temperature: mode === "readable" ? 0.2 : 0.3,
+      max_tokens: 16000,
     });
     let output = completion.choices[0]?.message?.content || "";
     // Strip markdown fences if AI added them
@@ -2487,6 +2507,18 @@ client.on("messageCreate", async msg => {
     }
   }
 
+  // Channel lock for regulars — Owner + Buyer bypass. Commands only work in the .set channel.
+  // Exceptions: .help .profile .prof .redeem .red work everywhere.
+  if (msg.guild && txt.startsWith(".") && !isOwner(msg.author.id)) {
+    const isBuyerUser = await isBuyer(msg.author.id, msg.member);
+    if (!isBuyerUser && !/^\.(?:help|profile|prof|redeem|red)(?:\s|$)/i.test(txt)) {
+      if (!channelAllowed(msg)) {
+        replyUser(msg, "❌ not here bro.").catch(() => {});
+        return;
+      }
+    }
+  }
+
   // .help — works EVERYWHERE for EVERYONE
   if (/^\.help(?:\s|$)/i.test(txt)) {
     const page = 0;
@@ -2871,7 +2903,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1);
-    const oldChannelId = config.allowedChannelId || ALLOWED_CHANNEL_ID;
+    const oldChannelId = config.allowedChannelId || null;
     let ch = null;
     const mentionMatch = txt.match(/<#(\d+)>/);
     if (mentionMatch) { try { ch = await client.channels.fetch(mentionMatch[1]); } catch {} }
@@ -2887,7 +2919,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     try {
       const verify = readJSON(CONFIG_FILE, {});
       if (String(verify?.allowedChannelId || "") !== String(ch.id)) {
-        // Force write again
         config.allowedChannelId = String(ch.id);
         writeJSON(CONFIG_FILE, config);
       }
@@ -2900,7 +2931,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         `**New Channel:** <#${ch.id}> (\`${ch.id}\`)\n` +
         `**Channel Name:** ${ch.name || "unknown"}\n\n` +
         `Regular users can now only use commands in <#${ch.id}>.\n` +
-        `Bot will stay silent in every other channel.`
+        `Wrong channel → bot replies: ❌ not here bro.`
       )
       .setFooter({ text: `Set by @${msg.author.username}`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
     replyUser(msg, { embeds: [setEmbed] }).catch(() => {});
