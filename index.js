@@ -563,7 +563,12 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   // Server Tag requirement — regular users MUST adopt this server's Server Tag
   const hasTag = await hasPrinceStatus(msg.author.id);
   if (!hasTag) {
-    return { allowed: false, reason: "❌ you don’t have the server tag, adopt it first.", isBuyer: false };
+    const tagEmbed = new EmbedBuilder()
+      .setColor(0xED4245)
+      .setTitle("Input Error")
+      .setDescription("**Tips:**\n- Go on your profile, click `Edit Profile` then scroll down, you’ll see the `Select a Server Tag` click it then use our Server Tag.");
+    replyUser(msg, { embeds: [tagEmbed] }).catch(() => {});
+    return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
   // Channel lock — has tag but wrong channel → tell them
   if (!channelAllowed(msg)) {
@@ -1618,30 +1623,64 @@ function hasScriptLoaderOrIpLogger(text) {
 // These lines are NOT Lua comments and would cause syntax errors — always remove them.
 function stripGuiCopierHeader(source) {
   if (!source || typeof source !== "string") return source;
+  // First: remove big --[[ ... ]] documentation / reconstruction header blocks
+  source = source.replace(/--\s*\[\[([\s\S]*?)\]\]/g, (block, inner) => {
+    const t = String(inner || "");
+    // Doc/reconstruction banners — delete entire block
+    if (
+      /reconstructed/i.test(t) ||
+      /execution\s+log/i.test(t) ||
+      /ScreenGui\s*:/i.test(t) ||
+      /Root\s*:/i.test(t) ||
+      /Layout\s*:/i.test(t) ||
+      /ModeToggle/i.test(t) ||
+      /CollapsedBtn/i.test(t) ||
+      /={5,}/.test(t) ||
+      /-{5,}/.test(t) ||
+      /deob\s+by/i.test(t) ||
+      /1:1\s+from/i.test(t)
+    ) {
+      return "";
+    }
+    // Keep real long-string style comments that are short functional notes
+    return block;
+  });
   const lines = source.split(/\r?\n/);
   const instanceTypes = "(?:ScreenGui|Frame|TextLabel|TextButton|ImageLabel|ImageButton|ScrollingFrame|TextBox|UIListLayout|UIPadding|UICorner|UIScale|UIStroke|UIGradient|UIAspectRatioConstraint|UISizeConstraint|UITextSizeConstraint|CanvasGroup|VideoFrame|ViewportFrame|BillboardGui|SurfaceGui)";
   const headerPatterns = [
-    new RegExp("^\\s*.*\\(" + instanceTypes + "\\)\\s*$", "i"),   // "Name  (ScreenGui)"
-    /^\s*Grabbed\s+by\s+.*$/i,                                         // "Grabbed by X..."
-    /^\s*Discord\s*:.*$/i,                                              // "Discord: ..."
-    /^\s*\d+\s+instances?\s*$/i,                                      // "56 instances"
-    /^\s*Copied\s+by\s+.*$/i,                                          // "Copied by..."
-    /^\s*Grabbed\s+from\s+.*$/i,                                       // "Grabbed from..."
+    new RegExp("^\\s*.*\\(" + instanceTypes + "\\)\\s*$", "i"),
+    /^\s*Grabbed\s+by\s+.*$/i,
+    /^\s*Discord\s*:.*$/i,
+    /^\s*\d+\s+instances?\s*$/i,
+    /^\s*Copied\s+by\s+.*$/i,
+    /^\s*Grabbed\s+from\s+.*$/i,
+    /^\s*--\s*deob\s+by\s+/i,
+    /^\s*--\s*rename\s+by\s+/i,
+    /^\s*ScreenGui\s*:/i,
+    /^\s*Root\s*:/i,
+    /^\s*Layout\s*:/i,
+    /^\s*Discord\s*:/i,
+    /^\s*-{5,}\s*$/,
+    /^\s*={5,}\s*$/,
   ];
-  const realCodeStart = /^\s*(local|function|if|while|for|repeat|return|do|--\[\[|game|workspace|script|getgenv|gethui|loadstring|require|pcall|xpcall|task|spawn|Instance|print|warn|assert|error|setreadonly|hookfunction|hookmetamethod|getrawmetatable|getnamecallmethod|getconnections|firesignal|fireclickdetector|writefile|readfile|makefolder|delfolder|loadfile|dofile|TweenService|UserInputService|RunService|ReplicatedStorage|StarterGui|CoreGui|Lighting|TeleportService|MarketplaceService|HttpService|InsertService)\b/;
+  const realCodeStart = /^\s*(local|function|if|while|for|repeat|return|do|game|workspace|script|getgenv|gethui|loadstring|require|pcall|xpcall|task|spawn|Instance|print|warn|assert|error|setreadonly|hookfunction|hookmetamethod|getrawmetatable|getnamecallmethod|getconnections|firesignal|fireclickdetector|writefile|readfile|makefolder|delfolder|loadfile|dofile|TweenService|UserInputService|RunService|ReplicatedStorage|StarterGui|CoreGui|Lighting|TeleportService|MarketplaceService|HttpService|InsertService)\b/;
   let i = 0;
   while (i < lines.length) {
     const t = lines[i].trim();
-    if (!t) { i++; continue; }  // skip blank lines at top
-    if (realCodeStart.test(lines[i])) break;  // hit real Lua code — stop stripping
+    if (!t) { i++; continue; }
+    if (realCodeStart.test(lines[i])) break;
     let matched = false;
     for (const pat of headerPatterns) {
       if (pat.test(lines[i])) { matched = true; break; }
     }
-    if (matched) { i++; continue; }  // strip this header line
-    break;  // non-header, non-code line at top — leave it alone
+    // Also strip pure comment lines at top that are doc-like
+    if (!matched && /^\s*--/.test(lines[i]) && (/reconstructed|ScreenGui\s*:|Root\s*:|Layout\s*:|execution\s+log|={3,}|-{3,}/i.test(lines[i]))) {
+      matched = true;
+    }
+    if (matched) { i++; continue; }
+    break;
   }
-  return lines.slice(i).join("\n");
+  return lines.slice(i).join("\n").replace(/^\s*\n+/, "");
 }
 
 // Post-cleanup: strip any remaining lines that are clearly not Lua code
@@ -1728,15 +1767,11 @@ ${source}`;
 GOAL: Output a clean, professional, 100% executable reconstruction — same behavior, far better structure.
 
 STRUCTURE (REQUIRED):
-1. Start with a short header comment block explaining what the script is (name, purpose, main GUI/root names if any). Example style:
-   --[[
-       ============================================================
-       SCRIPT NAME  (reconstructed)
-       ------------------------------------------------------------
-       Brief description of what it does.
-       ============================================================
-   ]]
-2. Group code into CLEAR SECTIONS with separator comments like:
+1. DO NOT add big documentation header blocks. DELETE any existing ones, including:
+   - --[[ ... ]] blocks that describe layout, ScreenGui, Root size, ModeToggle, etc.
+   - Lines like "reconstructed 1:1 from execution log", "ScreenGui : ...", "Root : 280 x 320", "Layout : Header..."
+   - Fancy banner comments with ===== or ------
+2. Group code into CLEAR SECTIONS with short separator comments only:
    -- ===================== CONFIG =====================
    -- ===================== STATE =====================
    -- ===================== CORE LOGIC =====================
@@ -1754,19 +1789,20 @@ NAMING:
 PRESERVE BEHAVIOR (CRITICAL):
 - Do NOT remove, break, or change real functionality.
 - Keep ALL loaders, HttpGet, remote calls, FireServer, webhooks, and logic exactly working.
-- Only strip pure junk: GUI Copier headers, "Grabbed by...", bare non-Lua prose, dead obfuscation noise, markdown fences.
+- Strip pure junk: GUI Copier headers, "Grabbed by...", reconstruction doc comments, bare non-Lua prose, dead obfuscation noise, markdown fences.
 - Replace any Discord invite links with: https://discord.gg/TBBAUZu8cW
 
 QUALITY:
 - Fix missing end / until so the script is syntactically valid.
 - Prefer readable control flow over clever one-liners.
-- Add short useful comments only on non-obvious logic (not spam).
+- Add short useful comments only on non-obvious logic (not spam). Never write multi-line layout docs.
 - If input is bytecode / heavy \\x / broken: best-effort reconstruct into clean runnable Lua.
 
 OUTPUT RULES (ABSOLUTE):
 - Output ONLY pure Lua code.
 - No markdown, no \`\`\` fences, no explanations before or after the code.
 - No "Here is the script" or similar prose.
+- No big --[[ documentation headers ]].
 
 SCRIPT TO RECONSTRUCT:
 ${source}`;
@@ -2960,6 +2996,32 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const e = (String(name || "").match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
       return e === "txt" || e === "lua" || e === "zip";
     };
+    // Collect existing filenames in destination (normalized) — only forward files not already there
+    const existingNames = new Set();
+    try {
+      let destBefore = null;
+      while (true) {
+        const opts = { limit: 100 };
+        if (destBefore) opts.before = destBefore;
+        const batch = await destCh.messages.fetch(opts);
+        if (!batch.size) break;
+        for (const m of batch.values()) {
+          for (const a of m.attachments?.values?.() || []) {
+            if (a.name) existingNames.add(String(a.name).toLowerCase());
+          }
+          for (const s of m.messageSnapshots?.values?.() || []) {
+            for (const a of s.attachments?.values?.() || []) {
+              if (a.name) existingNames.add(String(a.name).toLowerCase());
+            }
+          }
+        }
+        const oldest = batch.last();
+        if (!oldest || batch.size < 100) break;
+        destBefore = oldest.id;
+      }
+    } catch (e) {
+      console.warn("⚠️ Forward dest scan:", e.message);
+    }
     try {
       while (true) {
         const opts = { limit: 100 };
@@ -2978,6 +3040,12 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
             }
           }
           for (const a of atts) {
+            const fname = String(a.name || "file").toLowerCase();
+            if (existingNames.has(fname)) {
+              skipped++;
+              continue;
+            }
+            existingNames.add(fname); // avoid dupes within same forward run
             sendTasks.push(
               fetch(a.url).then(r => r.arrayBuffer()).then(buf =>
                 destCh.send({ files: [new AttachmentBuilder(Buffer.from(buf), { name: a.name || "file" })] })
@@ -2992,7 +3060,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         if (!oldest || batch.size < 100) break;
         before = oldest.id;
       }
-      const result = `✅ **Forward complete!**\n📂 Source: <#${sourceCh.id}>\n📥 Dest: <#${destCh.id}>\n📄 Sent: \`${sent}\`\n🚫 Skipped: \`${skipped}\``;
+      const result = `✅ **Forward complete!**\n📂 Source: <#${sourceCh.id}>\n📥 Dest: <#${destCh.id}>\n📄 Sent: \`${sent}\`\n🚫 Skipped (already in dest / failed): \`${skipped}\``;
       if (statusMsg) statusMsg.edit(result).catch(() => {});
       else replyUser(msg, result).catch(() => {});
     } catch (e) {
