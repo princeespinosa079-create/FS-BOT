@@ -847,7 +847,13 @@ function idForFile() {
 }
 function getFile(id) {
   const f = library.files.find(file => file.id === String(id || "").trim()) || null;
-  if (f && Number(f.size || 0) === 36) return null; // skip unavailable placeholder files
+  if (f && Number(f.size || 0) === 36) {
+    // Unavailable/expired (36-byte Discord placeholder) — delete from library permanently
+    library.files = library.files.filter(file => file.id !== f.id);
+    saveLibrary();
+    console.log(`🗑️ Deleted unavailable 36-byte file: ${f.filename} (${f.id})`);
+    return null;
+  }
   return f;
 }
 async function getFreshUrl(file) {
@@ -866,6 +872,10 @@ async function getFreshUrl(file) {
       saveLibrary();
       return fresh.url;
     }
+    // Message exists but attachment is gone → file expired/unavailable — delete from library
+    library.files = library.files.filter(f => f.id !== file.id);
+    saveLibrary();
+    console.log(`🗑️ Deleted expired/unavailable file (attachment gone): ${file.filename} (${file.id})`);
   } catch (e) {
     console.warn(`⚠️ Could not refresh URL for ${file.filename}:`, e.message);
   }
@@ -876,8 +886,14 @@ function findFiles(query) {
   if (!query) return [];
   const tokens = query.split(" ").filter(Boolean);
   const seenNames = new Set();
+  // Purge unavailable/expired files (36-byte Discord placeholder) from library permanently
+  const beforePurge = library.files.length;
+  library.files = library.files.filter(file => Number(file.size || 0) !== 36);
+  if (library.files.length !== beforePurge) {
+    saveLibrary();
+    console.log(`🗑️ Purged ${beforePurge - library.files.length} unavailable 36-byte file(s) from library`);
+  }
   return library.files
-    .filter(file => Number(file.size || 0) !== 36) // skip unavailable placeholder files
     .map(file => {
     const name = normalize(file.filename);
     let score = 0;
@@ -2164,8 +2180,14 @@ client.on("interactionCreate", async interaction => {
     // Process in background
     (async () => {
       try {
-        const res = await fetch(ctx.fileUrl);
-        let text = await res.text();
+        // Use pre-downloaded content if available (avoids expired CDN URLs)
+        let text = ctx.fileContent;
+        if (!text) {
+          const res = await fetch(ctx.fileUrl);
+          if (!res.ok) throw new Error(`File link expired (HTTP ${res.status}) — run .rename again`);
+          text = await res.text();
+        }
+        if (!text || text.trim().length < 5) throw new Error("File is empty or unreadable, bro");
         // Always strip GUI Copier header blocks (they're junk comments, not loaders/loggers)
         text = stripGuiCopierHeader(text);
         const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
@@ -2180,6 +2202,7 @@ client.on("interactionCreate", async interaction => {
         
         const startTime = Date.now();
         let finalOutput = await aiCleanScript(text, effectiveMode);
+        if (!finalOutput || !finalOutput.trim()) throw new Error("Processing returned empty output — try the other rename mode, bro");
         const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
         
         const randChars = "abcdefghijklmnopqrstuvwxyz";
@@ -2532,6 +2555,7 @@ client.on("interactionCreate", async interaction => {
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
   const txt = (msg.content || "").trim();
+  if (txt === ".") return; // ignore single dot messages — bot stays silent
   const isDM = !msg.guild;
   // DM access: ONLY Owner + Buyer Role. Prince / Server Tag role CANNOT use commands in DMs.
   // Exceptions: .help and .redeem/.red work for everyone.
@@ -3686,6 +3710,20 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
     const file = attachments[0];
+    // Download file content NOW so button clicks never hit expired Discord CDN URLs
+    let fileContent = null;
+    try {
+      const dlRes = await fetch(file.url);
+      if (!dlRes.ok) throw new Error(`HTTP ${dlRes.status}`);
+      fileContent = await dlRes.text();
+    } catch (dlErr) {
+      replyUser(msg, `❌ couldn't read that file (link expired or invalid). Re-upload it and try again, bro.`).catch(() => {});
+      return;
+    }
+    if (!fileContent || fileContent.trim().length < 5) {
+      replyUser(msg, "❌ file is empty or too small, bro.").catch(() => {});
+      return;
+    }
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt" && fileExt !== "luau") {
       const errEmbed = new EmbedBuilder()
@@ -3707,7 +3745,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     );
     const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [panelRow] }).catch(() => {});
     if (panelMsg) {
-      renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, isBuyerUser });
+      renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, fileContent, isBuyerUser });
       // Buttons never expire — no auto-delete timeout
     }
     return;
