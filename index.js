@@ -824,7 +824,7 @@ function isImage(name, contentType) {
 }
 function isAllowedFileType(name, contentType) {
   const e = ext(name);
-  return (e === "txt" || e === "lua") && !isImage(name, contentType);
+  return (e === "txt" || e === "lua" || e === "zip") && !isImage(name, contentType);
 }
 function isZipFile(name, contentType) {
   const e = ext(name);
@@ -2166,7 +2166,7 @@ client.on("interactionCreate", async interaction => {
     }
     const ctx = renamePanels.get(interaction.message.id);
     if (!ctx) {
-      return interaction.reply({ content: "⏳ panel expired, run `.rename` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return interaction.reply({ content: "loading, please wait...", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     renamePanels.delete(interaction.message.id);
     
@@ -3734,16 +3734,27 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
     
-    // Mode selection panel
-    const panelEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("Choose Rename Mode")
-      .setDescription("Select how you want to rename the code:");
-    const panelRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`rename_var_${msg.author.id}`).setLabel("Variable Renamer").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`rename_readable_${msg.author.id}`).setLabel("Readable & Executable").setStyle(ButtonStyle.Primary)
-    );
-    const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [panelRow] }).catch(() => {});
+    // Mode selection panel — Container (type 17) + Text Section (type 10) + mode buttons
+    const renameComponents = [
+      {
+        type: 17, // Container
+        accent_color: 5814783,
+        components: [
+          {
+            type: 10, // Text Section
+            content: "### Rename Mode\nChoose how you want to rename the code:"
+          }
+        ]
+      },
+      {
+        type: 1, // ActionRow — mode buttons
+        components: [
+          { type: 2, style: 3, label: "Variable Renamer", custom_id: `rename_var_${msg.author.id}` },
+          { type: 2, style: 1, label: "Readable & Executable", custom_id: `rename_readable_${msg.author.id}` }
+        ]
+      }
+    ];
+    const panelMsg = await replyUser(msg, { components: renameComponents, flags: 32768 }).catch(() => {});
     if (panelMsg) {
       renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, fileContent, isBuyerUser });
       // Buttons never expire — no auto-delete timeout
