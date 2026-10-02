@@ -2170,12 +2170,17 @@ client.on("interactionCreate", async interaction => {
     }
     renamePanels.delete(interaction.message.id);
     
-    // Edit to loading embed
-    const loadingEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("Renaming...")
-      .setDescription("⏳ Processing...");
-    await interaction.update({ embeds: [loadingEmbed], components: [] }).catch(() => {});
+    // Edit to loading components (Container + Text Section)
+    const loadingComponents = [
+      {
+        type: 17, // Container
+        accent_color: 2829617, // gray
+        components: [
+          { type: 10, content: "### Renaming...\n⏳ Processing..." }
+        ]
+      }
+    ];
+    await interaction.update({ components: loadingComponents }).catch(() => {});
     
     // Process in background
     (async () => {
@@ -2221,22 +2226,45 @@ client.on("interactionCreate", async interaction => {
           const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
           description += `\n\n**URL Found:**\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
         }
-        const resultEmbed = new EmbedBuilder()
-          .setColor(REGULAR_COLOR)
-          .setTitle("File Preview")
-          .setDescription(description)
-          .setFooter({ text: `Request by @${interaction.user.username}│Prince Renamer`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
         const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput, "utf-8"), { name: outputName });
-        
+
+        // Result as components (Container + Text Section) instead of embed
+        const footerText = `Request by @${interaction.user.username}│Prince Renamer`;
+        let resultText = `### File Preview\n${description}\n\n${footerText}`;
+        if (resultText.length > 3800) resultText = resultText.slice(0, 3800) + "\n...";
+        const resultComponents = [
+          {
+            type: 17, // Container
+            accent_color: 2829617, // gray
+            components: [
+              { type: 10, content: resultText }
+            ]
+          }
+        ];
+
         await interaction.message.delete().catch(() => {});
-        await interaction.channel.send({
-          content: `<@${interaction.user.id}> Here you go twin!\n**Finish in:** \`${finishSec}s\``,
+        const resultPayload = {
+          content: `Here you go twin!\n**Finish in:** \`${finishSec}s\``,
           files: [fixedFile],
-          embeds: [resultEmbed]
-        }).catch(() => {});
+          components: resultComponents,
+          flags: 32768
+        };
+        // Reply to the original .rename command message (replyUser) instead of manual mention
+        const origMsg = await interaction.channel.messages.fetch(ctx.commandMessageId).catch(() => null);
+        if (origMsg) {
+          replyUser(origMsg, resultPayload).catch(() => interaction.channel.send(resultPayload).catch(() => {}));
+        } else {
+          interaction.channel.send(resultPayload).catch(() => {});
+        }
       } catch (e) {
         await interaction.message.delete().catch(() => {});
-        interaction.channel.send(`❌ error: ${e.message.slice(0, 150)}`).catch(() => {});
+        const errText = `❌ error: ${e.message.slice(0, 150)}`;
+        const origMsg = await interaction.channel.messages.fetch(ctx.commandMessageId).catch(() => null);
+        if (origMsg) {
+          replyUser(origMsg, errText).catch(() => interaction.channel.send(errText).catch(() => {}));
+        } else {
+          interaction.channel.send(errText).catch(() => {});
+        }
       }
     })();
     return;
@@ -3734,29 +3762,24 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
     
-    // Mode selection panel — Container (type 17) + Text Section (type 10) + mode buttons
+    // Mode selection panel — Container (type 17) with Text Section + buttons inside
     const renameComponents = [
       {
         type: 17, // Container
-        accent_color: 5814783,
+        accent_color: 2829617, // gray — matches REGULAR_COLOR 0x2B2D31
         components: [
           {
             type: 10, // Text Section
             content: "### Rename Mode\nChoose how you want to rename the code:"
-          }
-        ]
-      },
-      {
-        type: 1, // ActionRow — mode buttons
-        components: [
-          { type: 2, style: 3, label: "Variable Renamer", custom_id: `rename_var_${msg.author.id}` },
-          { type: 2, style: 1, label: "Readable & Executable", custom_id: `rename_readable_${msg.author.id}` }
+          },
+          { type: 2, style: 2, label: "Variable Renamer", custom_id: `rename_var_${msg.author.id}` }, // gray
+          { type: 2, style: 2, label: "Readable & Executable", custom_id: `rename_readable_${msg.author.id}` } // gray
         ]
       }
     ];
     const panelMsg = await replyUser(msg, { components: renameComponents, flags: 32768 }).catch(() => {});
     if (panelMsg) {
-      renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, fileContent, isBuyerUser });
+      renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, fileContent, isBuyerUser, commandMessageId: msg.id });
       // Buttons never expire — no auto-delete timeout
     }
     return;
