@@ -80,8 +80,9 @@ function writeJSON(file, data) {
     try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } catch {}
   }
 }
-let config = readJSON(CONFIG_FILE, { allowedChannelId: null });
-if (!config || typeof config !== "object") config = { allowedChannelId: null };
+let config = readJSON(CONFIG_FILE, { allowedChannelId: null, liveScanChannelIds: [] });
+if (!config || typeof config !== "object") config = { allowedChannelId: null, liveScanChannelIds: [] };
+if (!Array.isArray(config.liveScanChannelIds)) config.liveScanChannelIds = [];
 let library = readJSON(LIBRARY_FILE, { files: [] });
 if (Array.isArray(library)) library = { files: library };
 if (!Array.isArray(library.files)) library.files = [];
@@ -824,7 +825,7 @@ function isImage(name, contentType) {
 }
 function isAllowedFileType(name, contentType) {
   const e = ext(name);
-  return (e === "txt" || e === "lua" || e === "zip") && !isImage(name, contentType);
+  return (e === "txt" || e === "lua" || e === "zip" || String(contentType || "").toLowerCase().includes("zip")) && !isImage(name, contentType);
 }
 function isZipFile(name, contentType) {
   const e = ext(name);
@@ -1032,6 +1033,37 @@ async function scanChannel(channel) {
     console.log(`📂 Scan done | #${channel.name} | ${messages} msgs | ${found.length} new | ${replacedDup} replaced | ${skippedDup} skipped | ${pages} pages`);
     return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: libraryTotal, channelTotal };
   } finally { runningScans.delete(channel.id); }
+}
+/** Live-scan: index allowed attachments from a single message into the library */
+function indexMessageFiles(msg) {
+  if (!msg) return 0;
+  const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
+  const existingFullNames = new Set(library.files.map(f => normalize(f.filename)));
+  const found = [];
+  for (const item of attachmentsOf(msg)) {
+    const a = item.attachment;
+    const filename = a.name || "unknown_file";
+    const baseName = normalizeBase(filename);
+    const fullName = normalize(filename);
+    const fileSize = Number(a.size || 0);
+    const url = a.url || a.proxyURL || a.proxy_url;
+    if (!baseName || !url) continue;
+    if (fileSize === 36) continue;
+    if (existingBases.has(baseName) || existingFullNames.has(fullName)) continue;
+    existingBases.add(baseName);
+    existingFullNames.add(fullName);
+    found.push({
+      id: idForFile(), filename, url, size: fileSize,
+      contentType: a.contentType || null, channelId: msg.channelId,
+      messageId: msg.id, attachmentId: String(a.id), forwarded: item.forwarded,
+      createdTimestamp: msg.createdTimestamp || Date.now(), scannedAt: Date.now()
+    });
+  }
+  if (!found.length) return 0;
+  library.files.push(...found);
+  library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
+  saveLibrary();
+  return found.length;
 }
 async function downloadURL(url) {
   const res = await fetch(url);
@@ -2064,6 +2096,8 @@ client.once("ready", async () => {
   console.log(`✅ ONLINE: ${client.user.tag}`);
   console.log(`🏠 Guilds: ${client.guilds.cache.size}`);
   console.log(`📚 Files: ${library.files.length}`);
+  const liveN = Array.isArray(config.liveScanChannelIds) ? config.liveScanChannelIds.length : 0;
+  console.log(`📡 LiveScan channels: ${liveN}${liveN ? " → " + config.liveScanChannelIds.map(String).join(", ") : ""}`);
   console.log("⚡ Bot ready!");
   console.log("==========================================");
   registerCommands().catch(e => console.error("❌ Register:", e.message));
@@ -2170,17 +2204,12 @@ client.on("interactionCreate", async interaction => {
     }
     renamePanels.delete(interaction.message.id);
     
-    // Edit to loading components (Container + Text Section)
-    const loadingComponents = [
-      {
-        type: 17, // Container
-        accent_color: 2829617, // gray
-        components: [
-          { type: 10, content: "### Renaming...\n⏳ Processing..." }
-        ]
-      }
-    ];
-    await interaction.update({ components: loadingComponents }).catch(() => {});
+    // Edit to loading embed
+    const loadingEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("Renaming...")
+      .setDescription("⏳ Processing...");
+    await interaction.update({ embeds: [loadingEmbed], components: [] }).catch(() => {});
     
     // Process in background
     (async () => {
@@ -2226,54 +2255,22 @@ client.on("interactionCreate", async interaction => {
           const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
           description += `\n\n**URL Found:**\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
         }
+        const resultEmbed = new EmbedBuilder()
+          .setColor(REGULAR_COLOR)
+          .setTitle("File Preview")
+          .setDescription(description)
+          .setFooter({ text: `Request by @${interaction.user.username}│Prince Renamer`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
         const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput, "utf-8"), { name: outputName });
-
-        // Result as components (Container + Text Section) instead of embed
-        const footerText = `Request by @${interaction.user.username}│Prince Renamer`;
-        let resultText = `### File Preview\n${description}\n\n${footerText}`;
-        if (resultText.length > 3800) resultText = resultText.slice(0, 3800) + "\n...";
-        const resultComponents = [
-          {
-            type: 17, // Container
-            accent_color: 2829617, // gray
-            components: [
-              { type: 10, content: resultText }
-            ]
-          }
-        ];
-
+        
         await interaction.message.delete().catch(() => {});
-        const resultPayload = {
-          content: `Here you go twin!\n**Finish in:** \`${finishSec}s\``,
+        await interaction.channel.send({
+          content: `<@${interaction.user.id}> Here you go twin!\n**Finish in:** \`${finishSec}s\``,
           files: [fixedFile],
-          components: resultComponents,
-          flags: 32768
-        };
-        // Reply to the original .rename command message (replyUser) instead of manual mention
-        const origMsg = await interaction.channel.messages.fetch(ctx.commandMessageId).catch(() => null);
-        const sendResult = (payload) => {
-          if (origMsg) {
-            return replyUser(origMsg, payload).catch(() => interaction.channel.send(payload).catch(() => {}));
-          }
-          return interaction.channel.send(payload).catch(() => {});
-        };
-        try {
-          await sendResult(resultPayload);
-        } catch {
-          // Final fallback: plain text + file only (no components)
-          const plainPayload = { content: `Here you go twin!\n**Finish in:** \`${finishSec}s\``, files: [fixedFile] };
-          if (origMsg) replyUser(origMsg, plainPayload).catch(() => interaction.channel.send(plainPayload).catch(() => {}));
-          else interaction.channel.send(plainPayload).catch(() => {});
-        }
+          embeds: [resultEmbed]
+        }).catch(() => {});
       } catch (e) {
         await interaction.message.delete().catch(() => {});
-        const errText = `❌ error: ${e.message.slice(0, 150)}`;
-        const origMsg = await interaction.channel.messages.fetch(ctx.commandMessageId).catch(() => null);
-        if (origMsg) {
-          replyUser(origMsg, errText).catch(() => interaction.channel.send(errText).catch(() => {}));
-        } else {
-          interaction.channel.send(errText).catch(() => {});
-        }
+        interaction.channel.send(`❌ error: ${e.message.slice(0, 150)}`).catch(() => {});
       }
     })();
     return;
@@ -2591,6 +2588,21 @@ client.on("interactionCreate", async interaction => {
 // ============================================================
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
+
+  // ── Live scan: auto-index new uploads in watched channels (no .scan needed) ──
+  try {
+    const liveIds = Array.isArray(config.liveScanChannelIds) ? config.liveScanChannelIds.map(String) : [];
+    const chId = String(msg.channelId || msg.channel?.id || "");
+    if (chId && liveIds.includes(chId)) {
+      const added = indexMessageFiles(msg);
+      if (added > 0) {
+        console.log(`📡 LiveScan +${added} file(s) in #${msg.channel?.name || chId} | library=${library.files.length}`);
+      }
+    }
+  } catch (e) {
+    console.warn(`⚠️ LiveScan: ${e.message}`);
+  }
+
   const txt = (msg.content || "").trim();
   if (txt === ".") return; // ignore single dot messages — bot stays silent
   const isDM = !msg.guild;
@@ -3129,6 +3141,85 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (statusMsg) statusMsg.edit(err).catch(() => {});
       else replyUser(msg, err).catch(() => {});
     }
+    return;
+  }
+  // ─────────────────────────────────────────────
+  // .livescan — Owner Only (auto-index new uploads in a channel forever)
+  // Usage: .livescan <channel id|#mention> | .livescan list | .livescan off [id]
+  // ─────────────────────────────────────────────
+  if (/^\.livescan(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (!Array.isArray(config.liveScanChannelIds)) config.liveScanChannelIds = [];
+    const args = txt.split(/\s+/).slice(1);
+    const sub = (args[0] || "").toLowerCase();
+
+    // list active live-scan channels
+    if (!args.length || sub === "list" || sub === "status") {
+      const ids = config.liveScanChannelIds.map(String);
+      if (!ids.length) {
+        replyUser(msg, "📡 **LiveScan:** no channels watching.\nUsage: `.livescan <channel id>` or `.livescan #channel`").catch(() => {});
+        return;
+      }
+      const lines = ids.map(id => `• <#${id}> (\`${id}\`)`).join("\n");
+      replyUser(msg, `📡 **LiveScan active on ${ids.length} channel(s):**\n${lines}\n\nStop one: \`.livescan off <id>\`\nStop all: \`.livescan off\``).catch(() => {});
+      return;
+    }
+
+    // off / stop
+    if (sub === "off" || sub === "stop" || sub === "disable") {
+      const target = args[1]?.replace(/[<#>]/g, "").trim();
+      if (!target) {
+        const n = config.liveScanChannelIds.length;
+        config.liveScanChannelIds = [];
+        saveConfig();
+        replyUser(msg, `✅ LiveScan **stopped** on all channels (${n} removed).`).catch(() => {});
+        return;
+      }
+      if (!/^\d{17,20}$/.test(target)) {
+        replyUser(msg, "❌ invalid channel id.").catch(() => {});
+        return;
+      }
+      const before = config.liveScanChannelIds.length;
+      config.liveScanChannelIds = config.liveScanChannelIds.filter(id => String(id) !== target);
+      saveConfig();
+      if (config.liveScanChannelIds.length === before) {
+        replyUser(msg, `❌ <#${target}> was not on LiveScan.`).catch(() => {});
+      } else {
+        replyUser(msg, `✅ LiveScan **stopped** on <#${target}>.`).catch(() => {});
+      }
+      return;
+    }
+
+    // enable / toggle channel (id or mention)
+    let chId = null;
+    const mentionMatch = txt.match(/<#(\d+)>/);
+    if (mentionMatch) chId = mentionMatch[1];
+    else if (/^\d{17,20}$/.test(args[0])) chId = args[0].trim();
+    if (!chId) {
+      replyUser(msg, "❌ usage: `.livescan <channel id>` or `.livescan #channel`\nAlso: `.livescan list` · `.livescan off [id]`").catch(() => {});
+      return;
+    }
+
+    let ch = null;
+    try { ch = await client.channels.fetch(chId); } catch {}
+    if (!ch || !ch.isTextBased?.()) {
+      replyUser(msg, "❌ invalid text channel id.").catch(() => {});
+      return;
+    }
+
+    const idStr = String(ch.id);
+    const already = config.liveScanChannelIds.map(String).includes(idStr);
+    if (already) {
+      // toggle off if already watching
+      config.liveScanChannelIds = config.liveScanChannelIds.filter(id => String(id) !== idStr);
+      saveConfig();
+      replyUser(msg, `✅ LiveScan **stopped** on <#${ch.id}> (\`${ch.id}\`).`).catch(() => {});
+      return;
+    }
+
+    config.liveScanChannelIds.push(idStr);
+    saveConfig();
+    replyUser(msg, `📡 **LiveScan ON** for <#${ch.id}> (\`${ch.id}\`)\nNew \`.txt\` / \`.lua\` / \`.zip\` uploads there are indexed into the finder automatically.\nRun again on the same channel (or \`.livescan off ${ch.id}\`) to stop.`).catch(() => {});
     return;
   }
   // ─────────────────────────────────────────────
@@ -3771,46 +3862,18 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
     
-    // Mode selection panel — Container (type 17) with Text Section + buttons inside
-    const renameComponents = [
-      {
-        type: 17, // Container
-        accent_color: 2829617, // gray — matches REGULAR_COLOR 0x2B2D31
-        components: [
-          {
-            type: 10, // Text Section
-            content: "### Rename Mode\nChoose how you want to rename the code:"
-          },
-          { type: 2, style: 2, label: "Variable Renamer", custom_id: `rename_var_${msg.author.id}` }, // gray
-          { type: 2, style: 2, label: "Readable & Executable", custom_id: `rename_readable_${msg.author.id}` } // gray
-        ]
-      }
-    ];
-    // Send panel via raw REST (bypasses discord.js validation for type-17/10 components)
-    let panelMsg = null;
-    try {
-      panelMsg = await client.rest.post(Routes.channelMessages(msg.channelId), {
-        body: {
-          message_reference: { message_id: msg.id, channel_id: msg.channelId, fail_if_not_exists: false },
-          components: renameComponents,
-          flags: 32768
-        }
-      });
-    } catch (restErr) {
-      console.warn("⚠️ Rename panel REST send failed, falling back:", restErr.message?.slice(0, 120));
-      // Fallback: standard embed + ActionRow buttons (always works)
-      const fallbackEmbed = new EmbedBuilder()
-        .setColor(REGULAR_COLOR)
-        .setTitle("Choose Rename Mode")
-        .setDescription("Select how you want to rename the code:");
-      const fallbackRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`rename_var_${msg.author.id}`).setLabel("Variable Renamer").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId(`rename_readable_${msg.author.id}`).setLabel("Readable & Executable").setStyle(ButtonStyle.Secondary)
-      );
-      panelMsg = await replyUser(msg, { embeds: [fallbackEmbed], components: [fallbackRow] }).catch(() => null);
-    }
+    // Mode selection panel
+    const panelEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("Choose Rename Mode")
+      .setDescription("Select how you want to rename the code:");
+    const panelRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`rename_var_${msg.author.id}`).setLabel("Variable Renamer").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`rename_readable_${msg.author.id}`).setLabel("Readable & Executable").setStyle(ButtonStyle.Primary)
+    );
+    const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [panelRow] }).catch(() => {});
     if (panelMsg) {
-      renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, fileContent, isBuyerUser, commandMessageId: msg.id });
+      renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, fileContent, isBuyerUser });
       // Buttons never expire — no auto-delete timeout
     }
     return;
