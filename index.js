@@ -2251,10 +2251,19 @@ client.on("interactionCreate", async interaction => {
         };
         // Reply to the original .rename command message (replyUser) instead of manual mention
         const origMsg = await interaction.channel.messages.fetch(ctx.commandMessageId).catch(() => null);
-        if (origMsg) {
-          replyUser(origMsg, resultPayload).catch(() => interaction.channel.send(resultPayload).catch(() => {}));
-        } else {
-          interaction.channel.send(resultPayload).catch(() => {});
+        const sendResult = (payload) => {
+          if (origMsg) {
+            return replyUser(origMsg, payload).catch(() => interaction.channel.send(payload).catch(() => {}));
+          }
+          return interaction.channel.send(payload).catch(() => {});
+        };
+        try {
+          await sendResult(resultPayload);
+        } catch {
+          // Final fallback: plain text + file only (no components)
+          const plainPayload = { content: `Here you go twin!\n**Finish in:** \`${finishSec}s\``, files: [fixedFile] };
+          if (origMsg) replyUser(origMsg, plainPayload).catch(() => interaction.channel.send(plainPayload).catch(() => {}));
+          else interaction.channel.send(plainPayload).catch(() => {});
         }
       } catch (e) {
         await interaction.message.delete().catch(() => {});
@@ -3777,7 +3786,29 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         ]
       }
     ];
-    const panelMsg = await replyUser(msg, { components: renameComponents, flags: 32768 }).catch(() => {});
+    // Send panel via raw REST (bypasses discord.js validation for type-17/10 components)
+    let panelMsg = null;
+    try {
+      panelMsg = await client.rest.post(Routes.channelMessages(msg.channelId), {
+        body: {
+          message_reference: { message_id: msg.id, channel_id: msg.channelId, fail_if_not_exists: false },
+          components: renameComponents,
+          flags: 32768
+        }
+      });
+    } catch (restErr) {
+      console.warn("⚠️ Rename panel REST send failed, falling back:", restErr.message?.slice(0, 120));
+      // Fallback: standard embed + ActionRow buttons (always works)
+      const fallbackEmbed = new EmbedBuilder()
+        .setColor(REGULAR_COLOR)
+        .setTitle("Choose Rename Mode")
+        .setDescription("Select how you want to rename the code:");
+      const fallbackRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`rename_var_${msg.author.id}`).setLabel("Variable Renamer").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`rename_readable_${msg.author.id}`).setLabel("Readable & Executable").setStyle(ButtonStyle.Secondary)
+      );
+      panelMsg = await replyUser(msg, { embeds: [fallbackEmbed], components: [fallbackRow] }).catch(() => null);
+    }
     if (panelMsg) {
       renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, fileContent, isBuyerUser, commandMessageId: msg.id });
       // Buttons never expire — no auto-delete timeout
