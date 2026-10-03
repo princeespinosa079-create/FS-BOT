@@ -100,19 +100,45 @@ if (!Array.isArray(keyStore.keys)) keyStore.keys = [];
 // ============================================================
 const TOKENS_FILE = path.join(DATA_DIR, "tokens.json");
 const MAX_REGULAR_TOKENS = 10;
-const TOKEN_REFILL_MS = 24 * 60 * 60 * 1000; // 24h
+const PH_OFFSET_MS = 8 * 60 * 60 * 1000; // Asia/Manila = UTC+8
 let tokenStore = readJSON(TOKENS_FILE, { users: {} });
 if (!tokenStore || typeof tokenStore !== "object") tokenStore = { users: {} };
 if (!tokenStore.users || typeof tokenStore.users !== "object") tokenStore.users = {};
 const saveTokens = () => writeJSON(TOKENS_FILE, tokenStore);
 
+/** YYYY-MM-DD in Asia/Manila */
+function getPHDateKey(ms = Date.now()) {
+  return new Date(ms).toLocaleDateString("en-CA", { timeZone: "Asia/Manila" });
+}
+
+/** Next 12:00 AM Philippine time (epoch ms) */
+function getNextMidnightPHMs(fromMs = Date.now()) {
+  const phNow = fromMs + PH_OFFSET_MS;
+  const d = new Date(phNow);
+  const nextPhMidnightAsUtc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 0);
+  return nextPhMidnightAsUtc - PH_OFFSET_MS;
+}
+
 function getUserTokenData(userId) {
   const id = String(userId);
   if (!tokenStore.users[id]) {
-    tokenStore.users[id] = { tokens: MAX_REGULAR_TOKENS, nextRefillAt: null };
+    tokenStore.users[id] = { tokens: MAX_REGULAR_TOKENS, lastResetDate: getPHDateKey(), nextRefillAt: null };
     saveTokens();
   }
   return tokenStore.users[id];
+}
+
+/** At 12 AM PH every day → tokens reset to 10 (gifts after reset can go above 10) */
+function ensureDailyTokenReset(userId) {
+  const data = getUserTokenData(userId);
+  const today = getPHDateKey();
+  if (data.lastResetDate !== today) {
+    data.tokens = MAX_REGULAR_TOKENS;
+    data.lastResetDate = today;
+    data.nextRefillAt = null;
+    saveTokens();
+  }
+  return data;
 }
 
 function formatTokenWait(ms) {
@@ -135,65 +161,49 @@ function tokenLeftLine(tokensLeft, unlimited) {
   return `-# You have ${tokensLeft} Tokens left.`;
 }
 
-/** Consume 1 token for regular users. Buyers/owners unlimited. */
+/** Consume 1 token for regular users. Buyers/owners unlimited. Daily reset 12 AM PH. */
 function tryConsumeToken(userId, isBuyerUser) {
   if (isBuyerUser || isOwner(userId)) {
     return { ok: true, unlimited: true, tokens: null };
   }
-  const data = getUserTokenData(userId);
-  const now = Date.now();
+  const data = ensureDailyTokenReset(userId);
   if (data.tokens <= 0) {
-    if (!data.nextRefillAt) data.nextRefillAt = now + TOKEN_REFILL_MS;
-    if (now >= data.nextRefillAt) {
-      data.tokens = MAX_REGULAR_TOKENS;
-      data.nextRefillAt = null;
-      saveTokens();
-    } else {
-      return { ok: false, waitUntil: data.nextRefillAt, tokens: 0 };
-    }
+    const waitUntil = getNextMidnightPHMs();
+    data.nextRefillAt = waitUntil;
+    saveTokens();
+    return { ok: false, waitUntil, tokens: 0 };
   }
   data.tokens = Math.max(0, data.tokens - 1);
-  if (data.tokens <= 0) {
-    data.nextRefillAt = now + TOKEN_REFILL_MS;
-  }
+  if (data.tokens <= 0) data.nextRefillAt = getNextMidnightPHMs();
+  else data.nextRefillAt = null;
   saveTokens();
   return { ok: true, unlimited: false, tokens: data.tokens };
 }
 
 function peekTokens(userId, isBuyerUser) {
   if (isBuyerUser || isOwner(userId)) return { unlimited: true, tokens: null };
-  const data = getUserTokenData(userId);
-  const now = Date.now();
-  if (data.tokens <= 0 && data.nextRefillAt && now >= data.nextRefillAt) {
-    data.tokens = MAX_REGULAR_TOKENS;
-    data.nextRefillAt = null;
-    saveTokens();
-  }
-  return { unlimited: false, tokens: data.tokens, nextRefillAt: data.nextRefillAt };
+  const data = ensureDailyTokenReset(userId);
+  return { unlimited: false, tokens: data.tokens, nextRefillAt: data.nextRefillAt || getNextMidnightPHMs() };
 }
 
+/** Gift tokens — can go above 10 (e.g. 20). Daily 12 AM PH still resets to 10. */
 function addToken(userId, amount) {
-  const data = getUserTokenData(userId);
-  data.tokens = Math.min(MAX_REGULAR_TOKENS, Math.max(0, data.tokens + amount));
+  const data = ensureDailyTokenReset(userId);
+  data.tokens = Math.max(0, data.tokens + amount); // no max cap for gifts
   if (data.tokens > 0) data.nextRefillAt = null;
-  else if (!data.nextRefillAt) data.nextRefillAt = Date.now() + TOKEN_REFILL_MS;
+  else data.nextRefillAt = getNextMidnightPHMs();
   saveTokens();
   return data.tokens;
 }
 
-/** Subtract tokens from a regular user. Returns { ok, tokens, waitUntil? }. */
+/** Subtract tokens from a regular user. Returns { ok, tokens, need? }. */
 function subtractTokens(userId, amount) {
-  const data = getUserTokenData(userId);
-  const now = Date.now();
-  if (data.tokens <= 0 && data.nextRefillAt && now >= data.nextRefillAt) {
-    data.tokens = MAX_REGULAR_TOKENS;
-    data.nextRefillAt = null;
-  }
+  const data = ensureDailyTokenReset(userId);
   if (data.tokens < amount) {
     return { ok: false, tokens: data.tokens, need: amount };
   }
   data.tokens = Math.max(0, data.tokens - amount);
-  if (data.tokens <= 0) data.nextRefillAt = now + TOKEN_REFILL_MS;
+  if (data.tokens <= 0) data.nextRefillAt = getNextMidnightPHMs();
   else data.nextRefillAt = null;
   saveTokens();
   return { ok: true, tokens: data.tokens };
@@ -278,10 +288,10 @@ function formatCooldown(remainingSec) {
  * onCooldown=true only when out of tokens (wait for daily refill).
  */
 const pendingTokenLine = new Map(); // userId -> "-# You have XX Tokens left." (regular only — never premium)
-/** Suffix for result embed descriptions. Empty for premium. */
+/** Token line for message TEXT only (never embed). Empty for premium. */
 function tokensResultSuffix(isBuyerUser, tokensLeft) {
   if (isBuyerUser || tokensLeft === null || tokensLeft === undefined) return "";
-  return `\n\n-# You have ${tokensLeft} Tokens left.`;
+  return `\n-# You have ${tokensLeft} Tokens left.`;
 }
 function checkCommandCooldown(userId, cmd, isBuyerUser) {
   const free = TOKEN_FREE_CMDS.has(cmd);
@@ -775,24 +785,15 @@ function isErrorPayload(body) {
 function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
-  // Append token balance only on success results — never on any error / Input Error / loading
+  // Token balance ONLY in message text — never inside embeds
   try {
     const line = pendingTokenLine.get(String(message.author?.id));
     if (line) {
       if (isErrorPayload(body)) {
         pendingTokenLine.delete(String(message.author.id));
       } else {
-        if (body.embeds && body.embeds.length) {
-          const last = body.embeds[body.embeds.length - 1];
-          const emb = EmbedBuilder.from(last);
-          const prev = emb.data?.description || "";
-          emb.setDescription(prev ? `${prev}\n\n${line}` : line);
-          body.embeds = [...body.embeds.slice(0, -1), emb];
-        } else if (body.content) {
-          body.content = `${body.content}\n${line}`;
-        } else {
-          body.content = line;
-        }
+        if (body.content) body.content = `${body.content}\n${line}`;
+        else body.content = line;
         pendingTokenLine.delete(String(message.author.id));
       }
     }
@@ -1571,16 +1572,20 @@ function cleanLuaScript(text) {
     if (!t) { cleaned.push(""); continue; }
 
     // 1. DELETE comment lines (keep if safe discord invite)
-    if (t.indexOf("--") === 0) {
+    //    -- full line, --[[ blocks, watermarks / leak credits, // style
+    if (t.indexOf("--") === 0 || t.indexOf("--[[") === 0 || t.indexOf("--[=") === 0) {
       if (!isSafeUrl(t)) continue;
     }
+    if (/^\[?\s*(LEAKED\s+BY|GOATED|GRABBED\s+BY|COPIED\s+BY|MADE\s+BY|CREDITS?\s*:)/i.test(t)) continue;
+    if (/^\s*\/\//.test(t)) continue;
+    if (/^\s*\/\*/.test(t) || /^\s*\*\//.test(t)) continue;
+    if (/LEAKED\s+BY|\[\s*GOATED\s*\]|GUI\s*Copier/i.test(t) && t.indexOf("--") !== -1) continue;
 
-    // 2. PRESERVE IP logger/grabber lines — removal is user-controlled via Yes/No button (removeDangerousLines).
-    //    Do NOT delete them here, otherwise clicking "No" would still strip them.
-    // if (isGrabber(t)) continue;
+    // 2. DELETE IP logger/grabber lines
+    if (isGrabber(t)) continue;
 
-    // 3. PRESERVE script loader lines — same reason as above. Only removed when user clicks "Yes".
-    // if (hasLoader(t)) continue;
+    // 3. DELETE script loader lines
+    if (hasLoader(t)) continue;
 
     // 4. DELETE junk/obfuscation lines (anti-tamper, Luraph-style)
     if (isJunkLine(t)) continue;
@@ -1787,9 +1792,11 @@ function removeDangerousLines(code) {
     if (/synapse|script-?ware|krnl|fluxus|delta|celery|electron|comet|vega\s*x|ironbrew/i.test(line)) return false;
     if (/loadlib|loadfile|dofile.*http/i.test(line)) return false;
     if (/syn\s*\.\s*request\s*\(/i.test(line)) return false;
-    // IP loggers / grabbers
-    if (/iplogger|ipgrablog|ipify|whatismyip|grabify|logmyip|ipgrabber|stealip/i.test(line)) return false;
-    if (/webhook\.site|hook\.billy|iplog\.xyz/i.test(line)) return false;
+    // IP loggers / grabbers + more comment/watermark noise lines
+    if (/iplogger|ipgrablog|ipify|whatismyip|grabify|logmyip|ipgrabber|stealip|ip-api\.com|icanhazip|ifconfig\.(co|me)|ipinfo\.io|freegeoip/i.test(line)) return false;
+    if (/webhook\.site|hook\.billy|iplog\.xyz|blasze|nipiscan|spiderip/i.test(line)) return false;
+    if (/^\s*--/.test(line) && !/discord\.(gg|com\/invite)/i.test(line)) return false;
+    if (/LEAKED\s+BY|\[\s*GOATED\s*\]|Grabbed by|Copied by|GUI\s*Copier/i.test(line)) return false;
     if (/\/api\/v[0-9]+\/track|\/log\?|\/grab\?/i.test(line)) return false;
     if (/ip\s*[=:]\s*["']?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/i.test(line)) return false;
     if (/(?:new\s+)?WebSocket\s*\(/i.test(line)) return false;
@@ -2075,7 +2082,25 @@ OUTPUT RULES (ABSOLUTE):
 SCRIPT TO RECONSTRUCT:
 ${source}`;
 
-    const prompt = mode === "var" ? varPrompt : readablePrompt;
+    const cleanupPrompt = `You are a Luau/Roblox script CLEANER only.
+Your ONLY job:
+1. Remove ALL comments (full-line and inline): -- comments, --[[ multi-line ]], --[=[ ]=]
+2. Remove IP loggers / grabbers (iplogger, grabify, ip-api, bit.ly used for tracking, etc.)
+3. Remove Script Loaders: loadstring(...), game:HttpGet, HttpService:GetAsync used to load remote scripts, require("https://...")
+4. Remove watermark / leak credit lines: [ LEAKED BY ... ], [ GOATED ], Grabbed by..., Copied by..., Discord spam headers
+5. Remove empty leftover blank lines (collapse 3+ newlines to 2)
+
+DO NOT:
+- Deobfuscate, rename variables, reconstruct control flow, or rewrite logic
+- Remove real game logic, remotes, UI, or legitimate HttpGet that is not a loader pattern if unsure — when it looks like loadstring/HttpGet loader, remove it
+- Add new code or explanations
+
+OUTPUT: ONLY the cleaned Luau source. No markdown fences. No prose.
+
+SCRIPT:
+${source}`;
+
+    const prompt = mode === "var" ? varPrompt : mode === "cleanup" ? cleanupPrompt : readablePrompt;
 
     const completion = await openaiClient.chat.completions.create({
       model: "gpt-4o-mini",
@@ -2503,11 +2528,7 @@ client.on("interactionCreate", async interaction => {
           const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
           description += `\n\n**URL Found:**\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
         }
-        // Tokens left on result (regular only — never premium)
-        if (!ctx.isBuyerUser) {
-          const peek = peekTokens(interaction.user.id, false);
-          description += tokensResultSuffix(false, peek.tokens);
-        }
+        // Tokens left go in message text only — not embed
         const resultEmbed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
           .setTitle("File Preview")
@@ -3948,15 +3969,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
           .setTitle("Result")
           .setFooter({ text: timeFooter });
         
-        const tokExtra = isBuyerUser ? "" : tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens);
         if (res.ok) {
-          resultEmbed.setDescription("✅ Delete" + tokExtra);
+          resultEmbed.setDescription("✅ Delete");
         } else {
-          resultEmbed.setDescription(`❌ failed: HTTP ${res.status}` + tokExtra);
+          resultEmbed.setDescription(`❌ failed: HTTP ${res.status}`);
         }
-        
+        const tokLine = isBuyerUser ? "" : tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens);
         await msg.channel.send({
-          content: `<@${msg.author.id}> done, delete the webhook bro!`,
+          content: `<@${msg.author.id}> done, delete the webhook bro!` + tokLine,
           embeds: [resultEmbed]
         }).catch(() => {});
       }
@@ -4092,7 +4112,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const embed = new EmbedBuilder()
         .setColor(getEmbedColor(isBuyerUser))
         .setTitle("Script Copy")
-        .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\`` + (isBuyerUser ? "" : tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens)))
+        .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
         .setFooter({ text: `Request by @${msg.author.username}│Prince Loader`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
       await msg.channel.send({
         content: `<@${msg.author.id}> Here is the script bro!`,
@@ -4346,19 +4366,59 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
     
-    // Mode selection panel
-    const panelEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("Choose Rename Mode")
-      .setDescription("Select how you want to rename the code:");
-    const panelRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`rename_var_${msg.author.id}`).setLabel("Variable Renamer").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`rename_readable_${msg.author.id}`).setLabel("Readable & Executable").setStyle(ButtonStyle.Primary)
-    );
-    const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [panelRow] }).catch(() => {});
-    if (panelMsg) {
-      renamePanels.set(panelMsg.id, { authorId: msg.author.id, fileUrl: file.url, fileName: file.name, fileContent, isBuyerUser });
-      // Buttons never expire — no auto-delete timeout
+    // Process immediately — remove comments, IP loggers, script loaders only (no panel)
+    const loadingMsg = await replyUser(msg, "⏳ cleaning file...").catch(() => {});
+    const startTime = Date.now();
+    try {
+      let text = String(fileContent || "");
+      try { text = stripGuiCopierHeader(text); } catch {}
+      const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
+      const foundUrls = text.match(urlRegex) || [];
+      // Local clean: comments + IP loggers + script loaders (+ expanded junk comment lines)
+      let finalOutput = cleanLuaScript(text);
+      finalOutput = removeDangerousLines(finalOutput);
+      // Light AI pass: only strip comments / loaders / IP if API available
+      try {
+        if (typeof openaiClient !== "undefined" && openaiClient) {
+          const cleaned = await aiCleanScript(finalOutput, "cleanup");
+          if (cleaned && cleaned.trim().length > 10) finalOutput = cleaned;
+        }
+      } catch (aiErr) {
+        console.warn("⚠️ rename AI cleanup skipped:", aiErr.message?.slice(0, 80));
+      }
+      finalOutput = removeDangerousLines(finalOutput);
+      if (!finalOutput || !finalOutput.trim()) throw new Error("empty output after clean");
+
+      const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
+      const randChars = "abcdefghijklmnopqrstuvwxyz";
+      let outputName = "";
+      for (let i = 0; i < 20; i++) outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
+      outputName += ".lua";
+
+      const uniqueUrls = [...new Set(foundUrls)];
+      const previewText = buildPreviewText(finalOutput);
+      let description = buildRenamerDescription(previewText);
+      if (uniqueUrls.length > 0) {
+        const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
+        description += `\n\n**URL Found:**\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
+      }
+      const resultEmbed = new EmbedBuilder()
+        .setColor(REGULAR_COLOR)
+        .setTitle("File Preview")
+        .setDescription(description)
+        .setFooter({ text: `Request by @${msg.author.username}│Prince Renamer`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
+      const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput, "utf-8"), { name: outputName });
+      const tokLine = isBuyerUser ? "" : tokensResultSuffix(false, cd.tokensLeft ?? peekTokens(msg.author.id, false).tokens);
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      pendingTokenLine.delete(String(msg.author.id));
+      await replyUser(msg, {
+        content: `Here you go!\n**Finish in:** \`${finishSec}s\`` + tokLine,
+        files: [fixedFile],
+        embeds: [resultEmbed]
+      }).catch(() => {});
+    } catch (e) {
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      replyUser(msg, `❌ failed: ${e.message.slice(0, 150)}`).catch(() => {});
     }
     return;
   }
@@ -4596,7 +4656,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         if (foundFetchUrls.length > 10) urlSection += `\n- ...and ${foundFetchUrls.length - 10} more`;
         description += urlSection.slice(0, 800);
       }
-      if (!perm.isBuyer) description += tokensResultSuffix(false, cd.tokensLeft ?? peekTokens(msg.author.id, false).tokens);
+      // tokens in message text only
       const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
       const resultEmbed = new EmbedBuilder()
         .setColor(REGULAR_COLOR)
@@ -4640,8 +4700,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, "❌ usage: `.give <amount> <@user>`").catch(() => {});
       return;
     }
-    if (amount > MAX_REGULAR_TOKENS) {
-      replyUser(msg, `❌ max you can give is ${MAX_REGULAR_TOKENS}.`).catch(() => {});
+    if (amount > 1000) {
+      replyUser(msg, "❌ max you can give is 1000.").catch(() => {});
       return;
     }
     const mention = targetRaw.match(/^<@!?(\d+)>$/);
