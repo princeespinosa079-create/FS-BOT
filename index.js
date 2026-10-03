@@ -146,7 +146,8 @@ const COOLDOWNS = {
   et: 30 * 60,          // 30 minutes
   delwh: 10 * 60,       // 10 minutes
   whs: 15,              // 15 seconds
-  redeem: 5             // 5 seconds
+  redeem: 5,            // 5 seconds
+  l: 15                 // 15 seconds — env logger
 };
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
@@ -1561,6 +1562,28 @@ function looksLikeBytecodeOrBroken(src) {
   return false;
 }
 
+/** True when content is heavy obfuscation / protection and is NOT readable Lua */
+function isObfuscatedOrProtectionNotLua(src) {
+  if (!src || typeof src !== "string") return true;
+  const s = src.trim();
+  if (s.length < 5) return true;
+  const luaSignals = (s.match(/\b(local|function|end|then|elseif|else|for|while|do|return|game|workspace|Instance\.new|getgenv|task\.|UDim2|Vector3|CFrame|Color3|Players)\b/g) || []).length;
+  const hasReadableLua = luaSignals >= 4;
+  if (hasReadableLua) return false;
+  try {
+    const det = detectObfuscator(s);
+    const heavyNames = new Set(["Luraph", "Prometheus", "IronBrew", "MoonSec V3", "VM-Obfuscated", "Bytecode", "Luarmor", "PolSec", "WeAreDevs", "DarkEccentric", "Axon"]);
+    if (det && heavyNames.has(det.name) && det.confidence >= 35) return true;
+  } catch {}
+  if (looksLikeBytecodeOrBroken(s)) return true;
+  // Protection-style wrapper with little real Lua
+  if (/return\s*\(\s*function\s*\(/.test(s.slice(0, 800)) && /\\x[0-9a-fA-F]{2}/.test(s) && luaSignals < 4) return true;
+  if (/loadstring\s*\(\s*["'][\s\S]{80,}["']\s*\)/.test(s) && luaSignals < 3) return true;
+  const nonAscii = (s.match(/[^\x09\x0a\x0d\x20-\x7e]/g) || []).length;
+  if (s.length > 100 && nonAscii / s.length > 0.25) return true;
+  return false;
+}
+
 // Remove ONLY script loaders + IP loggers — Discord webhooks & normal URLs are KEPT
 function removeDangerousLines(code) {
   if (!code) return code;
@@ -1708,6 +1731,10 @@ function stripGuiCopierHeader(source) {
     /^\s*Root\s*:/i,
     /^\s*Layout\s*:/i,
     /^\s*Discord\s*:/i,
+    /\[?\s*LEAKED\s+BY\s+[^\]]*\]?/i,
+    /\[?\s*GOATED\s*\]?/i,
+    /^\s*--\s*\[?\s*LEAKED\s+BY/i,
+    /^\s*--\s*\[?\s*GOATED/i,
     /^\s*-{5,}\s*$/,
     /^\s*={5,}\s*$/,
   ];
@@ -1763,6 +1790,10 @@ function stripNonLuaJunk(code) {
     /^\s*Grabbed\s+by\s+/i,
     /^\s*Copied\s+by\s+/i,
     /^\s*Grabbed\s+from\s+/i,
+    /\[?\s*LEAKED\s+BY\s+[^\]]*\]?/i,
+    /\[?\s*GOATED\s*\]?/i,
+    /^\s*--\s*\[?\s*LEAKED\s+BY/i,
+    /^\s*--\s*\[?\s*GOATED/i,
     /^\s*Discord\s*:/i,
     /^\s*\d+\s+instances?\s*$/i,
     /^\s*Script\s+Copier/i,
@@ -1804,21 +1835,34 @@ async function aiCleanScript(source, mode) {
 1. Rename ALL variables, functions, and parameters from generic/obfuscated names to meaningful descriptive names
 2. Keep the EXACT same logic, structure, and behavior — do NOT add, remove, or change any functionality
 3. CRITICAL: Do NOT remove ANY script loaders, HttpGet, URLs, webhooks, IP loggers, or any functional code. Loader/logger removal is handled separately — you MUST preserve them exactly.
-4. Do NOT add or remove any lines. Remove ONLY GUI Copier header blocks (Grabbed by..., Discord:..., N instances) and bare non-Lua text.
-5. Output ONLY the renamed Lua code — no explanations, no markdown fences, no extra text
+4. Do NOT add or remove functional lines. DELETE watermark / credit / leak comments such as: [ LEAKED BY SOLAR ], [ GOATED ], "LEAKED BY ...", "GOATED", Grabbed by..., Discord:..., N instances, and any similar non-code noise.
+5. Output MUST be valid Roblox-executable Lua (Luau-compatible): balanced if/then/end, function/end, correct Instance.new / game:GetService usage. No Python/JS syntax.
+6. Output ONLY the renamed Lua code — no explanations, no markdown fences, no extra text
 
 SCRIPT:
 ${source}`;
 
-    const readablePrompt = `You are an elite Lua/Roblox script RECONSTRUCTION engineer — not a renamer, not a minifier. You FULLY REBUILD scripts so they look hand-written by a senior developer.
+    const readablePrompt = `You are an elite Lua/Roblox script RECONSTRUCTION engineer — not a renamer, not a minifier. You FULLY REBUILD scripts so they look hand-written by a senior Roblox developer and RUN in a Roblox executor without errors.
 
-GOAL: Output a clean, professional, 100% executable reconstruction — same behavior, far better structure.
+GOAL: Output clean, professional, 100% Roblox-executable Lua — same behavior, far better structure.
+
+ROBLOX EXECUTION (CRITICAL — MUST FOLLOW):
+- Output MUST be valid Lua 5.1 / Luau that runs in Roblox (Synapse, Wave, Delta, etc.).
+- Balance every if/then/end, function/end, do/end, repeat/until. Never leave dangling ends or missing ends.
+- Use Roblox APIs correctly: game:GetService("..."), Instance.new("ClassName"), UDim2.new, Vector3.new, CFrame.new, Color3.fromRGB, task.wait / task.spawn.
+- Do NOT invent non-Roblox APIs, Node/browser APIs, or Python/JS syntax.
+- Keep remote calls (FireServer / InvokeServer), connections, and GUI parenting valid.
+- Prefer local variables; avoid undeclared globals unless the original relied on them.
+
+DELETE THESE WATERMARKS / JUNK (ALWAYS):
+- Comments or lines like: [ LEAKED BY SOLAR ], [ GOATED ], LEAKED BY ..., GOATED, "Grabbed by...", "Copied by...", Discord invite spam in headers
+- GUI Copier headers, reconstruction doc banners, markdown fences, bare non-Lua prose
+- Fancy ===== / ------ banner comment blocks that are not real section separators
 
 STRUCTURE (REQUIRED):
 1. DO NOT add big documentation header blocks. DELETE any existing ones, including:
    - --[[ ... ]] blocks that describe layout, ScreenGui, Root size, ModeToggle, etc.
    - Lines like "reconstructed 1:1 from execution log", "ScreenGui : ...", "Root : 280 x 320", "Layout : Header..."
-   - Fancy banner comments with ===== or ------
 2. Group code into CLEAR SECTIONS with short separator comments only:
    -- ===================== CONFIG =====================
    -- ===================== STATE =====================
@@ -1837,20 +1881,20 @@ NAMING:
 PRESERVE BEHAVIOR (CRITICAL):
 - Do NOT remove, break, or change real functionality.
 - Keep ALL loaders, HttpGet, remote calls, FireServer, webhooks, and logic exactly working.
-- Strip pure junk: GUI Copier headers, "Grabbed by...", reconstruction doc comments, bare non-Lua prose, dead obfuscation noise, markdown fences.
 - Replace any Discord invite links with: https://discord.gg/TBBAUZu8cW
 
 QUALITY:
-- Fix missing end / until so the script is syntactically valid.
+- Fix missing end / until so the script is syntactically valid and executable in Roblox.
 - Prefer readable control flow over clever one-liners.
 - Add short useful comments only on non-obvious logic (not spam). Never write multi-line layout docs.
-- If input is bytecode / heavy \\x / broken: best-effort reconstruct into clean runnable Lua.
+- If input is bytecode / heavy \\x / broken: best-effort reconstruct into clean runnable Roblox Lua.
 
 OUTPUT RULES (ABSOLUTE):
-- Output ONLY pure Lua code.
+- Output ONLY pure Lua code that can be pasted into a Roblox executor and run.
 - No markdown, no \`\`\` fences, no explanations before or after the code.
 - No "Here is the script" or similar prose.
 - No big --[[ documentation headers ]].
+- No [ LEAKED BY ... ] / [ GOATED ] / similar credit watermarks anywhere.
 
 SCRIPT TO RECONSTRUCT:
 ${source}`;
@@ -1867,6 +1911,12 @@ ${source}`;
     // Strip markdown fences if AI added them
     output = output.replace(/^```(?:lua)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
     if (!output) throw new Error("Empty AI response");
+    // Strip watermark / leak credit comments the model might leave
+    output = output
+      .replace(/\[?\s*LEAKED\s+BY\s+[^\]]*\]?/gi, "")
+      .replace(/\[?\s*GOATED\s*\]?/gi, "")
+      .replace(/^\s*--\s*\[?\s*LEAKED\s+BY.*$/gim, "")
+      .replace(/^\s*--\s*\[?\s*GOATED.*$/gim, "");
     // Final pass: strip any non-Lua junk that slipped through
     output = stripNonLuaJunk(output);
     return output;
@@ -2222,6 +2272,12 @@ client.on("interactionCreate", async interaction => {
           text = await res.text();
         }
         if (!text || text.trim().length < 5) throw new Error("File is empty or unreadable, bro");
+        // Reject pure obfuscation / protection that is not readable Lua
+        if (isObfuscatedOrProtectionNotLua(text)) {
+          await interaction.message.delete().catch(() => {});
+          await interaction.channel.send({ content: `<@${interaction.user.id}> ❌ this is obufscated or protection code, try another.` }).catch(() => {});
+          return;
+        }
         // Always strip GUI Copier header blocks (they're junk comments, not loaders/loggers)
         text = stripGuiCopierHeader(text);
         const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
@@ -3799,6 +3855,98 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
+  // .l — Env Logger (regular + buyer)
+  if (/^\.l(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    const cd = checkCommandCooldown(msg.author.id, "l", perm.isBuyer);
+    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    const envLogger = `-- Env Logger | Prince
+-- Logs new keys written to getgenv() (and table assignments on the env)
+local env = (getgenv and getgenv()) or _G
+if type(env) ~= "table" then
+  warn("[EnvLogger] getgenv/_G not available")
+  return
+end
+if env.__PrinceEnvLogger then
+  warn("[EnvLogger] already running")
+  return
+end
+env.__PrinceEnvLogger = true
+
+local function logLine(...)
+  local parts = {}
+  for i = 1, select("#", ...) do
+    parts[i] = tostring(select(i, ...))
+  end
+  local msg = table.concat(parts, " ")
+  print("[EnvLogger]", msg)
+  if rconsoleprint then pcall(rconsoleprint, "[EnvLogger] " .. msg .. "\\n") end
+end
+
+logLine("attached — watching getgenv for new / changed keys")
+
+local proxy = {}
+setmetatable(proxy, {
+  __index = function(_, k)
+    return rawget(env, k)
+  end,
+  __newindex = function(_, k, v)
+    if k ~= "__PrinceEnvLogger" then
+      logLine("SET", tostring(k), "=", typeof and typeof(v) or type(v), "|", tostring(v):sub(1, 120))
+    end
+    rawset(env, k, v)
+  end,
+})
+
+-- Prefer hooking getgenv if the executor allows replacing it
+pcall(function()
+  if getgenv then
+    local real = getgenv()
+    local mt = getrawmetatable and getrawmetatable(real)
+    if mt and setreadonly then
+      pcall(setreadonly, mt, false)
+      local oldNew = mt.__newindex
+      mt.__newindex = function(t, k, v)
+        if k ~= "__PrinceEnvLogger" then
+          logLine("SET", tostring(k), "=", typeof and typeof(v) or type(v), "|", tostring(v):sub(1, 120))
+        end
+        if oldNew then return oldNew(t, k, v) end
+        return rawset(t, k, v)
+      end
+      pcall(setreadonly, mt, true)
+      logLine("hooked getgenv metatable __newindex")
+      return
+    end
+  end
+end)
+
+-- Fallback: poll for new keys every 0.5s
+task.spawn(function()
+  local seen = {}
+  for k in pairs(env) do seen[k] = true end
+  while env.__PrinceEnvLogger do
+    for k, v in pairs(env) do
+      if not seen[k] and k ~= "__PrinceEnvLogger" then
+        seen[k] = true
+        logLine("NEW", tostring(k), "=", typeof and typeof(v) or type(v), "|", tostring(v):sub(1, 120))
+      end
+    end
+    task.wait(0.5)
+  end
+end)
+`;
+    const attachment = new AttachmentBuilder(Buffer.from(envLogger, "utf-8"), { name: "env_logger.lua" });
+    const embed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("Env Logger")
+      .setDescription("Execute this in your Roblox executor.\nIt logs new / changed keys on `getgenv()`.")
+      .setFooter({ text: `Request by @${msg.author.username}│Env Logger`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
+    await replyUser(msg, { embeds: [embed], files: [attachment] }).catch(() => {});
+    return;
+  }
   // .rename / .rn — mode selection panel
   if (/^\.(?:rename|rn)$/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
@@ -3850,6 +3998,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     if (!fileContent || fileContent.trim().length < 5) {
       replyUser(msg, "❌ file is empty or too small, bro.").catch(() => {});
+      return;
+    }
+    if (isObfuscatedOrProtectionNotLua(fileContent)) {
+      replyUser(msg, "❌ this is obufscated or protection code, try another.").catch(() => {});
       return;
     }
     const fileExt = ext(file.name);
@@ -3907,7 +4059,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     for (let i = 0; i < filesToSend.length; i += 10) {
       const batch = filesToSend.slice(i, i + 10);
       const content = i === 0
-        ? "**Here is the file twin!**" + (notFound.length ? `\n❌ Not found: \`${notFound.join("`, `")}\`` : "")
+        ? "**Here you go!**" + (notFound.length ? `\n❌ Not found: \`${notFound.join("`, `")}\`` : "")
         : null;
       if (i === 0) {
         await replyUser(msg, { content, files: batch }).catch(() => {});
@@ -4056,7 +4208,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const fileAttachment = { attachment: fileUrl, name: file.filename || "file.lua" };
     
     await msg.channel.send({
-      content: `<@${msg.author.id}> **Here is the file twin!**`,
+      content: `<@${msg.author.id}> **Here you go!**`,
       files: [fileAttachment]
     }).catch(() => {});
     return;
