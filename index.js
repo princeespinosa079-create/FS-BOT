@@ -181,6 +181,24 @@ function addToken(userId, amount) {
   return data.tokens;
 }
 
+/** Subtract tokens from a regular user. Returns { ok, tokens, waitUntil? }. */
+function subtractTokens(userId, amount) {
+  const data = getUserTokenData(userId);
+  const now = Date.now();
+  if (data.tokens <= 0 && data.nextRefillAt && now >= data.nextRefillAt) {
+    data.tokens = MAX_REGULAR_TOKENS;
+    data.nextRefillAt = null;
+  }
+  if (data.tokens < amount) {
+    return { ok: false, tokens: data.tokens, need: amount };
+  }
+  data.tokens = Math.max(0, data.tokens - amount);
+  if (data.tokens <= 0) data.nextRefillAt = now + TOKEN_REFILL_MS;
+  else data.nextRefillAt = null;
+  saveTokens();
+  return { ok: true, tokens: data.tokens };
+}
+
 async function logFinderPanel(user, action, detail) {
   try {
     const chId = config.logChannelId ? String(config.logChannelId) : null;
@@ -2754,11 +2772,11 @@ client.on("interactionCreate", async interaction => {
         flags: MessageFlags.Ephemeral
       }).catch(() => {});
     }
-    const tokSuffix = isBuyerUser ? "" : tokensResultSuffix(false, tok.tokens);
+    // Finder source embeds — never show tokens left
     const perPage = 8;
     const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
-    const desc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n") + tokSuffix;
+    const desc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n");
     const embed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle(getFinderTitle(isBuyerUser))
@@ -4598,6 +4616,60 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
+  // .give <amount> <@user> — owner + regular only (premium cannot use)
+  if (/^\.give(?:\s|$)/i.test(txt)) {
+    const isOwnerUser = isOwner(msg.author.id);
+    const isBuyerUser = await isBuyer(msg.author.id, msg.member);
+    if (isBuyerUser && !isOwnerUser) {
+      replyUser(msg, "❌ premium can’t use `.give`.").catch(() => {});
+      return;
+    }
+    if (!isOwnerUser) {
+      const perm = await checkRegularPermission(msg, false);
+      if (!perm.allowed) {
+        if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {});
+        return;
+      }
+    }
+    const parts = txt.trim().split(/\s+/);
+    // .give <amount> <@user|id>
+    const amountStr = parts[1];
+    const targetRaw = parts[2] || "";
+    const amount = parseInt(amountStr, 10);
+    if (!amountStr || !Number.isFinite(amount) || amount < 1) {
+      replyUser(msg, "❌ usage: `.give <amount> <@user>`").catch(() => {});
+      return;
+    }
+    if (amount > MAX_REGULAR_TOKENS) {
+      replyUser(msg, `❌ max you can give is ${MAX_REGULAR_TOKENS}.`).catch(() => {});
+      return;
+    }
+    const mention = targetRaw.match(/^<@!?(\d+)>$/);
+    const targetId = mention ? mention[1] : (targetRaw.match(/^\d{17,20}$/) ? targetRaw : null);
+    if (!targetId) {
+      replyUser(msg, "❌ usage: `.give <amount> <@user>`").catch(() => {});
+      return;
+    }
+    if (targetId === msg.author.id) {
+      replyUser(msg, "❌ you can’t give tokens to yourself.").catch(() => {});
+      return;
+    }
+    // Owner: no deduct, just grant
+    if (isOwnerUser) {
+      const newBal = addToken(targetId, amount);
+      replyUser(msg, `✅ gave **${amount}** token(s) to <@${targetId}>.\n-# They now have ${newBal} Tokens.`).catch(() => {});
+      return;
+    }
+    // Regular: must have enough tokens
+    const sub = subtractTokens(msg.author.id, amount);
+    if (!sub.ok) {
+      replyUser(msg, `❌ you only have **${sub.tokens}** token(s), need **${amount}**.`).catch(() => {});
+      return;
+    }
+    const newBal = addToken(targetId, amount);
+    replyUser(msg, `✅ gave **${amount}** token(s) to <@${targetId}>.\n-# You have ${sub.tokens} Tokens left.\n-# They now have ${newBal} Tokens.`).catch(() => {});
+    return;
+  }
   // .coinflip — win or lose 1 token (regular users)
   if (/^\.coinflip(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
@@ -4655,8 +4727,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const isBuyerUser = perm.isBuyer;
     const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
-    let findDesc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n");
-    if (!isBuyerUser) findDesc += tokensResultSuffix(false, cd.tokensLeft ?? peekTokens(msg.author.id, false).tokens);
+    // Finder source embeds — never show tokens left
+    const findDesc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n");
     const embed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle(getFinderTitle(isBuyerUser))
@@ -4666,7 +4738,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
     );
-    // Clear pending so replyUser doesn't double-append
+    // Clear pending so replyUser doesn't append tokens on finder embeds
     pendingTokenLine.delete(String(msg.author.id));
     const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
     if (sent) paginationMenus.set(msg.author.id, {
