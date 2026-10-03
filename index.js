@@ -94,6 +94,114 @@ const KEYS_FILE = path.join(DATA_DIR, "keys.json");
 let keyStore = readJSON(KEYS_FILE, { keys: [] });
 if (!Array.isArray(keyStore.keys)) keyStore.keys = [];
 
+// ============================================================
+// TOKEN SYSTEM (regular users — max 10, daily refill when empty)
+// Premium / Owner = unlimited
+// ============================================================
+const TOKENS_FILE = path.join(DATA_DIR, "tokens.json");
+const MAX_REGULAR_TOKENS = 10;
+const TOKEN_REFILL_MS = 24 * 60 * 60 * 1000; // 24h
+let tokenStore = readJSON(TOKENS_FILE, { users: {} });
+if (!tokenStore || typeof tokenStore !== "object") tokenStore = { users: {} };
+if (!tokenStore.users || typeof tokenStore.users !== "object") tokenStore.users = {};
+const saveTokens = () => writeJSON(TOKENS_FILE, tokenStore);
+
+function getUserTokenData(userId) {
+  const id = String(userId);
+  if (!tokenStore.users[id]) {
+    tokenStore.users[id] = { tokens: MAX_REGULAR_TOKENS, nextRefillAt: null };
+    saveTokens();
+  }
+  return tokenStore.users[id];
+}
+
+function formatTokenWait(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${h}H ${m}M ${s}S`;
+}
+
+function tokenWaitEmbed(waitUntil) {
+  return new EmbedBuilder()
+    .setColor(0xED4245)
+    .setTitle("Input Error")
+    .setDescription(`You need to wait ${formatTokenWait(waitUntil - Date.now())}`);
+}
+
+function tokenLeftLine(tokensLeft, unlimited) {
+  if (unlimited) return "-# You have Unlimited Tokens left.";
+  return `-# You have ${tokensLeft} Tokens left.`;
+}
+
+/** Consume 1 token for regular users. Buyers/owners unlimited. */
+function tryConsumeToken(userId, isBuyerUser) {
+  if (isBuyerUser || isOwner(userId)) {
+    return { ok: true, unlimited: true, tokens: null };
+  }
+  const data = getUserTokenData(userId);
+  const now = Date.now();
+  if (data.tokens <= 0) {
+    if (!data.nextRefillAt) data.nextRefillAt = now + TOKEN_REFILL_MS;
+    if (now >= data.nextRefillAt) {
+      data.tokens = MAX_REGULAR_TOKENS;
+      data.nextRefillAt = null;
+      saveTokens();
+    } else {
+      return { ok: false, waitUntil: data.nextRefillAt, tokens: 0 };
+    }
+  }
+  data.tokens = Math.max(0, data.tokens - 1);
+  if (data.tokens <= 0) {
+    data.nextRefillAt = now + TOKEN_REFILL_MS;
+  }
+  saveTokens();
+  return { ok: true, unlimited: false, tokens: data.tokens };
+}
+
+function peekTokens(userId, isBuyerUser) {
+  if (isBuyerUser || isOwner(userId)) return { unlimited: true, tokens: null };
+  const data = getUserTokenData(userId);
+  const now = Date.now();
+  if (data.tokens <= 0 && data.nextRefillAt && now >= data.nextRefillAt) {
+    data.tokens = MAX_REGULAR_TOKENS;
+    data.nextRefillAt = null;
+    saveTokens();
+  }
+  return { unlimited: false, tokens: data.tokens, nextRefillAt: data.nextRefillAt };
+}
+
+function addToken(userId, amount) {
+  const data = getUserTokenData(userId);
+  data.tokens = Math.min(MAX_REGULAR_TOKENS, Math.max(0, data.tokens + amount));
+  if (data.tokens > 0) data.nextRefillAt = null;
+  else if (!data.nextRefillAt) data.nextRefillAt = Date.now() + TOKEN_REFILL_MS;
+  saveTokens();
+  return data.tokens;
+}
+
+async function logFinderPanel(user, action, detail) {
+  try {
+    const chId = config.logChannelId ? String(config.logChannelId) : null;
+    if (!chId) return;
+    const ch = await client.channels.fetch(chId).catch(() => null);
+    if (!ch || !ch.isTextBased?.()) return;
+    const embed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("Finder Panel Log")
+      .setDescription(
+        `**User:** <@${user.id}> (\`@${user.username}\` / \`${user.id}\`)\n` +
+        `**Action:** ${action}\n` +
+        `**Detail:** ${detail || "—"}\n` +
+        `**Time:** <t:${Math.floor(Date.now() / 1000)}:F>`
+      );
+    await ch.send({ embeds: [embed] }).catch(() => {});
+  } catch (e) {
+    console.warn("⚠️ logFinderPanel:", e.message);
+  }
+}
+
 function parseDuration(str) {
   if (!str || str === "" || str === "infinite" || str === "0") return null;
   const match = String(str).match(/^(\d+)([smhdw])$/i);
@@ -135,19 +243,10 @@ setInterval(cleanupExpiredKeys, 10 * 1000);
 // ============================================================
 // COOLDOWN TRACKER
 // ============================================================
-const commandCooldowns = new Map(); // key: "cmd:userId" → expiry timestamp
-const COOLDOWNS = {
-  get: 15,              // 15 seconds
-  find: 15,             // 15 seconds
-  upload: 60 * 60,      // 1 hour
-  rename: 5,            // 5 seconds
-  dl: 10 * 60,          // 10 minutes
-  obf: 60 * 60,         // 1 hour
-  et: 30 * 60,          // 30 minutes
-  delwh: 10 * 60,       // 10 minutes
-  whs: 15,              // 15 seconds
-  redeem: 5             // 5 seconds
-};
+const commandCooldowns = new Map(); // legacy — unused (tokens replace cooldowns)
+const COOLDOWNS = {}; // all timed cooldowns removed — token system used instead
+/** Free commands (no token cost): redeem, help, find (prefix). Finder panel Find button DOES cost. */
+const TOKEN_FREE_CMDS = new Set(["redeem", "help", "find"]);
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
   const s = remainingSec % 60;
@@ -155,19 +254,34 @@ function formatCooldown(remainingSec) {
   if (m > 0) return `${m}m`;
   return `${s}s`;
 }
+/**
+ * Token gate (replaces timed cooldowns).
+ * Returns { onCooldown, noTokens, waitUntil, tokensLeft, unlimited }
+ * onCooldown=true only when out of tokens (wait for daily refill).
+ */
+const pendingTokenLine = new Map(); // userId -> "-# You have XX Tokens left."
 function checkCommandCooldown(userId, cmd, isBuyerUser) {
-  if (isBuyerUser) return { onCooldown: false };
-  const cdSec = COOLDOWNS[cmd];
-  if (!cdSec) return { onCooldown: false };
-  const key = `${cmd}:${userId}`;
-  const now = Date.now();
-  const expiry = commandCooldowns.get(key);
-  if (expiry && now < expiry) {
-    const remaining = Math.ceil((expiry - now) / 1000);
-    return { onCooldown: true, remaining: formatCooldown(remaining) };
+  const free = TOKEN_FREE_CMDS.has(cmd);
+  if (isBuyerUser || isOwner(userId)) {
+    // Premium: show unlimited line on paid cmds only
+    if (!free) pendingTokenLine.set(String(userId), tokenLeftLine(null, true));
+    return { onCooldown: false, unlimited: true, tokensLeft: null, free };
   }
-  commandCooldowns.set(key, now + cdSec * 1000);
-  return { onCooldown: false };
+  if (free) {
+    const peek = peekTokens(userId, false);
+    return { onCooldown: false, unlimited: false, tokensLeft: peek.tokens, free: true };
+  }
+  const r = tryConsumeToken(userId, false);
+  if (!r.ok) {
+    pendingTokenLine.delete(String(userId));
+    return { onCooldown: true, noTokens: true, waitUntil: r.waitUntil, tokensLeft: 0 };
+  }
+  pendingTokenLine.set(String(userId), tokenLeftLine(r.tokens, false));
+  return { onCooldown: false, unlimited: false, tokensLeft: r.tokens, free: false };
+}
+/** Reply helper when out of tokens */
+function replyNoTokens(msg, waitUntil) {
+  return replyUser(msg, { embeds: [tokenWaitEmbed(waitUntil)] });
 }
 // ============================================================
 // DISCORD CLIENT
@@ -194,6 +308,8 @@ const whsPanelOwners = new Map(); // messageId -> authorId
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const renamePanels = new Map(); // messageId -> { authorId, fileUrl, fileName, isBuyerUser }
+const finderPanelCooldowns = new Map(); // "find:userId" | "get:userId" → expiry timestamp
+const FINDER_PANEL_CD_MS = 60 * 1000; // 1 minute per Find / Get use
 const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false;
 let lastReady = Date.now();
@@ -518,7 +634,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   if (/^\.redeem(?:\s|$)|^\.red(?:\s|$)/i.test(txt)) {
     const redeemIsBuyer = isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member);
     const cd = checkCommandCooldown(msg.author.id, "redeem", redeemIsBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     const key = txt.replace(/^\.redeem\s+|^\.red\s+/i, "").trim();
     if (!key) { replyUser(msg, "❌ Usage: \`.redeem <key>\`").catch(() => {}); return; }
     // Check if user already has active key
@@ -608,6 +727,24 @@ function isReplyingToFile(msg) {
 function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
+  // Append token balance line to last embed description or content
+  try {
+    const line = pendingTokenLine.get(String(message.author?.id));
+    if (line) {
+      if (body.embeds && body.embeds.length) {
+        const last = body.embeds[body.embeds.length - 1];
+        const emb = EmbedBuilder.from(last);
+        const prev = emb.data?.description || "";
+        emb.setDescription(prev ? `${prev}\n\n${line}` : line);
+        body.embeds = [...body.embeds.slice(0, -1), emb];
+      } else if (body.content) {
+        body.content = `${body.content}\n${line}`;
+      } else {
+        body.content = line;
+      }
+      pendingTokenLine.delete(String(message.author.id));
+    }
+  } catch {}
   return message.reply(body);
 }
 
@@ -2110,6 +2247,10 @@ const commands = [
       .setName("title")
       .setDescription("Optional embed title.")
       .setRequired(false))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("finderpanel")
+    .setDescription("Post Finder Source Panel — Owner Only.")
     .toJSON()
 ].map(c => c);
 async function registerCommands() {
@@ -2121,7 +2262,7 @@ async function registerCommands() {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] });
     console.log("🧹 Clearing old global commands...");
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
-    console.log("🧩 Registering global /say command...");
+    console.log("🧩 Registering global slash commands...");
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
     console.log("✅ Commands registered (global).");
   } catch (e) { registering = false; console.error("❌ Register fail:", e.message); }
@@ -2218,7 +2359,16 @@ const helpPages = [
 `**\`.redeem\`** [\`.red\`] - Redeem a premium key.
 
 > Premium users can use all commands in DMs.
-> Premium users bypass cooldown.`
+> Premium users have unlimited tokens.`
+    ),
+  new EmbedBuilder()
+    .setTitle("Help Menu")
+    .setColor(REGULAR_COLOR)
+    .setDescription(
+`**\`.coinflip\`** Flip a coin — win or lose **1 token**.
+
+Regular users start with **10 tokens**/day. Most commands cost **1 token**.
+\`.help\` · \`.find\` · \`.redeem\` are free.`
     )
 ];
 const helpSessions = new Map();
@@ -2436,6 +2586,49 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     paginationMenus.set(uid, menu);
     return;
   }
+  // ─── FINDER PANEL BUTTONS (never expire) — tokens charged on modal submit ───
+  if (interaction.customId === "finderpanel_find" || interaction.customId === "finderpanel_get") {
+    const uid = interaction.user.id;
+    // Server Tag required for non-owner / non-buyer
+    const buyer = isOwner(uid) || await isBuyer(uid, interaction.member);
+    if (!buyer) {
+      const hasTag = await hasPrinceStatus(uid);
+      if (!hasTag) {
+        const tagEmbed = new EmbedBuilder()
+          .setColor(0xED4245)
+          .setTitle("Input Error")
+          .setDescription("**Tips:**\n- Go on your profile, click `Edit Profile` then scroll down, you’ll see the `Select a Server Tag` click it then use our Server Tag.");
+        return interaction.reply({ embeds: [tagEmbed], flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+    }
+    if (interaction.customId === "finderpanel_find") {
+      const modal = new ModalBuilder()
+        .setCustomId("finderpanel_find_modal")
+        .setTitle("Find Source");
+      const queryInput = new TextInputBuilder()
+        .setCustomId("finderpanel_query")
+        .setLabel("File name")
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder("Type the file name to search...")
+        .setRequired(true)
+        .setMaxLength(100);
+      modal.addComponents(new ActionRowBuilder().addComponents(queryInput));
+      return interaction.showModal(modal).catch(() => {});
+    }
+    // Get
+    const modal = new ModalBuilder()
+      .setCustomId("finderpanel_get_modal")
+      .setTitle("Get Source by ID");
+    const idInput = new TextInputBuilder()
+      .setCustomId("finderpanel_ids")
+      .setLabel(buyer ? "File ID(s) — premium: up to 10" : "File ID — 1 only")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder(buyer ? "id1 id2 ..." : "single file id")
+      .setRequired(true)
+      .setMaxLength(120);
+    modal.addComponents(new ActionRowBuilder().addComponents(idInput));
+    return interaction.showModal(modal).catch(() => {});
+  }
   // ─── WHS START BUTTON ───
   if (interaction.customId === "whs_start") {
     // Works in DMs and servers — no member check needed
@@ -2493,6 +2686,117 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isModalSubmit()) return;
+
+  // ── Finder Panel: Find modal (costs 1 token for regulars) ──
+  if (interaction.customId === "finderpanel_find_modal") {
+    const query = (interaction.fields.getTextInputValue("finderpanel_query") || "").trim();
+    if (!query) {
+      return interaction.reply({ content: "❌ put a file name.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const isBuyerUser = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
+    if (!isBuyerUser) {
+      const hasTag = await hasPrinceStatus(interaction.user.id);
+      if (!hasTag) {
+        return interaction.reply({ content: "❌ adopt the Server Tag first.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+    }
+    // Token cost (panel Find always costs — unlike prefix .find)
+    const tok = tryConsumeToken(interaction.user.id, isBuyerUser);
+    if (!tok.ok) {
+      return interaction.reply({ embeds: [tokenWaitEmbed(tok.waitUntil)], flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    logFinderPanel(interaction.user, "Find", `Query: \`${query}\``).catch(() => {});
+    const results = findFiles(query);
+    if (!results.length) {
+      return interaction.reply({
+        content: `❌ no found for that, dumbass.\n${tokenLeftLine(tok.tokens, tok.unlimited)}`,
+        flags: MessageFlags.Ephemeral
+      }).catch(() => {});
+    }
+    const perPage = 8;
+    const totalPages = Math.ceil(results.length / perPage);
+    const pageItems = results.slice(0, perPage);
+    const desc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n") +
+      `\n\n${tokenLeftLine(tok.tokens, tok.unlimited)}`;
+    const embed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle(getFinderTitle(isBuyerUser))
+      .setDescription(desc)
+      .setFooter({ text: `Pages 1/${totalPages} │ Prince Finder` });
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
+      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
+    );
+    await interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral }).catch(() => {});
+    const replyMsg = await interaction.fetchReply().catch(() => null);
+    if (replyMsg) {
+      paginationMenus.set(interaction.user.id, {
+        results, page: 1, totalPages, messageId: replyMsg.id,
+        authorId: interaction.user.id, createdAt: Date.now(), isBuyer: isBuyerUser
+      });
+    }
+    return;
+  }
+
+  // ── Finder Panel: Get modal (costs 1 token for regulars) ──
+  if (interaction.customId === "finderpanel_get_modal") {
+    const raw = (interaction.fields.getTextInputValue("finderpanel_ids") || "").trim();
+    if (!raw) {
+      return interaction.reply({ content: "❌ put id of file, idiot.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const isBuyerUser = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
+    if (!isBuyerUser) {
+      const hasTag = await hasPrinceStatus(interaction.user.id);
+      if (!hasTag) {
+        return interaction.reply({ content: "❌ adopt the Server Tag first.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+    }
+    const args = raw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+    if (!args.length) {
+      return interaction.reply({ content: "❌ put id of file, idiot.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const maxGetIds = isBuyerUser ? 10 : 1;
+    if (args.length > maxGetIds) {
+      return interaction.reply({
+        content: isBuyerUser ? "❌ max 10 id only, dumbass." : "❌ buy premium if you want multiple id.",
+        flags: MessageFlags.Ephemeral
+      }).catch(() => {});
+    }
+    const tok = tryConsumeToken(interaction.user.id, isBuyerUser);
+    if (!tok.ok) {
+      return interaction.reply({ embeds: [tokenWaitEmbed(tok.waitUntil)], flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    logFinderPanel(interaction.user, "Get", `ID(s): \`${args.join(", ")}\``).catch(() => {});
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+    const filesToSend = [];
+    const notFound = [];
+    for (const id of args) {
+      const file = getFile(id);
+      if (!file) { notFound.push(id); continue; }
+      const freshUrl = await getFreshUrl(file);
+      filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
+    }
+    if (!filesToSend.length) {
+      await interaction.editReply({
+        content: `❌ your id is wrong, try find working id, dumbass.\n${tokenLeftLine(tok.tokens, tok.unlimited)}`
+      }).catch(() => {});
+      return;
+    }
+    for (let i = 0; i < filesToSend.length; i += 10) {
+      const batch = filesToSend.slice(i, i + 10);
+      const content = i === 0
+        ? "**Here you go!**" + (notFound.length ? `\n❌ Not found: \`${notFound.join("`, `")}\`` : "") +
+          `\n${tokenLeftLine(tok.tokens, tok.unlimited)}`
+        : null;
+      if (i === 0) {
+        await interaction.editReply({ content, files: batch }).catch(() => {});
+      } else {
+        await interaction.followUp({ content, files: batch, flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+    }
+    return;
+  }
+
   if (interaction.customId === "whs_modal") {
     const webhookUrl = interaction.fields.getTextInputValue("whs_url");
     const spamMsg = interaction.fields.getTextInputValue("whs_message");
@@ -2587,7 +2891,7 @@ setInterval(async () => {
   finally { reconnecting = false; }
 }, 30000).unref?.();
 // ============================================================
-// SLASH COMMAND HANDLER — only /say
+// SLASH COMMAND HANDLER — /say, /finderpanel (Owner Only)
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -2620,6 +2924,25 @@ client.on("interactionCreate", async interaction => {
         if (title) embed.setTitle(title);
         await targetChannel.send({ embeds: [embed] });
       }
+      return;
+    }
+    if (interaction.commandName === "finderpanel") {
+      const targetChannel = interaction.channel;
+      if (!targetChannel || !targetChannel.isTextBased?.()) {
+        await interaction.editReply({ content: "❌ use this in a text channel." });
+        return;
+      }
+      const panelEmbed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle("Finder Source Panel")
+        .setDescription("This panel is only for where you can find old source that you can’t find.")
+        .setFooter({ text: `Sent by @${interaction.user.username}`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
+      const panelRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("finderpanel_find").setLabel("Find").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId("finderpanel_get").setLabel("Get").setStyle(ButtonStyle.Success)
+      );
+      await targetChannel.send({ embeds: [panelEmbed], components: [panelRow] });
+      await interaction.editReply({ content: "✅ Finder Source Panel posted." });
       return;
     }
   } catch (e) {
@@ -2776,7 +3099,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   if (/^\.redeem(?:\s|$)|^\.red(?:\s|$)/i.test(txt)) {
     const redeemIsBuyer = isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member);
     const cd = checkCommandCooldown(msg.author.id, "redeem", redeemIsBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     const key = txt.replace(/^\.redeem\s+|^\.red\s+/i, "").trim();
     if (!key) { replyUser(msg, "❌ Usage: \`.redeem <key>\`").catch(() => {}); return; }
     // Check if user already has active key
@@ -3189,6 +3515,32 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
   // ─────────────────────────────────────────────
+  // .logs — Owner Only (set channel for Finder Panel usage logs)
+  // ─────────────────────────────────────────────
+  if (/^\.logs(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const arg = txt.split(/\s+/)[1]?.replace(/[<#>]/g, "").trim();
+    if (!arg) {
+      const cur = config.logChannelId ? `<#${config.logChannelId}> (\`${config.logChannelId}\`)` : "None";
+      replyUser(msg, `📋 **Finder Panel logs channel:** ${cur}\nUsage: \`.logs <channel id>\``).catch(() => {});
+      return;
+    }
+    if (!/^\d{17,20}$/.test(arg)) {
+      replyUser(msg, "❌ invalid channel id.").catch(() => {});
+      return;
+    }
+    let ch = null;
+    try { ch = await client.channels.fetch(arg); } catch {}
+    if (!ch || !ch.isTextBased?.()) {
+      replyUser(msg, "❌ invalid text channel id.").catch(() => {});
+      return;
+    }
+    config.logChannelId = String(ch.id);
+    saveConfig();
+    replyUser(msg, `✅ Finder Panel logs will go to <#${ch.id}> (\`${ch.id}\`).`).catch(() => {});
+    return;
+  }
+  // ─────────────────────────────────────────────
   // .livescan — Owner Only (auto-index new uploads in a channel forever)
   // Usage: .livescan <channel id|#mention> | .livescan list | .livescan off [id]
   // ─────────────────────────────────────────────
@@ -3496,7 +3848,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "delwh", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     const isBuyerUser = perm.isBuyer;
     
     const arg = txt.split(/\s+/)[1]?.trim();
@@ -3557,7 +3912,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "whs", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     
     const panelEmbed = new EmbedBuilder()
       .setColor(getEmbedColor(perm.isBuyer))
@@ -3587,7 +3945,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "upload", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     const isBuyerUser = perm.isBuyer;
     let attachments = [...(msg.attachments?.values() || [])].filter(a => {
       const e = ext(a.name);
@@ -3687,7 +4048,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "obf", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     const isBuyerUser = perm.isBuyer;
     let attachments = [...(msg.attachments?.values() || [])].filter(a => {
       const e = ext(a.name);
@@ -3788,7 +4152,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "et", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     if (isDM && !perm.isBuyer) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
     let attachments = extractAttachmentsOf(msg);
     if (!attachments.length && msg.reference?.messageId) {
@@ -3851,7 +4218,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "rename", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     const isBuyerUser = perm.isBuyer;
     let attachments = [...(msg.attachments?.values() || [])].filter(a => {
       const e = ext(a.name);
@@ -3935,7 +4305,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "get", isBuyerUser);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     const args = txt.split(/\s+/).slice(1).filter(Boolean);
     if (!args.length) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
     const maxGetIds = isBuyerUser ? 10 : 1;
@@ -3973,10 +4346,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "dl", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     const arg = txt.split(/\s+/)[1];
     if (!arg) { replyUser(msg, "❌ put file link, idiot.").catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
+    const startTime = Date.now();
 
     // Check if Instagram URL
     if (/instagram\.com|instagr\.am|ig\.me/i.test(arg)) {
@@ -4122,7 +4499,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "dl", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     const startTime = Date.now();
     // PH time — no leading zero on hour
     const phTime = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Manila" });
@@ -4170,14 +4550,57 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
+  // .coinflip — win or lose 1 token (regular users)
+  if (/^\.coinflip(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    if (perm.isBuyer || isOwner(msg.author.id)) {
+      replyUser(msg, "❌ premium already has unlimited tokens, no need to flip.").catch(() => {});
+      return;
+    }
+    const peek = peekTokens(msg.author.id, false);
+    if (peek.tokens <= 0) {
+      const waitUntil = peek.nextRefillAt || (Date.now() + TOKEN_REFILL_MS);
+      replyNoTokens(msg, waitUntil).catch(() => {});
+      return;
+    }
+    // Spend 1 token to play
+    const spent = tryConsumeToken(msg.author.id, false);
+    if (!spent.ok) {
+      replyNoTokens(msg, spent.waitUntil).catch(() => {});
+      return;
+    }
+    const win = Math.random() < 0.5;
+    let finalTokens = spent.tokens;
+    if (win) {
+      // Refund spent + award 1 extra (net +1 from before flip)
+      finalTokens = addToken(msg.author.id, 2);
+    }
+    const embed = new EmbedBuilder()
+      .setColor(win ? 0x57F287 : 0xED4245)
+      .setTitle(win ? "🪙 You won!" : "🪙 You lost!")
+      .setDescription(
+        win
+          ? `Heads! You **won +1 token**.\n\n${tokenLeftLine(finalTokens, false)}`
+          : `Tails! You **lost 1 token**.\n\n${tokenLeftLine(finalTokens, false)}`
+      );
+    replyUser(msg, { embeds: [embed] }).catch(() => {});
+    return;
+  }
   // .find
   if (/^\.find(?:\s|$)/i.test(txt)) {
+
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "find", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
     const query = txt.slice(5).trim();
     if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
     const results = findFiles(query);
