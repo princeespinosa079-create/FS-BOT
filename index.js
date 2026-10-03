@@ -285,8 +285,9 @@ function checkCommandCooldown(userId, cmd, isBuyerUser) {
   pendingTokenLine.set(String(userId), tokenLeftLine(r.tokens, false));
   return { onCooldown: false, unlimited: false, tokensLeft: r.tokens, free: false };
 }
-/** Reply helper when out of tokens */
+/** Reply helper when out of tokens — never attach tokens left */
 function replyNoTokens(msg, waitUntil) {
+  pendingTokenLine.delete(String(msg.author.id));
   return replyUser(msg, { embeds: [tokenWaitEmbed(waitUntil)] });
 }
 // ============================================================
@@ -735,25 +736,47 @@ function isReplyingToFile(msg) {
   }
   return false;
 }
+/** True if this reply is an error / tips / fail / loading — never attach tokens left */
+function isErrorPayload(body) {
+  const contentStr = typeof body.content === "string" ? body.content : "";
+  const errRe = /❌|no found for that|not found|failed:|upload failed|scan failed|forward failed|invalid key|owner only|usage:|put (?:file|id|a file)|you're on|need to wait|buy access|buy premium|join in main server|reply to a file|already got a key|already redeem|can't send|not yours|adopt the Server Tag|max \d+ id|wrong, try|empty response|rate limited|input error|dumbass/i;
+  if (errRe.test(contentStr)) return true;
+  if (body.embeds && body.embeds.length) {
+    for (const emb of body.embeds) {
+      const d = emb?.data || emb;
+      const title = String(d?.title || "");
+      const desc = String(d?.description || "");
+      if (title === "Input Error") return true;
+      if (/error|failed|deleting/i.test(title)) return true;
+      if (errRe.test(desc) || errRe.test(title)) return true;
+      if (/processing|fetching|deleting|loading/i.test(title) || /⏳/.test(desc) || /⏳/.test(title)) return true;
+    }
+  }
+  return false;
+}
 function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
-  // Append token balance line to last embed description or content
+  // Append token balance only on success results — never on any error / Input Error / loading
   try {
     const line = pendingTokenLine.get(String(message.author?.id));
     if (line) {
-      if (body.embeds && body.embeds.length) {
-        const last = body.embeds[body.embeds.length - 1];
-        const emb = EmbedBuilder.from(last);
-        const prev = emb.data?.description || "";
-        emb.setDescription(prev ? `${prev}\n\n${line}` : line);
-        body.embeds = [...body.embeds.slice(0, -1), emb];
-      } else if (body.content) {
-        body.content = `${body.content}\n${line}`;
+      if (isErrorPayload(body)) {
+        pendingTokenLine.delete(String(message.author.id));
       } else {
-        body.content = line;
+        if (body.embeds && body.embeds.length) {
+          const last = body.embeds[body.embeds.length - 1];
+          const emb = EmbedBuilder.from(last);
+          const prev = emb.data?.description || "";
+          emb.setDescription(prev ? `${prev}\n\n${line}` : line);
+          body.embeds = [...body.embeds.slice(0, -1), emb];
+        } else if (body.content) {
+          body.content = `${body.content}\n${line}`;
+        } else {
+          body.content = line;
+        }
+        pendingTokenLine.delete(String(message.author.id));
       }
-      pendingTokenLine.delete(String(message.author.id));
     }
   } catch {}
   return message.reply(body);
@@ -2365,21 +2388,22 @@ const helpPages = [
     ),
   new EmbedBuilder()
     .setTitle("Help Menu")
-    .setColor(YELLOW_COLOR)
-    .setDescription(
-`**\`.redeem\`** [\`.red\`] - Redeem a premium key.
-
-> Premium users can use all commands in DMs.
-> Premium users have unlimited tokens.`
-    ),
-  new EmbedBuilder()
-    .setTitle("Help Menu")
     .setColor(REGULAR_COLOR)
     .setDescription(
 `**\`.coinflip\`** Flip a coin — win or lose **1 token**.
 
 Regular users start with **10 tokens**/day. Most commands cost **1 token**.
 \`.help\` · \`.find\` · \`.redeem\` are free.`
+    ),
+  // Yellow premium page — always last
+  new EmbedBuilder()
+    .setTitle("Help Menu")
+    .setColor(YELLOW_COLOR)
+    .setDescription(
+`**\`.redeem\`** [\`.red\`] - Redeem a premium key.
+
+> Premium users can use all commands in DMs.
+> Premium users have unlimited tokens.`
     )
 ];
 const helpSessions = new Map();
@@ -2723,13 +2747,14 @@ client.on("interactionCreate", async interaction => {
     }
     logFinderPanel(interaction.user, "Find", `Query: \`${query}\``).catch(() => {});
     const results = findFiles(query);
-    const tokSuffix = isBuyerUser ? "" : tokensResultSuffix(false, tok.tokens);
     if (!results.length) {
+      // Error — no tokens left line
       return interaction.reply({
-        content: `❌ no found for that, dumbass.` + (tokSuffix ? `\n${tokSuffix.trim()}` : ""),
+        content: `❌ no found for that, dumbass.`,
         flags: MessageFlags.Ephemeral
       }).catch(() => {});
     }
+    const tokSuffix = isBuyerUser ? "" : tokensResultSuffix(false, tok.tokens);
     const perPage = 8;
     const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
@@ -2792,13 +2817,14 @@ client.on("interactionCreate", async interaction => {
       const freshUrl = await getFreshUrl(file);
       filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
     }
-    const tokSuffix = isBuyerUser ? "" : `\n${tokenLeftLine(tok.tokens, false)}`;
     if (!filesToSend.length) {
+      // Error — no tokens left line
       await interaction.editReply({
-        content: `❌ your id is wrong, try find working id, dumbass.` + tokSuffix
+        content: `❌ your id is wrong, try find working id, dumbass.`
       }).catch(() => {});
       return;
     }
+    const tokSuffix = isBuyerUser ? "" : `\n${tokenLeftLine(tok.tokens, false)}`;
     for (let i = 0; i < filesToSend.length; i += 10) {
       const batch = filesToSend.slice(i, i + 10);
       const content = i === 0
