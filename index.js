@@ -146,8 +146,7 @@ const COOLDOWNS = {
   et: 30 * 60,          // 30 minutes
   delwh: 10 * 60,       // 10 minutes
   whs: 15,              // 15 seconds
-  redeem: 5,            // 5 seconds
-  l: 15                 // 15 seconds — env logger
+  redeem: 5             // 5 seconds
 };
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
@@ -1842,59 +1841,47 @@ async function aiCleanScript(source, mode) {
 SCRIPT:
 ${source}`;
 
-    const readablePrompt = `You are an elite Lua/Roblox script RECONSTRUCTION engineer — not a renamer, not a minifier. You FULLY REBUILD scripts so they look hand-written by a senior Roblox developer and RUN in a Roblox executor without errors.
+    const readablePrompt = `You are an elite Luau/Roblox RECONSTRUCTION engineer. Your job is behavior-preserving source reconstruction — NOT pretty-printing, NOT minifying, NOT guessing.
 
-GOAL: Output clean, professional, 100% Roblox-executable Lua — same behavior, far better structure.
+MISSION: Turn the input into valid, readable, 100% executable Luau that runs in a Roblox executor (Synapse, Wave, Delta, etc.) with the SAME behavior as the original.
 
-ROBLOX EXECUTION (CRITICAL — MUST FOLLOW):
-- Output MUST be valid Lua 5.1 / Luau that runs in Roblox (Synapse, Wave, Delta, etc.).
-- Balance every if/then/end, function/end, do/end, repeat/until. Never leave dangling ends or missing ends.
-- Use Roblox APIs correctly: game:GetService("..."), Instance.new("ClassName"), UDim2.new, Vector3.new, CFrame.new, Color3.fromRGB, task.wait / task.spawn.
-- Do NOT invent non-Roblox APIs, Node/browser APIs, or Python/JS syntax.
-- Keep remote calls (FireServer / InvokeServer), connections, and GUI parenting valid.
-- Prefer local variables; avoid undeclared globals unless the original relied on them.
+RECONSTRUCTION PIPELINE (FOLLOW IN ORDER):
+1. Identify every remaining VM dispatcher / control-flow-flattening layer.
+2. Reconstruct the original control-flow graph.
+3. Recover if/elseif/else, while, repeat, and for structures where evidence supports them.
+4. Resolve constant/table indirection and remaining encoded values.
+5. Trace VM registers/state variables back into meaningful local variables.
+6. Rename variables/functions based only on their actual usage.
+7. Remove dead VM scaffolding after proving it is unreachable.
+8. Preserve Roblox API calls, RemoteEvents, UI behavior, callbacks, metatables, and side effects exactly.
+9. Do not remove functionality merely because it looks suspicious.
+10. Do not guess. If something cannot be reconstructed, leave a clearly marked comment explaining exactly what information is missing (e.g. -- MISSING: unresolved dispatcher state 14).
+11. Produce valid, readable Luau source rather than pseudocode.
+12. Compare the reconstructed control flow against the original dispatcher so every removed state has a documented destination.
 
-DELETE THESE WATERMARKS / JUNK (ALWAYS):
-- Comments or lines like: [ LEAKED BY SOLAR ], [ GOATED ], LEAKED BY ..., GOATED, "Grabbed by...", "Copied by...", Discord invite spam in headers
+ROBLOX / LUAU EXECUTION RULES (MANDATORY):
+- Output MUST parse and run as Luau in Roblox. No Python, JS, or pseudocode.
+- Balance EVERY if/then/end, function/end, do/end, repeat/until. Zero dangling or missing ends.
+- Correct APIs only: game:GetService("Name"), Instance.new("ClassName"), UDim2.new / UDim2.fromScale, Vector3.new, CFrame.new, Color3.fromRGB, task.wait, task.spawn, task.defer.
+- Keep FireServer / InvokeServer / :Connect / :Once / AncestryChanged / ChildAdded and all real side effects.
+- Prefer locals. Do not invent globals the original did not use.
+- Indentation: 2 spaces.
+
+DELETE JUNK / WATERMARKS (ALWAYS):
+- [ LEAKED BY SOLAR ], [ GOATED ], LEAKED BY ..., GOATED, Grabbed by..., Copied by..., Discord header spam
 - GUI Copier headers, reconstruction doc banners, markdown fences, bare non-Lua prose
-- Fancy ===== / ------ banner comment blocks that are not real section separators
+- Dead VM scaffolding only AFTER step 7 proves it unreachable
 
-STRUCTURE (REQUIRED):
-1. DO NOT add big documentation header blocks. DELETE any existing ones, including:
-   - --[[ ... ]] blocks that describe layout, ScreenGui, Root size, ModeToggle, etc.
-   - Lines like "reconstructed 1:1 from execution log", "ScreenGui : ...", "Root : 280 x 320", "Layout : Header..."
-2. Group code into CLEAR SECTIONS with short separator comments only:
-   -- ===================== CONFIG =====================
-   -- ===================== STATE =====================
-   -- ===================== CORE LOGIC =====================
-   -- ===================== GUI =====================
-   -- ===================== INTERACTION =====================
-   -- ===================== BOOT =====================
-3. Indentation: 2 spaces. Align related assignments. Keep functions readable.
-4. Order: services → config → state → core functions → GUI build → helpers → event connections → boot/init.
-
-NAMING:
-- Rename ALL obfuscated / generic / single-letter names to clear camelCase (locals) or PascalCase (modules/classes).
-- Keep loop counters i, j, k if they are just indexes.
-- Names must describe purpose (e.g. fireBypass, buildBomb, ModeIndicator, saveConfig).
-
-PRESERVE BEHAVIOR (CRITICAL):
-- Do NOT remove, break, or change real functionality.
-- Keep ALL loaders, HttpGet, remote calls, FireServer, webhooks, and logic exactly working.
-- Replace any Discord invite links with: https://discord.gg/TBBAUZu8cW
-
-QUALITY:
-- Fix missing end / until so the script is syntactically valid and executable in Roblox.
-- Prefer readable control flow over clever one-liners.
-- Add short useful comments only on non-obvious logic (not spam). Never write multi-line layout docs.
-- If input is bytecode / heavy \\x / broken: best-effort reconstruct into clean runnable Roblox Lua.
+PRESERVE:
+- All real loaders, HttpGet, remotes, webhooks, UI, metatables, hooks, and logic
+- Replace Discord invite links with: https://discord.gg/TBBAUZu8cW
 
 OUTPUT RULES (ABSOLUTE):
-- Output ONLY pure Lua code that can be pasted into a Roblox executor and run.
-- No markdown, no \`\`\` fences, no explanations before or after the code.
-- No "Here is the script" or similar prose.
-- No big --[[ documentation headers ]].
-- No [ LEAKED BY ... ] / [ GOATED ] / similar credit watermarks anywhere.
+- Output ONLY pure Luau source — nothing else
+- No markdown, no \`\`\` fences, no explanations before/after the code
+- No "Here is the script" prose
+- No big --[[ documentation headers ]]
+- Goal is behavior-preserving source reconstruction, not merely pretty-printing
 
 SCRIPT TO RECONSTRUCT:
 ${source}`;
@@ -1919,6 +1906,8 @@ ${source}`;
       .replace(/^\s*--\s*\[?\s*GOATED.*$/gim, "");
     // Final pass: strip any non-Lua junk that slipped through
     output = stripNonLuaJunk(output);
+    // Balance if/function/do/end so reconstructed output is more likely to execute in Roblox
+    if (mode === "readable") output = balanceLuaBlocks(output);
     return output;
   } catch (e) {
     console.warn("⚠️ OpenAI clean failed, falling back to regex:", e.message?.slice(0, 120));
@@ -3853,98 +3842,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (sentMsg) await sentMsg.delete().catch(() => {});
       replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
     }
-    return;
-  }
-  // .l — Env Logger (regular + buyer)
-  if (/^\.l(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "l", perm.isBuyer);
-    if (cd.onCooldown) { replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return; }
-    const envLogger = `-- Env Logger | Prince
--- Logs new keys written to getgenv() (and table assignments on the env)
-local env = (getgenv and getgenv()) or _G
-if type(env) ~= "table" then
-  warn("[EnvLogger] getgenv/_G not available")
-  return
-end
-if env.__PrinceEnvLogger then
-  warn("[EnvLogger] already running")
-  return
-end
-env.__PrinceEnvLogger = true
-
-local function logLine(...)
-  local parts = {}
-  for i = 1, select("#", ...) do
-    parts[i] = tostring(select(i, ...))
-  end
-  local msg = table.concat(parts, " ")
-  print("[EnvLogger]", msg)
-  if rconsoleprint then pcall(rconsoleprint, "[EnvLogger] " .. msg .. "\\n") end
-end
-
-logLine("attached — watching getgenv for new / changed keys")
-
-local proxy = {}
-setmetatable(proxy, {
-  __index = function(_, k)
-    return rawget(env, k)
-  end,
-  __newindex = function(_, k, v)
-    if k ~= "__PrinceEnvLogger" then
-      logLine("SET", tostring(k), "=", typeof and typeof(v) or type(v), "|", tostring(v):sub(1, 120))
-    end
-    rawset(env, k, v)
-  end,
-})
-
--- Prefer hooking getgenv if the executor allows replacing it
-pcall(function()
-  if getgenv then
-    local real = getgenv()
-    local mt = getrawmetatable and getrawmetatable(real)
-    if mt and setreadonly then
-      pcall(setreadonly, mt, false)
-      local oldNew = mt.__newindex
-      mt.__newindex = function(t, k, v)
-        if k ~= "__PrinceEnvLogger" then
-          logLine("SET", tostring(k), "=", typeof and typeof(v) or type(v), "|", tostring(v):sub(1, 120))
-        end
-        if oldNew then return oldNew(t, k, v) end
-        return rawset(t, k, v)
-      end
-      pcall(setreadonly, mt, true)
-      logLine("hooked getgenv metatable __newindex")
-      return
-    end
-  end
-end)
-
--- Fallback: poll for new keys every 0.5s
-task.spawn(function()
-  local seen = {}
-  for k in pairs(env) do seen[k] = true end
-  while env.__PrinceEnvLogger do
-    for k, v in pairs(env) do
-      if not seen[k] and k ~= "__PrinceEnvLogger" then
-        seen[k] = true
-        logLine("NEW", tostring(k), "=", typeof and typeof(v) or type(v), "|", tostring(v):sub(1, 120))
-      end
-    end
-    task.wait(0.5)
-  end
-end)
-`;
-    const attachment = new AttachmentBuilder(Buffer.from(envLogger, "utf-8"), { name: "env_logger.lua" });
-    const embed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("Env Logger")
-      .setDescription("Execute this in your Roblox executor.\nIt logs new / changed keys on `getgenv()`.")
-      .setFooter({ text: `Request by @${msg.author.username}│Env Logger`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-    await replyUser(msg, { embeds: [embed], files: [attachment] }).catch(() => {});
     return;
   }
   // .rename / .rn — mode selection panel
