@@ -259,16 +259,22 @@ function formatCooldown(remainingSec) {
  * Returns { onCooldown, noTokens, waitUntil, tokensLeft, unlimited }
  * onCooldown=true only when out of tokens (wait for daily refill).
  */
-const pendingTokenLine = new Map(); // userId -> "-# You have XX Tokens left."
+const pendingTokenLine = new Map(); // userId -> "-# You have XX Tokens left." (regular only — never premium)
+/** Suffix for result embed descriptions. Empty for premium. */
+function tokensResultSuffix(isBuyerUser, tokensLeft) {
+  if (isBuyerUser || tokensLeft === null || tokensLeft === undefined) return "";
+  return `\n\n-# You have ${tokensLeft} Tokens left.`;
+}
 function checkCommandCooldown(userId, cmd, isBuyerUser) {
   const free = TOKEN_FREE_CMDS.has(cmd);
+  // Premium / owner: never show token line, never consume
   if (isBuyerUser || isOwner(userId)) {
-    // Premium: show unlimited line on paid cmds only
-    if (!free) pendingTokenLine.set(String(userId), tokenLeftLine(null, true));
+    pendingTokenLine.delete(String(userId));
     return { onCooldown: false, unlimited: true, tokensLeft: null, free };
   }
   if (free) {
     const peek = peekTokens(userId, false);
+    pendingTokenLine.set(String(userId), tokenLeftLine(peek.tokens, false));
     return { onCooldown: false, unlimited: false, tokensLeft: peek.tokens, free: true };
   }
   const r = tryConsumeToken(userId, false);
@@ -692,7 +698,12 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   }
   // Channel lock — has tag but wrong channel → tell them
   if (!channelAllowed(msg)) {
-    return { allowed: false, reason: "❌ not here bro.", silent: false, isBuyer: false };
+    const chEmbed = new EmbedBuilder()
+      .setColor(0xED4245)
+      .setTitle("Input Error")
+      .setDescription("**Tips:**\n- Use command in allowed channel, and use server tag if you don’t have it so you can use command there.");
+    replyUser(msg, { embeds: [chEmbed] }).catch(() => {});
+    return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
   // Auto-give role when they have the tag (in case sync missed them)
   try {
@@ -2450,6 +2461,11 @@ client.on("interactionCreate", async interaction => {
           const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
           description += `\n\n**URL Found:**\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
         }
+        // Tokens left on result (regular only — never premium)
+        if (!ctx.isBuyerUser) {
+          const peek = peekTokens(interaction.user.id, false);
+          description += tokensResultSuffix(false, peek.tokens);
+        }
         const resultEmbed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
           .setTitle("File Preview")
@@ -2707,17 +2723,17 @@ client.on("interactionCreate", async interaction => {
     }
     logFinderPanel(interaction.user, "Find", `Query: \`${query}\``).catch(() => {});
     const results = findFiles(query);
+    const tokSuffix = isBuyerUser ? "" : tokensResultSuffix(false, tok.tokens);
     if (!results.length) {
       return interaction.reply({
-        content: `❌ no found for that, dumbass.\n${tokenLeftLine(tok.tokens, tok.unlimited)}`,
+        content: `❌ no found for that, dumbass.` + (tokSuffix ? `\n${tokSuffix.trim()}` : ""),
         flags: MessageFlags.Ephemeral
       }).catch(() => {});
     }
     const perPage = 8;
     const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
-    const desc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n") +
-      `\n\n${tokenLeftLine(tok.tokens, tok.unlimited)}`;
+    const desc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n") + tokSuffix;
     const embed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle(getFinderTitle(isBuyerUser))
@@ -2776,17 +2792,17 @@ client.on("interactionCreate", async interaction => {
       const freshUrl = await getFreshUrl(file);
       filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
     }
+    const tokSuffix = isBuyerUser ? "" : `\n${tokenLeftLine(tok.tokens, false)}`;
     if (!filesToSend.length) {
       await interaction.editReply({
-        content: `❌ your id is wrong, try find working id, dumbass.\n${tokenLeftLine(tok.tokens, tok.unlimited)}`
+        content: `❌ your id is wrong, try find working id, dumbass.` + tokSuffix
       }).catch(() => {});
       return;
     }
     for (let i = 0; i < filesToSend.length; i += 10) {
       const batch = filesToSend.slice(i, i + 10);
       const content = i === 0
-        ? "**Here you go!**" + (notFound.length ? `\n❌ Not found: \`${notFound.join("`, `")}\`` : "") +
-          `\n${tokenLeftLine(tok.tokens, tok.unlimited)}`
+        ? "**Here you go!**" + (notFound.length ? `\n❌ Not found: \`${notFound.join("`, `")}\`` : "") + tokSuffix
         : null;
       if (i === 0) {
         await interaction.editReply({ content, files: batch }).catch(() => {});
@@ -2990,7 +3006,11 @@ client.on("messageCreate", async msg => {
     const isBuyerUser = await isBuyer(msg.author.id, msg.member);
     if (!isBuyerUser && !/^\.(?:help|profile|prof|redeem|red)(?:\s|$)/i.test(txt)) {
       if (!channelAllowed(msg)) {
-        replyUser(msg, "❌ not here bro.").catch(() => {});
+        const chEmbed = new EmbedBuilder()
+          .setColor(0xED4245)
+          .setTitle("Input Error")
+          .setDescription("**Tips:**\n- Use command in allowed channel, and use server tag if you don’t have it so you can use command there.");
+        replyUser(msg, { embeds: [chEmbed] }).catch(() => {});
         return;
       }
     }
@@ -3411,7 +3431,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         `**New Channel:** <#${ch.id}> (\`${ch.id}\`)\n` +
         `**Channel Name:** ${ch.name || "unknown"}\n\n` +
         `Regular users can now only use commands in <#${ch.id}>.\n` +
-        `Wrong channel → bot replies: ❌ not here bro.`
+        `Wrong channel → bot replies with Input Error embed.`
       )
       .setFooter({ text: `Set by @${msg.author.username}`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
     replyUser(msg, { embeds: [setEmbed] }).catch(() => {});
@@ -3884,10 +3904,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
           .setTitle("Result")
           .setFooter({ text: timeFooter });
         
+        const tokExtra = isBuyerUser ? "" : tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens);
         if (res.ok) {
-          resultEmbed.setDescription("✅ Delete");
+          resultEmbed.setDescription("✅ Delete" + tokExtra);
         } else {
-          resultEmbed.setDescription(`❌ failed: HTTP ${res.status}`);
+          resultEmbed.setDescription(`❌ failed: HTTP ${res.status}` + tokExtra);
         }
         
         await msg.channel.send({
@@ -4027,7 +4048,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const embed = new EmbedBuilder()
         .setColor(getEmbedColor(isBuyerUser))
         .setTitle("Script Copy")
-        .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
+        .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\`` + (isBuyerUser ? "" : tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens)))
         .setFooter({ text: `Request by @${msg.author.username}│Prince Loader`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
       await msg.channel.send({
         content: `<@${msg.author.id}> Here is the script bro!`,
@@ -4531,6 +4552,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         if (foundFetchUrls.length > 10) urlSection += `\n- ...and ${foundFetchUrls.length - 10} more`;
         description += urlSection.slice(0, 800);
       }
+      if (!perm.isBuyer) description += tokensResultSuffix(false, cd.tokensLeft ?? peekTokens(msg.author.id, false).tokens);
       const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
       const resultEmbed = new EmbedBuilder()
         .setColor(REGULAR_COLOR)
@@ -4566,7 +4588,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyNoTokens(msg, waitUntil).catch(() => {});
       return;
     }
-    // Spend 1 token to play
+    // Cost -1 token to play; win gives +2 tokens
     const spent = tryConsumeToken(msg.author.id, false);
     if (!spent.ok) {
       replyNoTokens(msg, spent.waitUntil).catch(() => {});
@@ -4575,15 +4597,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const win = Math.random() < 0.5;
     let finalTokens = spent.tokens;
     if (win) {
-      // Refund spent + award 1 extra (net +1 from before flip)
-      finalTokens = addToken(msg.author.id, 2);
+      finalTokens = addToken(msg.author.id, 2); // +2 reward after -1 cost
     }
     const embed = new EmbedBuilder()
       .setColor(win ? 0x57F287 : 0xED4245)
       .setTitle(win ? "🪙 You won!" : "🪙 You lost!")
       .setDescription(
         win
-          ? `Heads! You **won +1 token**.\n\n${tokenLeftLine(finalTokens, false)}`
+          ? `Heads! You **won +2 tokens** (cost was −1).\n\n${tokenLeftLine(finalTokens, false)}`
           : `Tails! You **lost 1 token**.\n\n${tokenLeftLine(finalTokens, false)}`
       );
     replyUser(msg, { embeds: [embed] }).catch(() => {});
@@ -4608,15 +4629,19 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const isBuyerUser = perm.isBuyer;
     const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
+    let findDesc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n");
+    if (!isBuyerUser) findDesc += tokensResultSuffix(false, cd.tokensLeft ?? peekTokens(msg.author.id, false).tokens);
     const embed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle(getFinderTitle(isBuyerUser))
-      .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
+      .setDescription(findDesc)
       .setFooter({ text: `Pages 1/${totalPages} │ Prince Finder` });
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
     );
+    // Clear pending so replyUser doesn't double-append
+    pendingTokenLine.delete(String(msg.author.id));
     const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
     if (sent) paginationMenus.set(msg.author.id, {
       results, page: 1, totalPages, messageId: sent.id,
