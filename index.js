@@ -2717,28 +2717,49 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       return interaction.reply({ content: "❌ not yours, bro.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     
-    // Build modal
+    // Build modal — matches Webhook Spam Settings form
     const modal = new ModalBuilder()
       .setCustomId("whs_modal")
-      .setTitle("Webhook Spammer");
+      .setTitle("Webhook Spam Settings");
     
     const urlInput = new TextInputBuilder()
       .setCustomId("whs_url")
       .setLabel("Webhook URL")
       .setStyle(TextInputStyle.Short)
-      .setPlaceholder("The Webhook URL...")
-      .setRequired(true);
+      .setPlaceholder("Place webhook here")
+      .setRequired(true)
+      .setMaxLength(300);
+    
+    const timeInput = new TextInputBuilder()
+      .setCustomId("whs_time")
+      .setLabel("Time (seconds)")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("Max 60 seconds")
+      .setRequired(true)
+      .setMaxLength(2);
     
     const msgInput = new TextInputBuilder()
       .setCustomId("whs_message")
-      .setLabel("Spam Message")
+      .setLabel("Message")
       .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("Your message...")
-      .setRequired(true);
+      .setPlaceholder("Enter message (max 2000 chars)")
+      .setRequired(true)
+      .setMaxLength(2000);
+    
+    const delInput = new TextInputBuilder()
+      .setCustomId("whs_delete")
+      .setLabel("Delete after process (y/n)")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("y or n")
+      .setRequired(true)
+      .setMaxLength(3)
+      .setValue("y");
     
     modal.addComponents(
       new ActionRowBuilder().addComponents(urlInput),
-      new ActionRowBuilder().addComponents(msgInput)
+      new ActionRowBuilder().addComponents(timeInput),
+      new ActionRowBuilder().addComponents(msgInput),
+      new ActionRowBuilder().addComponents(delInput)
     );
     
     // Show modal FIRST — this is critical, must happen before any reply/update
@@ -2879,30 +2900,57 @@ client.on("interactionCreate", async interaction => {
   }
 
   if (interaction.customId === "whs_modal") {
-    const webhookUrl = interaction.fields.getTextInputValue("whs_url");
-    const spamMsg = interaction.fields.getTextInputValue("whs_message");
+    const webhookUrl = (interaction.fields.getTextInputValue("whs_url") || "").trim();
+    const timeRaw = (interaction.fields.getTextInputValue("whs_time") || "").trim();
+    const spamMsg = (interaction.fields.getTextInputValue("whs_message") || "").trim();
+    const delRaw = (interaction.fields.getTextInputValue("whs_delete") || "n").trim().toLowerCase();
     const avatarURL = interaction.user.displayAvatarURL({ dynamic: true, size: 128 });
-    
+    const deleteAfter = delRaw === "y" || delRaw === "yes";
+
+    let durationSec = parseInt(timeRaw, 10);
+    if (!Number.isFinite(durationSec) || durationSec < 1) {
+      return interaction.reply({ content: "❌ Time must be 1–60 seconds.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (durationSec > 60) durationSec = 60;
+    if (!webhookUrl || !spamMsg) {
+      return interaction.reply({ content: "❌ Webhook URL and Message are required.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+
     // Quick webhook validation
     const probe = await fetch(webhookUrl, { method: "GET" }).catch(() => null);
     if (!probe || probe.status === 404) {
       return interaction.reply({ content: "❌ Not Found.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
-    
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-    
+
+    const totalMs = durationSec * 1000;
+    const barLen = 15;
+    const makeBar = (leftMs) => {
+      const done = Math.min(1, Math.max(0, 1 - leftMs / totalMs));
+      const filled = Math.round(done * barLen);
+      return "■".repeat(filled) + "□".repeat(Math.max(0, barLen - filled));
+    };
+    const progressEmbed = (leftMs) => {
+      const leftSec = Math.max(0, leftMs / 1000);
+      return new EmbedBuilder()
+        .setColor(0x57F287)
+        .setTitle("Webhook Spam In Progress")
+        .setDescription(`**Time Remaining**\n${makeBar(leftMs)}\n**${leftSec.toFixed(1)}s left**`);
+    };
+
+    await interaction.reply({ embeds: [progressEmbed(totalMs)], flags: MessageFlags.Ephemeral }).catch(() => {});
+
     let sent = 0, failed = 0;
-    const maxMessages = 200;
-    
-    for (let i = 0; i < maxMessages; i++) {
-      const contentMsg = spamMsg;
+    const startAt = Date.now();
+    let lastEdit = 0;
+
+    while (Date.now() - startAt < totalMs) {
       try {
         const res = await fetch(webhookUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: contentMsg })
+          body: JSON.stringify({ content: spamMsg })
         });
-        if (res.status === 204) sent++;
+        if (res.status === 204 || res.status === 200) sent++;
         else if (res.status === 429) {
           try {
             const rl = await res.json();
@@ -2910,36 +2958,45 @@ client.on("interactionCreate", async interaction => {
           } catch {}
         } else failed++;
       } catch { failed++; }
-      await new Promise(r => setTimeout(r, 30));
+
+      const left = totalMs - (Date.now() - startAt);
+      if (Date.now() - lastEdit > 900 || left <= 0) {
+        lastEdit = Date.now();
+        await interaction.editReply({ embeds: [progressEmbed(Math.max(0, left))] }).catch(() => {});
+      }
+      await new Promise(r => setTimeout(r, 40));
     }
-    
-    const resultEmbed = new EmbedBuilder()
+
+    let deleted = false;
+    if (deleteAfter) {
+      try {
+        const delRes = await fetch(webhookUrl, { method: "DELETE" });
+        deleted = delRes.ok || delRes.status === 204 || delRes.status === 404;
+      } catch {}
+    }
+
+    const doneEmbed = new EmbedBuilder()
       .setColor(REGULAR_COLOR)
       .setTitle("Webhook Raid Complete")
-      .setDescription(`✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n🌐 **Status:** Done`)
+      .setDescription(
+        `✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n🌐 **Status:** Done` +
+        (deleteAfter ? `\n🗑️ **Webhook deleted:** ${deleted ? "Yes" : "No"}` : "")
+      )
       .setFooter({ text: `Request by @${interaction.user.username}│Webhook Spammer`, iconURL: avatarURL });
-    
+
     const removeRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("whs_remove")
         .setLabel("Remove")
         .setStyle(ButtonStyle.Danger)
     );
-    
-    // Use followUp to ensure components show properly
-    // Store webhook URL for Remove button handler
-    const resultMsg = await interaction.followUp({ 
-      embeds: [resultEmbed], 
-      components: [removeRow], 
-      flags: MessageFlags.Ephemeral 
-    }).catch(() => {});
+    const resultMsg = await interaction.editReply({ embeds: [doneEmbed], components: [removeRow] }).catch(() => null);
     if (resultMsg) {
       whsWebhookUrls.set(resultMsg.id, webhookUrl);
-      // Auto-cleanup after 1 hour
-      setTimeout(() => whsWebhookUrls.delete(resultMsg.id), 60 * 60 * 1000);
     }
     return;
   }
+
 });
 
 // ============================================================
@@ -4367,7 +4424,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     
     // Process immediately — remove comments, IP loggers, script loaders only (no panel)
-    const loadingMsg = await replyUser(msg, "⏳ cleaning file...").catch(() => {});
+    const loadingEmbed = new EmbedBuilder()
+      .setColor(REGULAR_COLOR)
+      .setTitle("Renaming...")
+      .setDescription("⏳ Processing...");
+    const loadingMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
     const startTime = Date.now();
     try {
       let text = String(fileContent || "");
@@ -4412,7 +4473,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       pendingTokenLine.delete(String(msg.author.id));
       await replyUser(msg, {
-        content: `Here you go!\n**Finish in:** \`${finishSec}s\`` + tokLine,
+        content: `<@${msg.author.id}> Here you go!\n**Finish in:** \`${finishSec}s\`` + tokLine,
         files: [fixedFile],
         embeds: [resultEmbed]
       }).catch(() => {});
@@ -4610,70 +4671,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       content: `<@${msg.author.id}> **Here you go!**`,
       files: [fileAttachment]
     }).catch(() => {});
-    return;
-  }
-  // .fetch — fetch script from URL, auto-clean URL, preview + file
-  if (/^\.fetch(?:\s|$)/i.test(txt)) {
-    let rawArg = txt.replace(/^\.fetch\s+/i, "").trim();
-    if (!rawArg) { replyUser(msg, "❌ usage: `.fetch <url>`.").catch(() => {}); return; }
-    // Extract clean URL — strips ))() quotes parentheses etc.
-    const urlMatch = rawArg.match(/https?:\/\/[^\s)\]}>"']+/i);
-    const fetchUrl = urlMatch ? urlMatch[0] : rawArg;
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "dl", perm.isBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    const startTime = Date.now();
-    // PH time — no leading zero on hour
-    const phTime = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Manila" });
-    // Loading embed — title Fetching URL..., description = URL only
-    const loadingEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("Fetching URL...")
-      .setDescription(fetchUrl)
-      .setFooter({ text: `Today at ${phTime}` });
-    const sentMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
-    try {
-      const buf = await downloadURL(fetchUrl);
-      const content = buf.toString("utf8");
-      if (!content || content.length < 1) throw new Error("Empty response");
-      // Random 20-char filename
-      const fileName = crypto.randomBytes(10).toString("hex") + ".lua";
-      // Preview — first 5 lines (no **Preview:** label)
-      const previewLines = content.split("\n").slice(0, 5).join("\n");
-      const previewDisplay = previewLines.length > 800 ? previewLines.slice(0, 800) + "\n..." : previewLines;
-      // Find URLs in fetched content
-      const foundFetchUrls = [...new Set(content.match(/https?:\/\/[^\s)"']+/g) || [])];
-      let description = "```lua\n" + previewDisplay + "\n```";
-      if (foundFetchUrls.length > 0) {
-        const urlList = foundFetchUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
-        let urlSection = `\n\nURL Found:\n${urlList}`;
-        if (foundFetchUrls.length > 10) urlSection += `\n- ...and ${foundFetchUrls.length - 10} more`;
-        description += urlSection.slice(0, 800);
-      }
-      // tokens in message text only
-      const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
-      const resultEmbed = new EmbedBuilder()
-        .setColor(REGULAR_COLOR)
-        .setTitle("File Preview")
-        .setDescription(description)
-        .setFooter({ text: `Today at ${phTime}` });
-      const attachment = new AttachmentBuilder(Buffer.from(content, "utf-8"), { name: fileName });
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      await replyUser(msg, {
-        content: `<@${msg.author.id}> Here you go!\n**Finish in:** \`${finishSec}s\``,
-        embeds: [resultEmbed],
-        files: [attachment]
-      }).catch(() => {});
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ failed to fetch: ${e.message.slice(0, 100)}`).catch(() => {});
-    }
     return;
   }
   // .give <amount> <@user> — owner + regular only (premium cannot use)
