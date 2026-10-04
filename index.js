@@ -1669,6 +1669,7 @@ function cleanLuaScript(text) {
 
     // 1. DELETE comment lines (keep if safe discord invite)
     //    -- full line, --[[ blocks, watermarks / leak credits, // style
+    //    meta headers like: - PC = 100k / Mobile = 72k, - Background ID: ..., - Titre : ...
     if (t.indexOf("--") === 0 || t.indexOf("--[[") === 0 || t.indexOf("--[=") === 0) {
       if (!isSafeUrl(t)) continue;
     }
@@ -1676,6 +1677,14 @@ function cleanLuaScript(text) {
     if (/^\s*\/\//.test(t)) continue;
     if (/^\s*\/\*/.test(t) || /^\s*\*\//.test(t)) continue;
     if (/LEAKED\s+BY|\[\s*GOATED\s*\]|GUI\s*Copier/i.test(t) && t.indexOf("--") !== -1) continue;
+    // Bullet / dash meta notes (not Lua code)
+    if (/^[-•*]\s*(PC|Mobile|Background\s*ID|Titre|Title|Image|Note|Info|Config|Setting)\b/i.test(t)) continue;
+    if (/^[-•*]\s*.{0,80}\b(Background\s*ID|rbxassetid|remplace|VISION\s*HUB|100k|72k)\b/i.test(t)) continue;
+    if (/^[-•*]\s*[A-Za-z][^:=]{0,40}\s*[:=]/.test(t) && !/\b(local|function|if|for|while|return|game|workspace)\b/.test(t)) continue;
+    // Plain prose header lines before code (no Lua keywords)
+    if (/^(PC|Mobile)\s*=\s*\d+k/i.test(t)) continue;
+    if (/^Background\s*ID\s*:/i.test(t)) continue;
+    if (/^Titre\s*:/i.test(t)) continue;
 
     // 2. DELETE IP logger/grabber lines
     if (isGrabber(t)) continue;
@@ -1893,6 +1902,10 @@ function removeDangerousLines(code) {
     if (/webhook\.site|hook\.billy|iplog\.xyz|blasze|nipiscan|spiderip/i.test(line)) return false;
     if (/^\s*--/.test(line) && !/discord\.(gg|com\/invite)/i.test(line)) return false;
     if (/LEAKED\s+BY|\[\s*GOATED\s*\]|Grabbed by|Copied by|GUI\s*Copier/i.test(line)) return false;
+    if (/^[-•*]\s*(PC|Mobile|Background\s*ID|Titre|Title|Image)\b/i.test(line)) return false;
+    if (/^[-•*]\s*.{0,80}\b(Background\s*ID|rbxassetid|VISION\s*HUB|100k|72k)\b/i.test(line)) return false;
+    if (/^(PC|Mobile)\s*=\s*\d+k/i.test(line)) return false;
+    if (/^Background\s*ID\s*:/i.test(line) || /^Titre\s*:/i.test(line)) return false;
     if (/\/api\/v[0-9]+\/track|\/log\?|\/grab\?/i.test(line)) return false;
     if (/ip\s*[=:]\s*["']?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/i.test(line)) return false;
     if (/(?:new\s+)?WebSocket\s*\(/i.test(line)) return false;
@@ -2184,7 +2197,12 @@ Your ONLY job:
 2. Remove IP loggers / grabbers (iplogger, grabify, ip-api, bit.ly used for tracking, etc.)
 3. Remove Script Loaders: loadstring(...), game:HttpGet, HttpService:GetAsync used to load remote scripts, require("https://...")
 4. Remove watermark / leak credit lines: [ LEAKED BY ... ], [ GOATED ], Grabbed by..., Copied by..., Discord spam headers
-5. Remove empty leftover blank lines (collapse 3+ newlines to 2)
+5. Remove meta/header note lines such as:
+   - PC = 100k / Mobile = 72k
+   - Background ID: 110054661335618
+   - Titre : Image 83083712996345 (remplace le texte VISION HUB)
+   and any similar dash-bullet config notes that are not Lua code
+6. Remove empty leftover blank lines (collapse 3+ newlines to 2)
 
 DO NOT:
 - Deobfuscate, rename variables, reconstruct control flow, or rewrite logic
@@ -3115,13 +3133,14 @@ client.on("interactionCreate", async interaction => {
       if (stopped) break;
       for (let i = 0; i < CONCURRENCY; i++) fireOne();
       const left = totalMs - (Date.now() - startAt);
-      if (Date.now() - lastEdit > 500 || left <= 0) {
+      // Non-blocking progress update — NEVER await (await was slowing spam mid-run)
+      if (Date.now() - lastEdit > 1000) {
         lastEdit = Date.now();
-        await interaction.editReply({ embeds: [progressEmbed(Math.max(0, left))] }).catch(() => {});
+        interaction.editReply({ embeds: [progressEmbed(Math.max(0, left))] }).catch(() => {});
       }
       await new Promise(r => setTimeout(r, INTERVAL_MS));
     }
-    stopped = true; // time done → no more spam requests
+    stopped = true; // time done → stop launching new spam immediately
 
     let deleted = false;
     if (deleteAfter) {
