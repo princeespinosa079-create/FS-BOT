@@ -189,7 +189,8 @@ function peekTokens(userId, isBuyerUser) {
 /** Gift tokens — can go above 10 (e.g. 20). Daily 12 AM PH still resets to 10. */
 function addToken(userId, amount) {
   const data = ensureDailyTokenReset(userId);
-  data.tokens = Math.max(0, data.tokens + amount); // no max cap for gifts
+  // Cap at 10 — never above max (gifts / coinflip / etc.)
+  data.tokens = Math.min(MAX_REGULAR_TOKENS, Math.max(0, data.tokens + amount));
   if (data.tokens > 0) data.nextRefillAt = null;
   else data.nextRefillAt = getNextMidnightPHMs();
   saveTokens();
@@ -2417,6 +2418,10 @@ const commands = [
       .setName("title")
       .setDescription("Optional embed title.")
       .setRequired(false))
+    .addStringOption(o => o
+      .setName("footer")
+      .setDescription("Optional embed footer (omit for no footer).")
+      .setRequired(false))
     .toJSON(),
   new SlashCommandBuilder()
     .setName("finderpanel")
@@ -2759,6 +2764,20 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     return;
   }
   // ─── FINDER PANEL BUTTONS (never expire) — tokens charged on modal submit ───
+  if (interaction.customId === "finderpanel_redeem") {
+    const modal = new ModalBuilder()
+      .setCustomId("finderpanel_redeem_modal")
+      .setTitle("Redeem Premium Key");
+    const keyInput = new TextInputBuilder()
+      .setCustomId("finderpanel_key")
+      .setLabel("Premium Key")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("PRINCE-XXXXXXXXXXXX")
+      .setRequired(true)
+      .setMaxLength(80);
+    modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
+    return interaction.showModal(modal).catch(() => {});
+  }
   if (interaction.customId === "finderpanel_find" || interaction.customId === "finderpanel_get") {
     const uid = interaction.user.id;
     // Server Tag required for non-owner / non-buyer
@@ -2879,6 +2898,39 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
 // ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isModalSubmit()) return;
+
+  // ── Finder Panel: Redeem modal ──
+  if (interaction.customId === "finderpanel_redeem_modal") {
+    const key = (interaction.fields.getTextInputValue("finderpanel_key") || "").trim();
+    if (!key) {
+      return interaction.reply({ content: "❌ put a key.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const redeemIsBuyer = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
+    if (redeemIsBuyer && !isOwner(interaction.user.id)) {
+      return interaction.reply({ content: "❌ you already got a key, lol.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const rec = keyStore.keys.find(k => k.key === key);
+    if (!rec) {
+      return interaction.reply({ content: "❌ Invalid key.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (rec.redeemedBy) {
+      return interaction.reply({ content: "❌ this key was already redeem.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    rec.redeemedBy = interaction.user.id;
+    rec.redeemedAt = Date.now();
+    if (rec.durationMs) rec.expiresAt = Date.now() + rec.durationMs;
+    else rec.expiresAt = null;
+    const tmp = `${KEYS_FILE}.tmp`;
+    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
+    try {
+      const g = await client.guilds.fetch(GUILD_ID);
+      const m = await g.members.fetch(interaction.user.id);
+      await m.roles.add(BUYER_ROLE_ID);
+    } catch (e) {
+      return interaction.reply({ content: "❌ Key saved but failed to assign role: " + e.message, flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    return interaction.reply({ content: "✅ key redeemed successfully.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
 
   // ── Finder Panel: Find modal (costs 1 token for regulars) ──
   if (interaction.customId === "finderpanel_find_modal") {
@@ -3035,31 +3087,50 @@ client.on("interactionCreate", async interaction => {
     let sent = 0, failed = 0;
     const startAt = Date.now();
     let lastEdit = 0;
-    // Target rate: 40 messages per 3 seconds (~75ms interval)
-    const intervalMs = Math.max(20, Math.floor(3000 / 40));
+    // Fast concurrent spam — aim 200+ messages, no msg/sec ratio limit
+    const CONCURRENCY = 25;
+    const MIN_MESSAGES = 200;
+    const payload = JSON.stringify({ content: spamMsg });
 
+    async function fireOne() {
+      try {
+        const res = await fetch(webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload
+        });
+        if (res.status === 204 || res.status === 200) { sent++; return; }
+        if (res.status === 429) {
+          failed++;
+          try {
+            const rl = await res.json();
+            await new Promise(r => setTimeout(r, Math.min((rl.retry_after || 0.25) * 1000, 800)));
+          } catch {}
+          return;
+        }
+        failed++;
+      } catch { failed++; }
+    }
+
+    // Run for the full duration with concurrent batches
     while (Date.now() - startAt < totalMs) {
-      // fire request without blocking the full rate on network (still count results)
-      fetch(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: spamMsg })
-      }).then(res => {
-        if (res.status === 204 || res.status === 200) sent++;
-        else if (res.status === 429) failed++;
-        else failed++;
-      }).catch(() => { failed++; });
-
+      const batch = [];
+      for (let i = 0; i < CONCURRENCY; i++) batch.push(fireOne());
+      await Promise.all(batch);
       const left = totalMs - (Date.now() - startAt);
-      if (Date.now() - lastEdit > 900 || left <= 0) {
+      if (Date.now() - lastEdit > 700 || left <= 0) {
         lastEdit = Date.now();
         await interaction.editReply({ embeds: [progressEmbed(Math.max(0, left))] }).catch(() => {});
       }
-      await new Promise(r => setTimeout(r, intervalMs));
     }
-
-    // let in-flight requests settle briefly
-    await new Promise(r => setTimeout(r, 200));
+    // Guarantee at least 200 messages even if duration was short
+    while (sent < MIN_MESSAGES) {
+      const batch = [];
+      const need = Math.min(CONCURRENCY, MIN_MESSAGES - sent);
+      for (let i = 0; i < need; i++) batch.push(fireOne());
+      await Promise.all(batch);
+      await interaction.editReply({ embeds: [progressEmbed(0)] }).catch(() => {});
+    }
 
     let deleted = false;
     if (deleteAfter) {
@@ -3124,7 +3195,7 @@ client.on("interactionCreate", async interaction => {
       const text = interaction.options.getString("text");
       const type = interaction.options.getString("type") || "good";
       const title = interaction.options.getString("title");
-      const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Manila" })}`;
+      const footer = interaction.options.getString("footer");
       await interaction.deleteReply().catch(() => {});
       const targetChannel = interaction.channel || interaction.user.dmChannel || await interaction.user.createDM().catch(() => null);
       if (!targetChannel) {
@@ -3136,9 +3207,10 @@ client.on("interactionCreate", async interaction => {
       } else {
         const embed = new EmbedBuilder()
           .setColor(REGULAR_COLOR)
-          .setDescription(text)
-          .setFooter({ text: timeFooter });
+          .setDescription(text);
         if (title) embed.setTitle(title);
+        // Footer only if owner provided one — otherwise no footer
+        if (footer) embed.setFooter({ text: footer });
         await targetChannel.send({ embeds: [embed] });
       }
       return;
@@ -3156,7 +3228,8 @@ client.on("interactionCreate", async interaction => {
         .setFooter({ text: `Sent by @${interaction.user.username}`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
       const panelRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("finderpanel_find").setLabel("Find").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("finderpanel_get").setLabel("Get").setStyle(ButtonStyle.Success)
+        new ButtonBuilder().setCustomId("finderpanel_get").setLabel("Get").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId("finderpanel_redeem").setLabel("Redeem").setStyle(ButtonStyle.Secondary)
       );
       await targetChannel.send({ embeds: [panelEmbed], components: [panelRow] });
       await interaction.editReply({ content: "✅ Finder Source Panel posted." });
@@ -4754,58 +4827,45 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }).catch(() => {});
     return;
   }
-  // .give <amount> <@user> — owner + regular only (premium cannot use)
-  if (/^\.give(?:\s|$)/i.test(txt)) {
-    const isOwnerUser = isOwner(msg.author.id);
-    const isBuyerUser = await isBuyer(msg.author.id, msg.member);
-    if (isBuyerUser && !isOwnerUser) {
-      replyUser(msg, "❌ premium can’t use `.give`.").catch(() => {});
+  // .renew — Owner Only: clone channel (name, perms, position), delete old
+  if (/^\.renew(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    if (!msg.guild || !msg.channel || msg.channel.isDMBased?.()) {
+      replyUser(msg, "❌ use this in a server channel.").catch(() => {});
       return;
     }
-    if (!isOwnerUser) {
-      const perm = await checkRegularPermission(msg, false);
-      if (!perm.allowed) {
-        if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {});
-        return;
-      }
-    }
-    const parts = txt.trim().split(/\s+/);
-    // .give <amount> <@user|id>
-    const amountStr = parts[1];
-    const targetRaw = parts[2] || "";
-    const amount = parseInt(amountStr, 10);
-    if (!amountStr || !Number.isFinite(amount) || amount < 1) {
-      replyUser(msg, "❌ usage: `.give <amount> <@user>`").catch(() => {});
+    const ch = msg.channel;
+    if (!ch.isTextBased?.() || ch.isThread?.()) {
+      replyUser(msg, "❌ renew only works on normal text channels.").catch(() => {});
       return;
     }
-    if (amount > 1000) {
-      replyUser(msg, "❌ max you can give is 1000.").catch(() => {});
-      return;
+    const loading = await replyUser(msg, "⏳ Renewing channel...").catch(() => {});
+    try {
+      const position = ch.position;
+      const cloned = await ch.clone({
+        name: ch.name,
+        reason: `Channel renew by ${msg.author.tag}`,
+      });
+      try { await cloned.setPosition(position, { reason: "Renew position" }); } catch {}
+      // Match topic / nsfw / slowmode if supported
+      try {
+        const edit = {};
+        if (ch.topic != null) edit.topic = ch.topic;
+        if (typeof ch.nsfw === "boolean") edit.nsfw = ch.nsfw;
+        if (typeof ch.rateLimitPerUser === "number") edit.rateLimitPerUser = ch.rateLimitPerUser;
+        if (Object.keys(edit).length) await cloned.set(edit).catch(() => {});
+      } catch {}
+      const oldId = ch.id;
+      const oldName = ch.name;
+      await ch.delete(`Renewed by ${msg.author.tag}`).catch(() => {});
+      await cloned.send({
+        content: `✅ Channel renewed by <@${msg.author.id}>.\n📁 \`${oldName}\` (\`${oldId}\` → \`${cloned.id}\`)`
+      }).catch(() => {});
+      if (loading) await loading.delete().catch(() => {});
+    } catch (e) {
+      if (loading) await loading.edit(`❌ renew failed: ${e.message.slice(0, 120)}`).catch(() => {});
+      else replyUser(msg, `❌ renew failed: ${e.message.slice(0, 120)}`).catch(() => {});
     }
-    const mention = targetRaw.match(/^<@!?(\d+)>$/);
-    const targetId = mention ? mention[1] : (targetRaw.match(/^\d{17,20}$/) ? targetRaw : null);
-    if (!targetId) {
-      replyUser(msg, "❌ usage: `.give <amount> <@user>`").catch(() => {});
-      return;
-    }
-    if (targetId === msg.author.id) {
-      replyUser(msg, "❌ you can’t give tokens to yourself.").catch(() => {});
-      return;
-    }
-    // Owner: no deduct, just grant
-    if (isOwnerUser) {
-      const newBal = addToken(targetId, amount);
-      replyUser(msg, `✅ gave **${amount}** token(s) to <@${targetId}>.\n-# They now have ${newBal} Tokens.`).catch(() => {});
-      return;
-    }
-    // Regular: must have enough tokens
-    const sub = subtractTokens(msg.author.id, amount);
-    if (!sub.ok) {
-      replyUser(msg, `❌ you only have **${sub.tokens}** token(s), need **${amount}**.`).catch(() => {});
-      return;
-    }
-    const newBal = addToken(targetId, amount);
-    replyUser(msg, `✅ gave **${amount}** token(s) to <@${targetId}>.\n-# You have ${sub.tokens} Tokens left.\n-# They now have ${newBal} Tokens.`).catch(() => {});
     return;
   }
   // .coinflip — win or lose 1 token (regular users)
@@ -4820,7 +4880,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     const peek = peekTokens(msg.author.id, false);
     if (peek.tokens <= 0) {
-      const waitUntil = peek.nextRefillAt || (Date.now() + TOKEN_REFILL_MS);
+      const waitUntil = peek.nextRefillAt || getNextMidnightPHMs();
       replyNoTokens(msg, waitUntil).catch(() => {});
       return;
     }
