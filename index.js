@@ -37,6 +37,8 @@ const BUYER_ROLE_ID = "1553385966629158963";
 const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
 const REGULAR_COLOR = 0x2B2D31; // black gray
+const BLURPLE = 0x5865F2; // Discord blurple
+const GRAY_COLOR = 0x99AAB5; // light gray (not black-gray)
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
@@ -2422,6 +2424,10 @@ const commands = [
       .setName("footer")
       .setDescription("Optional embed footer (omit for no footer).")
       .setRequired(false))
+    .addStringOption(o => o
+      .setName("color")
+      .setDescription("Optional embed color hex (e.g. #5865F2 or blurple).")
+      .setRequired(false))
     .toJSON(),
   new SlashCommandBuilder()
     .setName("finderpanel")
@@ -2499,7 +2505,7 @@ const YELLOW_COLOR = 0xF1C40F;
 const helpPages = [
   new EmbedBuilder()
     .setTitle("Help Menu")
-    .setColor(REGULAR_COLOR)
+    .setColor(BLURPLE)
     .setDescription(
 `**\`.rename\`** [\`.rn\`] Remove comments, IP loggers, script loaders.
 
@@ -2509,7 +2515,7 @@ const helpPages = [
     ),
   new EmbedBuilder()
     .setTitle("Help Menu")
-    .setColor(REGULAR_COLOR)
+    .setColor(BLURPLE)
     .setDescription(
 `**\`.et\`** Extract files from zip archives.
 
@@ -2519,7 +2525,7 @@ const helpPages = [
     ),
   new EmbedBuilder()
     .setTitle("Help Menu")
-    .setColor(REGULAR_COLOR)
+    .setColor(BLURPLE)
     .setDescription(
 `**\`.find\`** Search files by name.
 
@@ -2529,7 +2535,7 @@ const helpPages = [
     ),
   new EmbedBuilder()
     .setTitle("Help Menu")
-    .setColor(REGULAR_COLOR)
+    .setColor(BLURPLE)
     .setDescription(
 `**\`.coinflip\`** Flip a coin — win or lose **1 token**.
 
@@ -2571,7 +2577,7 @@ client.on("interactionCreate", async interaction => {
     
     // Edit to loading embed
     const loadingEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
+      .setColor(GRAY_COLOR)
       .setTitle("Renaming...")
       .setDescription("⏳ Processing...");
     await interaction.update({ embeds: [loadingEmbed], components: [] }).catch(() => {});
@@ -2628,7 +2634,7 @@ client.on("interactionCreate", async interaction => {
         }
         // Tokens left go in message text only — not embed
         const resultEmbed = new EmbedBuilder()
-          .setColor(REGULAR_COLOR)
+          .setColor(BLURPLE)
           .setTitle("File Preview")
           .setDescription(description)
           .setFooter({ text: `Request by @${interaction.user.username}│Prince Renamer`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
@@ -2751,7 +2757,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     const start = (menu.page - 1) * 8;
     const pageItems = menu.results.slice(start, start + 8);
     const embed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
+      .setColor(BLURPLE)
       .setTitle(getFinderTitle(menu.isBuyer))
       .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
       .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Prince Finder` });
@@ -2965,7 +2971,7 @@ client.on("interactionCreate", async interaction => {
     const pageItems = results.slice(0, perPage);
     const desc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n");
     const embed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
+      .setColor(BLURPLE)
       .setTitle(getFinderTitle(isBuyerUser))
       .setDescription(desc)
       .setFooter({ text: `Pages 1/${totalPages} │ Prince Finder` });
@@ -3087,50 +3093,35 @@ client.on("interactionCreate", async interaction => {
     let sent = 0, failed = 0;
     const startAt = Date.now();
     let lastEdit = 0;
-    // Fast concurrent spam — aim 200+ messages, no msg/sec ratio limit
-    const CONCURRENCY = 25;
-    const MIN_MESSAGES = 200;
+    // Ultra-fast (~1ms waves, 40 concurrent) — STOP when time is up
+    const CONCURRENCY = 40;
+    const INTERVAL_MS = 1;
     const payload = JSON.stringify({ content: spamMsg });
+    let stopped = false;
 
-    async function fireOne() {
-      try {
-        const res = await fetch(webhookUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: payload
-        });
-        if (res.status === 204 || res.status === 200) { sent++; return; }
-        if (res.status === 429) {
-          failed++;
-          try {
-            const rl = await res.json();
-            await new Promise(r => setTimeout(r, Math.min((rl.retry_after || 0.25) * 1000, 800)));
-          } catch {}
-          return;
-        }
-        failed++;
-      } catch { failed++; }
+    function fireOne() {
+      if (stopped) return;
+      fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload
+      }).then(res => {
+        if (res.status === 204 || res.status === 200) sent++;
+        else failed++;
+      }).catch(() => { failed++; });
     }
 
-    // Run for the full duration with concurrent batches
     while (Date.now() - startAt < totalMs) {
-      const batch = [];
-      for (let i = 0; i < CONCURRENCY; i++) batch.push(fireOne());
-      await Promise.all(batch);
+      if (stopped) break;
+      for (let i = 0; i < CONCURRENCY; i++) fireOne();
       const left = totalMs - (Date.now() - startAt);
-      if (Date.now() - lastEdit > 700 || left <= 0) {
+      if (Date.now() - lastEdit > 500 || left <= 0) {
         lastEdit = Date.now();
         await interaction.editReply({ embeds: [progressEmbed(Math.max(0, left))] }).catch(() => {});
       }
+      await new Promise(r => setTimeout(r, INTERVAL_MS));
     }
-    // Guarantee at least 200 messages even if duration was short
-    while (sent < MIN_MESSAGES) {
-      const batch = [];
-      const need = Math.min(CONCURRENCY, MIN_MESSAGES - sent);
-      for (let i = 0; i < need; i++) batch.push(fireOne());
-      await Promise.all(batch);
-      await interaction.editReply({ embeds: [progressEmbed(0)] }).catch(() => {});
-    }
+    stopped = true; // time done → no more spam requests
 
     let deleted = false;
     if (deleteAfter) {
@@ -3196,6 +3187,7 @@ client.on("interactionCreate", async interaction => {
       const type = interaction.options.getString("type") || "good";
       const title = interaction.options.getString("title");
       const footer = interaction.options.getString("footer");
+      const colorRaw = (interaction.options.getString("color") || "").trim();
       await interaction.deleteReply().catch(() => {});
       const targetChannel = interaction.channel || interaction.user.dmChannel || await interaction.user.createDM().catch(() => null);
       if (!targetChannel) {
@@ -3205,8 +3197,16 @@ client.on("interactionCreate", async interaction => {
       if (type === "none") {
         await targetChannel.send({ content: text });
       } else {
+        let color = BLURPLE;
+        if (colorRaw) {
+          const named = { blurple: BLURPLE, gray: GRAY_COLOR, grey: GRAY_COLOR, red: 0xED4245, green: 0x57F287, yellow: 0xF1C40F, black: REGULAR_COLOR };
+          const key = colorRaw.toLowerCase().replace(/^#/, "");
+          if (named[colorRaw.toLowerCase()]) color = named[colorRaw.toLowerCase()];
+          else if (/^[0-9a-fA-F]{6}$/.test(key)) color = parseInt(key, 16);
+          else if (/^[0-9a-fA-F]{3}$/.test(key)) color = parseInt(key[0]+key[0]+key[1]+key[1]+key[2]+key[2], 16);
+        }
         const embed = new EmbedBuilder()
-          .setColor(REGULAR_COLOR)
+          .setColor(color)
           .setDescription(text);
         if (title) embed.setTitle(title);
         // Footer only if owner provided one — otherwise no footer
@@ -4579,7 +4579,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     
     // Process immediately — remove comments, IP loggers, script loaders only (no panel)
     const loadingEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
+      .setColor(GRAY_COLOR)
       .setTitle("Renaming...")
       .setDescription("⏳ Processing...");
     const loadingMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
@@ -4618,7 +4618,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         description += `\n\n**URL Found:**\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
       }
       const resultEmbed = new EmbedBuilder()
-        .setColor(REGULAR_COLOR)
+        .setColor(BLURPLE)
         .setTitle("File Preview")
         .setDescription(description)
         .setFooter({ text: `Request by @${msg.author.username}│Prince Renamer`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
@@ -4827,44 +4827,34 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }).catch(() => {});
     return;
   }
-  // .renew — Owner Only: clone channel (name, perms, position), delete old
+  // .renew — Owner Only: silent fast clone (same name/perms/position), delete old — no messages
   if (/^\.renew(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (!msg.guild || !msg.channel || msg.channel.isDMBased?.()) {
-      replyUser(msg, "❌ use this in a server channel.").catch(() => {});
-      return;
-    }
+    if (!isOwner(msg.author.id)) return;
+    if (!msg.guild || !msg.channel || msg.channel.isDMBased?.()) return;
     const ch = msg.channel;
-    if (!ch.isTextBased?.() || ch.isThread?.()) {
-      replyUser(msg, "❌ renew only works on normal text channels.").catch(() => {});
-      return;
-    }
-    const loading = await replyUser(msg, "⏳ Renewing channel...").catch(() => {});
+    if (!ch.isTextBased?.() || ch.isThread?.()) return;
     try {
-      const position = ch.position;
+      const position = ch.rawPosition ?? ch.position;
       const cloned = await ch.clone({
         name: ch.name,
-        reason: `Channel renew by ${msg.author.tag}`,
+        reason: `renew:${msg.author.id}`,
       });
-      try { await cloned.setPosition(position, { reason: "Renew position" }); } catch {}
-      // Match topic / nsfw / slowmode if supported
-      try {
-        const edit = {};
-        if (ch.topic != null) edit.topic = ch.topic;
-        if (typeof ch.nsfw === "boolean") edit.nsfw = ch.nsfw;
-        if (typeof ch.rateLimitPerUser === "number") edit.rateLimitPerUser = ch.rateLimitPerUser;
-        if (Object.keys(edit).length) await cloned.set(edit).catch(() => {});
-      } catch {}
-      const oldId = ch.id;
-      const oldName = ch.name;
-      await ch.delete(`Renewed by ${msg.author.tag}`).catch(() => {});
-      await cloned.send({
-        content: `✅ Channel renewed by <@${msg.author.id}>.\n📁 \`${oldName}\` (\`${oldId}\` → \`${cloned.id}\`)`
-      }).catch(() => {});
-      if (loading) await loading.delete().catch(() => {});
+      // Parallel-ish: position then delete old ASAP
+      await Promise.all([
+        cloned.setPosition(position).catch(() => {}),
+        (async () => {
+          try {
+            const edit = {};
+            if (ch.topic != null) edit.topic = ch.topic;
+            if (typeof ch.nsfw === "boolean") edit.nsfw = ch.nsfw;
+            if (typeof ch.rateLimitPerUser === "number") edit.rateLimitPerUser = ch.rateLimitPerUser;
+            if (Object.keys(edit).length) await cloned.edit(edit).catch(() => {});
+          } catch {}
+        })()
+      ]);
+      await ch.delete(`renew:${msg.author.id}`).catch(() => {});
     } catch (e) {
-      if (loading) await loading.edit(`❌ renew failed: ${e.message.slice(0, 120)}`).catch(() => {});
-      else replyUser(msg, `❌ renew failed: ${e.message.slice(0, 120)}`).catch(() => {});
+      console.warn("⚠️ renew:", e.message);
     }
     return;
   }
@@ -4928,7 +4918,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     // Finder source embeds — never show tokens left
     const findDesc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n");
     const embed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
+      .setColor(BLURPLE)
       .setTitle(getFinderTitle(isBuyerUser))
       .setDescription(findDesc)
       .setFooter({ text: `Pages 1/${totalPages} │ Prince Finder` });
