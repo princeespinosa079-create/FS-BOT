@@ -1306,6 +1306,99 @@ function extractFilesFromZip(zipBuffer) {
   }
   return extractedFiles;
 }
+
+/** Pull every embedded script / code / base64 payload out of an HTML dump */
+function extractFilesFromHtml(htmlBuffer, sourceName) {
+  const html = Buffer.isBuffer(htmlBuffer) ? htmlBuffer.toString("utf8") : String(htmlBuffer || "");
+  const files = [];
+  let n = 0;
+  const push = (name, data) => {
+    if (!data || !data.length) return;
+    n++;
+    const safe = String(name || `part_${n}`).replace(/[^\w.\-]+/g, "_").slice(0, 80);
+    files.push({ name: safe, data: Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8") });
+  };
+  const decodeEntities = (s) => String(s || "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'");
+
+  // <script> blocks
+  try {
+    const re = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+    let m;
+    while ((m = re.exec(html))) {
+      const body = decodeEntities(m[1]).trim();
+      if (body.length < 5) continue;
+      const isLua = /\b(local|function|game|workspace|Instance|task\.|FireServer)\b/.test(body);
+      push(`script_${n + 1}.${isLua ? "lua" : "js"}`, body);
+    }
+  } catch {}
+
+  // <pre> / <code> / <textarea>
+  try {
+    const re = /<(pre|code|textarea)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+    let m;
+    while ((m = re.exec(html))) {
+      const body = decodeEntities(m[2]).trim();
+      if (body.length < 8) continue;
+      const isLua = /\b(local|function|game|workspace)\b/.test(body);
+      push(`block_${n + 1}.${isLua ? "lua" : "txt"}`, body);
+    }
+  } catch {}
+
+  // data-* / inline base64 payloads
+  try {
+    const re = /(?:data:text\/(?:plain|lua|javascript);base64,|base64[:=]\s*["']?)([A-Za-z0-9+/]{48,}={0,2})/gi;
+    let m;
+    while ((m = re.exec(html))) {
+      try {
+        const decoded = Buffer.from(m[1], "base64");
+        if (decoded.length < 8) continue;
+        const str = decoded.toString("utf8");
+        const isLua = /\b(local|function|game|workspace)\b/.test(str);
+        push(`decoded_${n + 1}.${isLua ? "lua" : "txt"}`, decoded);
+      } catch {}
+    }
+  } catch {}
+
+  // ```lua fences sometimes inside HTML text
+  try {
+    const re = /```(?:lua|luau)?\s*([\s\S]*?)```/gi;
+    let m;
+    while ((m = re.exec(html))) {
+      const body = m[1].trim();
+      if (body.length < 8) continue;
+      push(`fenced_${n + 1}.lua`, body);
+    }
+  } catch {}
+
+  // loadstring(...) blobs as standalone files
+  try {
+    const re = /loadstring\s*\(\s*([`'"])([\s\S]*?)\1\s*\)\s*\(\s*\)/gi;
+    let m;
+    while ((m = re.exec(html))) {
+      const body = m[2].trim();
+      if (body.length < 8) continue;
+      push(`loadstring_${n + 1}.lua`, body);
+    }
+  } catch {}
+
+  // Always keep original HTML too so nothing is lost
+  const base = (sourceName && String(sourceName).replace(/[^\w.\-]+/g, "_")) || "export.html";
+  push(base.endsWith(".html") || base.endsWith(".htm") ? base : base + ".html", Buffer.from(html, "utf8"));
+
+  // Dedupe by content hash (simple length+prefix)
+  const seen = new Set();
+  const unique = [];
+  for (const f of files) {
+    const key = `${f.data.length}:${f.data.slice(0, 64).toString("hex")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(f);
+  }
+  return unique.length ? unique : [{ name: base, data: Buffer.from(html, "utf8") }];
+}
+
 // ============================================================
 // VARIABLE RENAMER — readable renamer (renames only generic/ambiguous names)
 // ============================================================
@@ -2942,30 +3035,31 @@ client.on("interactionCreate", async interaction => {
     let sent = 0, failed = 0;
     const startAt = Date.now();
     let lastEdit = 0;
+    // Target rate: 40 messages per 3 seconds (~75ms interval)
+    const intervalMs = Math.max(20, Math.floor(3000 / 40));
 
     while (Date.now() - startAt < totalMs) {
-      try {
-        const res = await fetch(webhookUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: spamMsg })
-        });
+      // fire request without blocking the full rate on network (still count results)
+      fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: spamMsg })
+      }).then(res => {
         if (res.status === 204 || res.status === 200) sent++;
-        else if (res.status === 429) {
-          try {
-            const rl = await res.json();
-            await new Promise(r => setTimeout(r, Math.min((rl.retry_after || 0.5) * 1000, 1000)));
-          } catch {}
-        } else failed++;
-      } catch { failed++; }
+        else if (res.status === 429) failed++;
+        else failed++;
+      }).catch(() => { failed++; });
 
       const left = totalMs - (Date.now() - startAt);
       if (Date.now() - lastEdit > 900 || left <= 0) {
         lastEdit = Date.now();
         await interaction.editReply({ embeds: [progressEmbed(Math.max(0, left))] }).catch(() => {});
       }
-      await new Promise(r => setTimeout(r, 40));
+      await new Promise(r => setTimeout(r, intervalMs));
     }
+
+    // let in-flight requests settle briefly
+    await new Promise(r => setTimeout(r, 200));
 
     let deleted = false;
     if (deleteAfter) {
@@ -2975,25 +3069,10 @@ client.on("interactionCreate", async interaction => {
       } catch {}
     }
 
-    const doneEmbed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("Webhook Raid Complete")
-      .setDescription(
-        `✅ **Sent:** ${sent}\n❌ **Failed:** ${failed}\n🌐 **Status:** Done` +
-        (deleteAfter ? `\n🗑️ **Webhook deleted:** ${deleted ? "Yes" : "No"}` : "")
-      )
-      .setFooter({ text: `Request by @${interaction.user.username}│Webhook Spammer`, iconURL: avatarURL });
-
-    const removeRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("whs_remove")
-        .setLabel("Remove")
-        .setStyle(ButtonStyle.Danger)
-    );
-    const resultMsg = await interaction.editReply({ embeds: [doneEmbed], components: [removeRow] }).catch(() => null);
-    if (resultMsg) {
-      whsWebhookUrls.set(resultMsg.id, webhookUrl);
-    }
+    // No "Webhook Raid Complete" embed — just clear the progress message
+    await interaction.deleteReply().catch(async () => {
+      await interaction.editReply({ content: "\u200b", embeds: [], components: [] }).catch(() => {});
+    });
     return;
   }
 
@@ -3838,8 +3917,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const buf = await downloadURL(sourceFile.url);
       let files;
       if (isHtmlFile(sourceFile.name, sourceFile.contentType)) {
-        // Standalone HTML file — export it directly
-        files = [{ name: path.basename(sourceFile.name || "export.html"), data: buf }];
+        // Standalone HTML — extract ALL embedded scripts / code / base64 + original
+        files = extractFilesFromHtml(buf, sourceFile.name);
       } else {
         files = extractFilesFromZip(buf);
       }
@@ -4171,8 +4250,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         .setTitle("Script Copy")
         .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
         .setFooter({ text: `Request by @${msg.author.username}│Prince Loader`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-      await msg.channel.send({
-        content: `<@${msg.author.id}> Here is the script bro!`,
+      const tokLine = isBuyerUser ? "" : tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens);
+      pendingTokenLine.delete(String(msg.author.id));
+      await replyUser(msg, {
+        content: `<@${msg.author.id}> Here you go!` + tokLine,
         embeds: [embed]
       }).catch(() => {});
     } catch (e) {
@@ -4321,8 +4402,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const buf = await downloadURL(sourceFile.url);
       let files;
       if (isHtmlFile(sourceFile.name, sourceFile.contentType)) {
-        // Standalone HTML file — export it directly (single-file carousel)
-        files = [{ name: path.basename(sourceFile.name || "export.html"), data: buf }];
+        // Standalone HTML — extract ALL embedded scripts / code / base64 + original
+        files = extractFilesFromHtml(buf, sourceFile.name);
       } else {
         files = extractFilesFromZip(buf);
       }
