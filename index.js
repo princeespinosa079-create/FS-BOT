@@ -152,15 +152,17 @@ function formatTokenWait(ms) {
 }
 
 function tokenWaitEmbed(waitUntil) {
+  const left = Math.max(0, (waitUntil || getNextMidnightPHMs()) - Date.now());
   return new EmbedBuilder()
     .setColor(0xED4245)
     .setTitle("Input Error")
-    .setDescription(`You need to wait ${formatTokenWait(waitUntil - Date.now())}`);
+    .setDescription(`You need to wait ${formatTokenWait(left)}\n-# Token reset at 12:00 AM PH time`);
 }
 
 function tokenLeftLine(tokensLeft, unlimited) {
   if (unlimited) return "-# You have Unlimited Tokens left.";
-  return `-# You have ${tokensLeft} Tokens left.`;
+  const resetLeft = Math.max(0, getNextMidnightPHMs() - Date.now());
+  return `-# You have ${tokensLeft} Tokens left. · Resets in ${formatTokenWait(resetLeft)} (PH)`;
 }
 
 /** Consume 1 token for regular users. Buyers/owners unlimited. Daily reset 12 AM PH. */
@@ -294,7 +296,8 @@ const pendingTokenLine = new Map(); // userId -> "-# You have XX Tokens left." (
 /** Token line for message TEXT only (never embed). Empty for premium. */
 function tokensResultSuffix(isBuyerUser, tokensLeft) {
   if (isBuyerUser || tokensLeft === null || tokensLeft === undefined) return "";
-  return `\n-# You have ${tokensLeft} Tokens left.`;
+  const resetLeft = Math.max(0, getNextMidnightPHMs() - Date.now());
+  return `\n-# You have ${tokensLeft} Tokens left. · Resets in ${formatTokenWait(resetLeft)} (PH)`;
 }
 function checkCommandCooldown(userId, cmd, isBuyerUser) {
   const free = TOKEN_FREE_CMDS.has(cmd);
@@ -770,6 +773,8 @@ function isReplyingToFile(msg) {
 /** True if this reply is an error / tips / fail / loading — never attach tokens left */
 function isErrorPayload(body) {
   const contentStr = typeof body.content === "string" ? body.content : "";
+  // Loading / processing messages — never put tokens on these
+  if (/⏳|uploading|processing|renaming|cleaning|fetching/i.test(contentStr)) return true;
   const errRe = /❌|no found for that|not found|failed:|upload failed|scan failed|forward failed|invalid key|owner only|usage:|put (?:file|id|a file)|you're on|need to wait|buy access|buy premium|join in main server|reply to a file|already got a key|already redeem|can't send|not yours|adopt the Server Tag|max \d+ id|wrong, try|empty response|rate limited|input error|dumbass/i;
   if (errRe.test(contentStr)) return true;
   if (body.embeds && body.embeds.length) {
@@ -792,7 +797,16 @@ function replyUser(message, payload) {
   try {
     const line = pendingTokenLine.get(String(message.author?.id));
     if (line) {
-      if (isErrorPayload(body)) {
+      const contentStr = typeof body.content === "string" ? body.content : "";
+      const isLoading = /⏳|uploading|processing|renaming|cleaning|fetching/i.test(contentStr)
+        || (body.embeds && body.embeds.some(emb => {
+          const d = emb?.data || emb;
+          return /processing|fetching|deleting|loading|renaming/i.test(String(d?.title || ""))
+            || /⏳/.test(String(d?.description || "")) || /⏳/.test(String(d?.title || ""));
+        }));
+      if (isLoading) {
+        // keep pendingTokenLine for the real result message
+      } else if (isErrorPayload(body)) {
         pendingTokenLine.delete(String(message.author.id));
       } else {
         if (body.content) body.content = `${body.content}\n${line}`;
@@ -1695,11 +1709,17 @@ function cleanLuaScript(text) {
     // 4. DELETE junk/obfuscation lines (anti-tamper, Luraph-style)
     if (isJunkLine(t)) continue;
 
-    // 5. DELETE scrambled/garbage (not Lua)
-    if (!isLuaLine(t) && t.length > 3) {
-      if (!/\s/.test(t) && t.length > 20 && !/^https?:\/\//.test(t)) {
-        if (!isSafeUrl(t) && !/^["'].*["']$/.test(t)) continue;
+    // 5. DELETE scrambled/garbage / title banners (not Lua)
+    // e.g. "FA4E7XX SPEED BYPASS - UI (Orange Edition)" — no -- needed
+    if (!isLuaLine(t) && t.length > 5 && !/^https?:\/\//.test(t) && !isSafeUrl(t)) {
+      // No Lua operators/statements → treat as prose/header and drop
+      if (!/[=(){}\[\];]/.test(t) && !/\b(local|function|end|then|else|elseif|return|for|while|do|repeat|until|and|or|not|true|false|nil|game|workspace|script|Instance|Vector3|CFrame|Color3|UDim2|Enum|task|pcall|require|loadstring)\b/i.test(t)) {
+        continue;
       }
+      // Compact garbage (no spaces, long)
+      if (!/\s/.test(t) && t.length > 20 && !/^["'].*["']$/.test(t)) continue;
+      // Title-style banners with BYPASS / EDITION / HUB / SPEED UI etc.
+      if (/\b(BYPASS|EDITION|HUB|SPEED\s*BYPASS|ORANGE\s*EDITION|VISION\s*HUB)\b/i.test(t)) continue;
     }
 
     // 6. Remove inline comments (preserve indent)
@@ -1906,6 +1926,8 @@ function removeDangerousLines(code) {
     if (/^[-•*]\s*.{0,80}\b(Background\s*ID|rbxassetid|VISION\s*HUB|100k|72k)\b/i.test(line)) return false;
     if (/^(PC|Mobile)\s*=\s*\d+k/i.test(line)) return false;
     if (/^Background\s*ID\s*:/i.test(line) || /^Titre\s*:/i.test(line)) return false;
+    // Title banners without Lua (e.g. FA4E7XX SPEED BYPASS - UI (Orange Edition))
+    if (/\b(BYPASS|EDITION|VISION\s*HUB|SPEED\s*BYPASS)\b/i.test(line) && !/\b(local|function|if|for|while|return|game)\b/i.test(line)) return false;
     if (/\/api\/v[0-9]+\/track|\/log\?|\/grab\?/i.test(line)) return false;
     if (/ip\s*[=:]\s*["']?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/i.test(line)) return false;
     if (/(?:new\s+)?WebSocket\s*\(/i.test(line)) return false;
@@ -2202,7 +2224,10 @@ Your ONLY job:
    - Background ID: 110054661335618
    - Titre : Image 83083712996345 (remplace le texte VISION HUB)
    and any similar dash-bullet config notes that are not Lua code
-6. Remove empty leftover blank lines (collapse 3+ newlines to 2)
+6. Remove title/banner lines that are NOT Lua even without -- or -, e.g.:
+   FA4E7XX SPEED BYPASS - UI (Orange Edition)
+   any all-caps product name / UI edition labels with no Lua statements
+7. Remove empty leftover blank lines (collapse 3+ newlines to 2)
 
 DO NOT:
 - Deobfuscate, rename variables, reconstruct control flow, or rewrite logic
@@ -4287,6 +4312,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const maxUploadSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
     const maxUploadLabel = isBuyerUser ? "1MB" : "200KB";
     if (file.size > maxUploadSize) { replyUser(msg, `❌ max is ${maxUploadLabel} lol.`).catch(() => {}); return; }
+    // Tokens only on final result — not on loading
+    const savedTokLine = pendingTokenLine.get(String(msg.author.id)) || "";
+    pendingTokenLine.delete(String(msg.author.id));
     const sentMsg = await replyUser(msg, "⏳ Uploading...").catch(() => {});
     try {
       const res = await fetch(file.url);
@@ -4342,7 +4370,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         .setTitle("Script Copy")
         .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
         .setFooter({ text: `Request by @${msg.author.username}│Prince Loader`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-      const tokLine = isBuyerUser ? "" : tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens);
+      const tokLine = isBuyerUser
+        ? ""
+        : (tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens) || (savedTokLine ? `\n${savedTokLine}` : ""));
       pendingTokenLine.delete(String(msg.author.id));
       await replyUser(msg, {
         content: `<@${msg.author.id}> Here you go!` + tokLine,
