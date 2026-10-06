@@ -97,6 +97,40 @@ let keyStore = readJSON(KEYS_FILE, { keys: [] });
 if (!Array.isArray(keyStore.keys)) keyStore.keys = [];
 
 // ============================================================
+// BLACKLIST (owner-managed user ids blocked from commands)
+// ============================================================
+const BLACKLIST_FILE = path.join(DATA_DIR, "blacklist.json");
+let blacklistStore = readJSON(BLACKLIST_FILE, { users: [] });
+if (!blacklistStore || typeof blacklistStore !== "object") blacklistStore = { users: [] };
+if (!Array.isArray(blacklistStore.users)) blacklistStore.users = [];
+const saveBlacklist = () => writeJSON(BLACKLIST_FILE, blacklistStore);
+function isBlacklisted(userId) {
+  return blacklistStore.users.includes(String(userId));
+}
+function blacklistAdd(userId) {
+  const id = String(userId);
+  if (!blacklistStore.users.includes(id)) {
+    blacklistStore.users.push(id);
+    saveBlacklist();
+    return true;
+  }
+  return false;
+}
+function blacklistRemove(userId) {
+  const id = String(userId);
+  const before = blacklistStore.users.length;
+  blacklistStore.users = blacklistStore.users.filter(u => u !== id);
+  if (blacklistStore.users.length !== before) {
+    saveBlacklist();
+    return true;
+  }
+  return false;
+}
+function blacklistList() {
+  return [...blacklistStore.users];
+}
+
+// ============================================================
 // TOKEN SYSTEM (regular users — max 10, daily refill when empty)
 // Premium / Owner = unlimited
 // ============================================================
@@ -161,8 +195,7 @@ function tokenWaitEmbed(waitUntil) {
 
 function tokenLeftLine(tokensLeft, unlimited) {
   if (unlimited) return "-# You have Unlimited Tokens left.";
-  const resetLeft = Math.max(0, getNextMidnightPHMs() - Date.now());
-  return `-# You have ${tokensLeft} Tokens left. · Resets in ${formatTokenWait(resetLeft)} (PH)`;
+  return `-# You have ${tokensLeft} Tokens left.`;
 }
 
 /** Consume 1 token for regular users. Buyers/owners unlimited. Daily reset 12 AM PH. */
@@ -296,8 +329,7 @@ const pendingTokenLine = new Map(); // userId -> "-# You have XX Tokens left." (
 /** Token line for message TEXT only (never embed). Empty for premium. */
 function tokensResultSuffix(isBuyerUser, tokensLeft) {
   if (isBuyerUser || tokensLeft === null || tokensLeft === undefined) return "";
-  const resetLeft = Math.max(0, getNextMidnightPHMs() - Date.now());
-  return `\n-# You have ${tokensLeft} Tokens left. · Resets in ${formatTokenWait(resetLeft)} (PH)`;
+  return `\n-# You have ${tokensLeft} Tokens left.`;
 }
 function checkCommandCooldown(userId, cmd, isBuyerUser) {
   const free = TOKEN_FREE_CMDS.has(cmd);
@@ -558,6 +590,11 @@ async function syncAllPrinceRoles() {
 // Regular → status + channel + guild checks
 // ============================================================
 async function checkRegularPermission(msg, needsFileReply = false) {
+  try {
+    if (isBlacklisted(msg.author?.id) && !isOwner(msg.author?.id)) {
+      return { allowed: false, reason: null, silent: true, isBuyer: false, blacklisted: true };
+    }
+  } catch {}
   try {
   // Owner → full bypass, can use ANYWHERE
   if (isOwner(msg.author.id)) {
@@ -1032,7 +1069,17 @@ function isImage(name, contentType) {
 }
 function isAllowedFileType(name, contentType) {
   const e = ext(name);
+  // .zip is scanned into library; only owner may .get / download zip by id
   return (e === "txt" || e === "lua" || e === "zip" || String(contentType || "").toLowerCase().includes("zip")) && !isImage(name, contentType);
+}
+/** True if this library file may be retrieved by userId (.zip = owner only) */
+function canGetLibraryFile(file, userId) {
+  if (!file) return false;
+  if (isOwner(userId)) return true;
+  const name = file.filename || file.name || "";
+  const ct = file.contentType || null;
+  if (isZipFile(name, ct)) return false;
+  return true;
 }
 function isZipFile(name, contentType) {
   const e = ext(name);
@@ -2475,6 +2522,23 @@ const commands = [
   new SlashCommandBuilder()
     .setName("finderpanel")
     .setDescription("Post Finder Source Panel — Owner Only.")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("blacklist")
+    .setDescription("Manage command blacklist — Owner Only.")
+    .addStringOption(o => o
+      .setName("mode")
+      .setDescription("Add, Remove, or List")
+      .setRequired(true)
+      .addChoices(
+        { name: "Add", value: "add" },
+        { name: "Remove", value: "remove" },
+        { name: "List", value: "list" }
+      ))
+    .addUserOption(o => o
+      .setName("user")
+      .setDescription("User to add/remove (required for Add/Remove)")
+      .setRequired(false))
     .toJSON()
 ].map(c => c);
 async function registerCommands() {
@@ -3068,6 +3132,10 @@ client.on("interactionCreate", async interaction => {
     for (const id of args) {
       const file = getFile(id);
       if (!file) { notFound.push(id); continue; }
+      if (!canGetLibraryFile(file, interaction.user.id)) {
+        notFound.push(id);
+        continue;
+      }
       const freshUrl = await getFreshUrl(file);
       filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
     }
@@ -3279,6 +3347,42 @@ client.on("interactionCreate", async interaction => {
       await interaction.editReply({ content: "✅ Finder Source Panel posted." });
       return;
     }
+    if (interaction.commandName === "blacklist") {
+      const mode = (interaction.options.getString("mode") || "").toLowerCase();
+      const targetUser = interaction.options.getUser("user");
+      if (mode === "list") {
+        const list = blacklistList();
+        if (!list.length) {
+          await interaction.editReply({ content: "📋 Blacklist is empty." });
+          return;
+        }
+        const lines = list.slice(0, 50).map((id, i) => `${i + 1}. <@${id}> (\`${id}\`)`);
+        const extra = list.length > 50 ? `\n...and ${list.length - 50} more` : "";
+        await interaction.editReply({ content: `📋 **Blacklist (${list.length}):**\n${lines.join("\n")}${extra}` });
+        return;
+      }
+      if (mode !== "add" && mode !== "remove") {
+        await interaction.editReply({ content: "❌ mode must be Add, Remove, or List." });
+        return;
+      }
+      if (!targetUser) {
+        await interaction.editReply({ content: "❌ pick a user for Add/Remove." });
+        return;
+      }
+      if (targetUser.id === OWNER_ID || isOwner(targetUser.id)) {
+        await interaction.editReply({ content: "❌ can't blacklist the owner." });
+        return;
+      }
+      if (mode === "add") {
+        const ok = blacklistAdd(targetUser.id);
+        await interaction.editReply({ content: ok ? `✅ blacklisted <@${targetUser.id}>.` : `⚠️ <@${targetUser.id}> is already blacklisted.` });
+        return;
+      }
+      // remove
+      const ok = blacklistRemove(targetUser.id);
+      await interaction.editReply({ content: ok ? `✅ removed <@${targetUser.id}> from blacklist.` : `⚠️ <@${targetUser.id}> was not blacklisted.` });
+      return;
+    }
   } catch (e) {
     console.error("❌ Interaction:", e);
     const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
@@ -3290,6 +3394,8 @@ client.on("interactionCreate", async interaction => {
 // ============================================================
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
+  // Blacklisted users (except owner) — silent ignore all commands
+  if (msg.content?.trim()?.startsWith(".") && isBlacklisted(msg.author.id) && !isOwner(msg.author.id)) return;
 
   // ── Live scan: auto-index new uploads in watched channels (no .scan needed) ──
   try {
@@ -4514,6 +4620,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
     const sourceFile = attachments[0];
+    if (isZipFile(sourceFile.name, sourceFile.contentType) && !isOwner(msg.author.id)) {
+      replyUser(msg, "❌ .zip is owner only, dumbass.").catch(() => {});
+      return;
+    }
     const maxInfo = getMaxFileSize(msg.guild);
     if (sourceFile.size > maxInfo.size) {
       replyUser(msg, `❌ max file is ${maxInfo.label}, lol.`).catch(() => {});
@@ -4710,10 +4820,17 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     for (const id of args) {
       const file = getFile(id);
       if (!file) { notFound.push(id); continue; }
+      if (!canGetLibraryFile(file, msg.author.id)) {
+        notFound.push(id);
+        continue;
+      }
       const freshUrl = await getFreshUrl(file);
       filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
     }
-    if (!filesToSend.length) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
+    if (!filesToSend.length) {
+      replyUser(msg, "❌ your id is wrong, try find working id, dumbass.\n-# .zip IDs are owner only.").catch(() => {});
+      return;
+    }
     // Send in batches of 10 (Discord file limit per message)
     for (let i = 0; i < filesToSend.length; i += 10) {
       const batch = filesToSend.slice(i, i + 10);
@@ -4866,6 +4983,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     // Otherwise treat as file ID from library
     const file = getFile(arg);
     if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
+    if (!canGetLibraryFile(file, msg.author.id)) {
+      replyUser(msg, "❌ .zip files are owner only, dumbass.").catch(() => {});
+      return;
+    }
     const freshUrl = await getFreshUrl(file);
     const fileUrl = freshUrl || file.url;
     const fileAttachment = { attachment: fileUrl, name: file.filename || "file.lua" };
