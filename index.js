@@ -827,6 +827,75 @@ function isErrorPayload(body) {
   }
   return false;
 }
+
+/** Discord Components V2 flag (1<<15). Fallback numeric if djs build lacks enum. */
+const IS_COMPONENTS_V2 = (MessageFlags && MessageFlags.IsComponentsV2 != null)
+  ? MessageFlags.IsComponentsV2
+  : 32768;
+/** Accent used in renamer V2 containers (matches discohook sample) */
+const RENAME_V2_ACCENT = 6449257;
+
+/** Renamer loading message — Components V2 only */
+async function sendRenameLoading(message) {
+  const payload = {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: RENAME_V2_ACCENT,
+      components: [
+        { type: 10, content: "### Renaming...\n⏳ Processing..." }
+      ]
+    }],
+    allowedMentions: { repliedUser: true, users: [message.author.id] }
+  };
+  try {
+    return await message.reply(payload);
+  } catch (e) {
+    console.warn("⚠️ Components V2 loading fallback:", e.message?.slice(0, 120));
+    return message.reply({ content: "### Renaming...\n⏳ Processing..." }).catch(() => null);
+  }
+}
+
+/**
+ * Renamer result — Components V2:
+ * container (preview text) + sibling file component (type 13) + attachment
+ */
+async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName, footerLine }) {
+  const safeName = String(fileName || "file.lua").replace(/[^\w.\-]+/g, "_");
+  const file = new AttachmentBuilder(fileBuffer, { name: safeName });
+  let body = String(previewMarkdown || "### File Preview").slice(0, 3800);
+  if (footerLine) body += "\n\n" + String(footerLine).slice(0, 200);
+
+  const v2Payload = {
+    flags: IS_COMPONENTS_V2,
+    files: [file],
+    components: [
+      {
+        type: 17,
+        accent_color: RENAME_V2_ACCENT,
+        components: [
+          { type: 10, content: body }
+        ]
+      },
+      {
+        type: 13,
+        file: { url: `attachment://${safeName}` }
+      }
+    ],
+    allowedMentions: { repliedUser: true, users: [message.author.id] }
+  };
+  try {
+    return await message.reply(v2Payload);
+  } catch (e) {
+    console.warn("⚠️ Components V2 rename fallback:", e.message?.slice(0, 120));
+    return message.reply({
+      content: body,
+      files: [file],
+      allowedMentions: { repliedUser: true, users: [message.author.id] }
+    });
+  }
+}
+
 function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
@@ -1728,21 +1797,25 @@ function cleanLuaScript(text) {
     var t = originalLine.trim();
     if (!t) { cleaned.push(""); continue; }
 
-    // 1. DELETE comment lines (keep if safe discord invite)
-    //    -- full line, --[[ blocks, watermarks / leak credits, // style
-    //    meta headers like: - PC = 100k / Mobile = 72k, - Background ID: ..., - Titre : ...
+    // 1. DELETE comment / credit / banner lines (NOT real Lua)
+    //    e.g. "By OR's | Mogged | https://discord.gg/..." even without -- or -
     if (t.indexOf("--") === 0 || t.indexOf("--[[") === 0 || t.indexOf("--[=") === 0) {
-      if (!isSafeUrl(t)) continue;
+      // pure invite-only comment can drop too (rewritten elsewhere if needed)
+      continue;
     }
     if (/^\[?\s*(LEAKED\s+BY|GOATED|GRABBED\s+BY|COPIED\s+BY|MADE\s+BY|CREDITS?\s*:)/i.test(t)) continue;
     if (/^\s*\/\//.test(t)) continue;
     if (/^\s*\/\*/.test(t) || /^\s*\*\//.test(t)) continue;
-    if (/LEAKED\s+BY|\[\s*GOATED\s*\]|GUI\s*Copier/i.test(t) && t.indexOf("--") !== -1) continue;
-    // Bullet / dash meta notes (not Lua code)
+    if (/LEAKED\s+BY|\[\s*GOATED\s*\]|GUI\s*Copier/i.test(t)) continue;
+    // Credit / hub watermarks (By X | Mogged | discord.gg/...)
+    if (/\bMogged\b/i.test(t) && !/\b(local|function|game|workspace)\b/i.test(t)) continue;
+    if (/^By\s+/i.test(t) && !/\b(local|function|game|workspace)\b/i.test(t)) continue;
+    if (/\|/.test(t) && /discord\.(gg|com\/invite)\//i.test(t) && !/\b(local|function|if|for|while|return)\b/i.test(t)) continue;
+    if (/discord\.(gg|com\/invite)\//i.test(t) && !/[=(){}]/.test(t) && !/\b(local|function|HttpGet|loadstring|game)\b/i.test(t)) continue;
+    // Bullet / dash meta notes
     if (/^[-•*]\s*(PC|Mobile|Background\s*ID|Titre|Title|Image|Note|Info|Config|Setting)\b/i.test(t)) continue;
     if (/^[-•*]\s*.{0,80}\b(Background\s*ID|rbxassetid|remplace|VISION\s*HUB|100k|72k)\b/i.test(t)) continue;
     if (/^[-•*]\s*[A-Za-z][^:=]{0,40}\s*[:=]/.test(t) && !/\b(local|function|if|for|while|return|game|workspace)\b/.test(t)) continue;
-    // Plain prose header lines before code (no Lua keywords)
     if (/^(PC|Mobile)\s*=\s*\d+k/i.test(t)) continue;
     if (/^Background\s*ID\s*:/i.test(t)) continue;
     if (/^Titre\s*:/i.test(t)) continue;
@@ -1790,10 +1863,11 @@ function cleanLuaScript(text) {
     if (!lineToKeep.trim() || lineToKeep.trim().length < 3) continue;
     if (/^[\s();,{}]+$/.test(lineToKeep.trim())) continue;
 
-    // 8. Change ALL print/warn to leak message
+    // 8. Only rewrite standalone watermark prints — do NOT touch real logic prints
     try {
-      lineToKeep = lineToKeep.replace(/\bprint\s*\([^)]*\)/g, 'print("prince")');
-      lineToKeep = lineToKeep.replace(/\bwarn\s*\([^)]*\)/g, 'print("prince")');
+      if (/^\s*print\s*\(/.test(lineToKeep) && /LEAKED|GOATED|discord\.gg|Mogged|OR's/i.test(lineToKeep)) {
+        lineToKeep = 'print("prince")';
+      }
     } catch {}
 
     // 9. Replace Discord invites
@@ -1975,6 +2049,10 @@ function removeDangerousLines(code) {
     if (/^Background\s*ID\s*:/i.test(line) || /^Titre\s*:/i.test(line)) return false;
     // Title banners without Lua (e.g. FA4E7XX SPEED BYPASS - UI (Orange Edition))
     if (/\b(BYPASS|EDITION|VISION\s*HUB|SPEED\s*BYPASS)\b/i.test(line) && !/\b(local|function|if|for|while|return|game)\b/i.test(line)) return false;
+    // Credit lines: By X | Mogged | discord.gg/...
+    if (/\bMogged\b/i.test(line) && !/\b(local|function|game)\b/i.test(line)) return false;
+    if (/^By\s+/i.test(line) && !/\b(local|function|game)\b/i.test(line)) return false;
+    if (/discord\.(gg|com\/invite)\//i.test(line) && !/[=(){}]/.test(line) && !/\b(local|function|HttpGet|loadstring|game)\b/i.test(line)) return false;
     if (/\/api\/v[0-9]+\/track|\/log\?|\/grab\?/i.test(line)) return false;
     if (/ip\s*[=:]\s*["']?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/i.test(line)) return false;
     if (/(?:new\s+)?WebSocket\s*\(/i.test(line)) return false;
@@ -2408,82 +2486,90 @@ function goofyscator(source, settings) {
   return out;
 }
 // ============================================================
-// LUA OBFUSCATOR (Prince Obfuscator — Luarmor/Luraph style)
+// LUA OBFUSCATOR (Prince Obfuscator — Roblox/Luau executable protection)
 // ============================================================
 function obfuscateLua(source) {
   if (!source || typeof source !== "string") return source;
-  const crypto = require("crypto");
-  
-  const XOR_KEY = crypto.randomBytes(16).toString("hex");
-  const randStr = (len) => crypto.randomBytes(len).toString("hex").slice(0, len);
-  
-  const usedNames = new Set();
+  // Strip UTF8 BOM / normalize newlines — keep logic intact
+  let code = String(source).replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!code) return source;
+
+  // Light local-name scramble (safe identifiers only)
+  const used = new Set();
   const genName = () => {
     let n;
-    do { n = "_" + randStr(6 + Math.floor(Math.random() * 6)); } while (usedNames.has(n));
-    usedNames.add(n);
+    do {
+      n = "_" + crypto.randomBytes(4).toString("hex");
+    } while (used.has(n));
+    used.add(n);
     return n;
   };
-  
-  const encryptStr = (str, key) => {
-    let out = [];
-    for (let i = 0; i < str.length; i++) {
-      out.push(str.charCodeAt(i) ^ key.charCodeAt(i % key.length));
-    }
-    return Buffer.from(new Uint8Array(out)).toString("base64");
-  };
-  
-  // Step 1: Encrypt strings
-  const stringTable = [];
-  let code = source.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'/g, (m) => {
-    const inner = m.slice(1, -1);
-    if (inner.length < 2) return m;
-    const idx = stringTable.length;
-    stringTable.push(encryptStr(inner, XOR_KEY));
-    return genName() + "[" + idx + "]";
-  });
-  
-  // Step 2: Scramble local vars
+  const reserved = new Set([
+    "string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber",
+    "loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error",
+    "warn","print","select","unpack","require","game","workspace","script","bit","bit32","task","Instance",
+    "Vector3","CFrame","Color3","UDim2","Enum","true","false","nil","and","or","not","if","then","else",
+    "elseif","end","for","while","do","repeat","until","return","function","local","in","break","self",
+    "shared","_G","getgenv","getrenv","getsenv","getrawmetatable","setreadonly","newcclosure","checkcaller",
+    "islclosure","getgc","hookfunction","hookmetamethod","newproxy","buffer","utf8","coroutine"
+  ]);
   const varMap = new Map();
-  code = code.replace(/\blocal\s+(function\s+)?([a-zA-Z_]\w*)/g, (m, isFunc, name) => {
-    const reserved = ["string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber","loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error","warn","print","select","unpack","require","game","workspace","script","bit","bit32"];
-    if (reserved.includes(name) || varMap.has(name)) return m;
-    varMap.set(name, genName());
-    return isFunc ? "local function " + varMap.get(name) : "local " + varMap.get(name);
+  code = code.replace(/\blocal\s+(function\s+)?([A-Za-z_][A-Za-z0-9_]*)/g, (m, isFunc, name) => {
+    if (reserved.has(name) || varMap.has(name)) return m;
+    const nn = genName();
+    varMap.set(name, nn);
+    return isFunc ? ("local function " + nn) : ("local " + nn);
   });
-  for (const [old, n] of varMap) {
+  for (const [old, nn] of varMap) {
     const re = new RegExp("\\b" + old.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "g");
-    code = code.replace(re, n);
+    code = code.replace(re, nn);
   }
-  
-  // Step 3: Encode entire code as base64 (simple, works in Roblox)
-  const encoded = Buffer.from(code, "utf8").toString("base64");
-  
-  // Step 4: Generate VM variable names
-  const v_key = genName(), v_tab = genName(), v_dec = genName();
-  const v_b64 = genName(), v_dec2 = genName(), v_env = genName();
-  const v_fn = genName(), v_s = genName(), v_k = genName(), v_r = genName();
-  const v_i = genName();
-  
-  const tableStr = "{" + stringTable.map(s => '"' + s + '"').join(",") + "}";
-  
-  // Build Roblox-compatible output
-  // Uses bit32.bxor, proper base64 decode via HttpService pattern
-  const header = "-- This file was generated using Prince Obfuscator\n";
-  
-  const output = header +
-    "local " + v_key + '="' + XOR_KEY + '"\n' +
-    "local " + v_tab + "=" + tableStr + "\n" +
-    "local " + v_dec + "=function(" + v_s + "," + v_k + ")local " + v_r + '=""for ' + v_i + "=1,#" + v_s + "do " + v_r + "=" + v_r + "..string.char(bit32.bxor(" + v_s + ":byte(" + v_i + ")," + v_k + ":byte((" + v_i + "-1)%" + "#" + v_k + "+1)))end return " + v_r + " end\n" +
-    "local " + v_b64 + '="' + encoded + '"\n' +
-    "local " + v_dec2 + "=function(s)local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'local r=''s=s:gsub('[^A-Za-z0-9%+%/]','')for i=1,#s,4 do local a,b,c,d=b:find(s:sub(i,i)),b:find(s:sub(i+1,i+1))or 1,b:find(s:sub(i+2,i+2))or 1,b:find(s:sub(i+3,i+3))or 1 a=a-1 b=b-1 c=c-1 d=d-1 r=r..string.char(bit32.band(bit32.rshift(bit32.lshift(a,2),2)+bit32.rshift(b,4),255)) if s:sub(i+2,i+2)~='=' then r=r..string.char(bit32.band(bit32.lshift(bit32.band(b,15),4)+bit32.rshift(c,2),255)) end if s:sub(i+3,i+3)~='=' then r=r..string.char(bit32.band(bit32.lshift(bit32.band(c,3),6)+d,255)) end end return r end\n" +
-    "local " + v_env + "=setmetatable({},{__index=function(t,k)return _G[k]end})\n" +
-    "v_env[" + v_dec + "]=" + v_dec + "\n" +
-    "local " + v_fn + "=loadstring(" + v_dec2 + "(" + v_b64 + "))\n" +
-    "if " + v_fn + " then setfenv(" + v_fn + "," + v_env + ") return " + v_fn + "(...) end";
-  
-  return output;
+
+  // XOR + base64 payload (bit32.bxor works in Roblox Luau)
+  const keyBytes = crypto.randomBytes(12);
+  const plain = Buffer.from(code, "utf8");
+  const xored = Buffer.alloc(plain.length);
+  for (let i = 0; i < plain.length; i++) xored[i] = plain[i] ^ keyBytes[i % keyBytes.length];
+  const b64 = xored.toString("base64");
+  const keyLua = Array.from(keyBytes).join(",");
+
+  const vK = genName(), vB = genName(), vD = genName(), vS = genName(), vO = genName();
+  const vI = genName(), vF = genName(), vT = genName(), vC = genName(), vR = genName();
+
+  // Chunk b64 so long strings stay safe (no ]] in base64)
+  // Pure Luau: bit32.bxor + loadstring/load (executor). No setfenv.
+  const out = [
+    `-- Prince Obfuscator | protected`,
+    `local ${vK}={${keyLua}}`,
+    `local ${vB}="${b64}"`,
+    `local ${vD}=function(${vS})`,
+    `local ${vT}="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"`,
+    `${vS}=string.gsub(${vS},"[^"..${vT}.."=]","")`,
+    `local ${vR}={}`,
+    `local ${vC}=0`,
+    `for ${vI}=1,#${vS},4 do`,
+    `local a=string.find(${vT},string.sub(${vS},${vI},${vI}))-1`,
+    `local b=string.find(${vT},string.sub(${vS},${vI}+1,${vI}+1))or 1;b=b-1`,
+    `local c=string.find(${vT},string.sub(${vS},${vI}+2,${vI}+2))or 1;c=c-1`,
+    `local d=string.find(${vT},string.sub(${vS},${vI}+3,${vI}+3))or 1;d=d-1`,
+    `${vC}=${vC}+1;${vR}[${vC}]=string.char(bit32.band(bit32.lshift(a,2)+bit32.rshift(b,4),255))`,
+    `if string.sub(${vS},${vI}+2,${vI}+2)~="="then ${vC}=${vC}+1;${vR}[${vC}]=string.char(bit32.band(bit32.lshift(bit32.band(b,15),4)+bit32.rshift(c,2),255))end`,
+    `if string.sub(${vS},${vI}+3,${vI}+3)~="="then ${vC}=${vC}+1;${vR}[${vC}]=string.char(bit32.band(bit32.lshift(bit32.band(c,3),6)+d,255))end`,
+    `end`,
+    `return table.concat(${vR})`,
+    `end`,
+    `local ${vS}=${vD}(${vB})`,
+    `local ${vO}={}`,
+    `for ${vI}=1,#${vS} do`,
+    `${vO}[${vI}]=string.char(bit32.bxor(string.byte(${vS},${vI}),${vK}[((${vI}-1)%#${vK})+1]))`,
+    `end`,
+    `local ${vF}=(loadstring or load)(table.concat(${vO}))`,
+    `if ${vF} then return ${vF}() end`,
+    ``
+  ].join("\n");
+  return out;
 }
+
 
 
 
@@ -4736,31 +4822,27 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
     
-    // Process immediately — remove comments, IP loggers, script loaders only (no panel)
-    const loadingEmbed = new EmbedBuilder()
-      .setColor(GRAY_COLOR)
-      .setTitle("Renaming...")
-      .setDescription("⏳ Processing...");
-    const loadingMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
+    // Process immediately — Components V2 loading
+    const loadingMsg = await sendRenameLoading(msg).catch(() => null);
     const startTime = Date.now();
     try {
       let text = String(fileContent || "");
       try { text = stripGuiCopierHeader(text); } catch {}
       const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
       const foundUrls = text.match(urlRegex) || [];
-      // Local clean: comments + IP loggers + script loaders (+ expanded junk comment lines)
+      // Local clean only (no AI) — strip credits/comments/IP/loaders, keep executable Lua
       let finalOutput = cleanLuaScript(text);
       finalOutput = removeDangerousLines(finalOutput);
-      // Light AI pass: only strip comments / loaders / IP if API available
-      try {
-        if (typeof openaiClient !== "undefined" && openaiClient) {
-          const cleaned = await aiCleanScript(finalOutput, "cleanup");
-          if (cleaned && cleaned.trim().length > 10) finalOutput = cleaned;
-        }
-      } catch (aiErr) {
-        console.warn("⚠️ rename AI cleanup skipped:", aiErr.message?.slice(0, 80));
-      }
-      finalOutput = removeDangerousLines(finalOutput);
+      // Drop leftover credit lines again after clean
+      finalOutput = finalOutput.split("\n").filter(line => {
+        const t = line.trim();
+        if (!t) return true;
+        if (/\bMogged\b/i.test(t) && !/\b(local|function|game)\b/i.test(t)) return false;
+        if (/^By\s+/i.test(t) && !/\b(local|function|game)\b/i.test(t)) return false;
+        if (/discord\.(gg|com\/invite)\//i.test(t) && !/[=(){}]/.test(t) && !/\b(local|function|HttpGet|loadstring|game)\b/i.test(t)) return false;
+        return true;
+      }).join("\n");
+      try { finalOutput = balanceLuaBlocks(finalOutput); } catch {}
       if (!finalOutput || !finalOutput.trim()) throw new Error("empty output after clean");
 
       const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -4771,24 +4853,21 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
 
       const uniqueUrls = [...new Set(foundUrls)];
       const previewText = buildPreviewText(finalOutput);
-      let description = buildRenamerDescription(previewText);
+      // Components V2 text body (same info as old embed)
+      let previewBody = "### File Preview\n```lua\n" + previewText + "\n```";
       if (uniqueUrls.length > 0) {
         const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
-        description += `\n\n**URL Found:**\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
+        previewBody += "\n\n**URL Found:**\n" + urlList + (uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : "");
       }
-      const resultEmbed = new EmbedBuilder()
-        .setColor(BLURPLE)
-        .setTitle("File Preview")
-        .setDescription(description)
-        .setFooter({ text: `Request by @${msg.author.username}│Prince Renamer`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-      const fixedFile = new AttachmentBuilder(Buffer.from(finalOutput, "utf-8"), { name: outputName });
       const tokLine = isBuyerUser ? "" : tokensResultSuffix(false, cd.tokensLeft ?? peekTokens(msg.author.id, false).tokens);
+      const footerLine = `<@${msg.author.id}> Here you go!\n**Finish in:** \`${finishSec}s\`` + tokLine;
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       pendingTokenLine.delete(String(msg.author.id));
-      await replyUser(msg, {
-        content: `<@${msg.author.id}> Here you go!\n**Finish in:** \`${finishSec}s\`` + tokLine,
-        files: [fixedFile],
-        embeds: [resultEmbed]
+      await sendRenameResult(msg, {
+        previewMarkdown: previewBody,
+        fileBuffer: Buffer.from(finalOutput, "utf-8"),
+        fileName: outputName,
+        footerLine
       }).catch(() => {});
     } catch (e) {
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
