@@ -783,8 +783,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       await syncPrinceRole(msg.member);
     }
   } catch {}
-  if (needsFileReply && !isReplyingToFile(msg)) {
-    return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass.", isBuyer: false };
+  if (needsFileReply) {
+    const hasFile = await isReplyingToFileAsync(msg).catch(() => isReplyingToFile(msg));
+    if (!hasFile && !(msg.attachments?.size > 0)) {
+      return { allowed: false, reason: "❌ reply to a file or forwarded file, dumbass.", isBuyer: false };
+    }
   }
 
   // All checks passed — regular user allowed
@@ -795,18 +798,78 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return { allowed: true, isBuyer: false, error: e.message };
   }
 }
+/** Collect all file attachments from a message (normal + forwarded + V2) */
+function collectMessageAttachments(message) {
+  const out = [];
+  if (!message) return out;
+  try {
+    for (const a of message.attachments?.values?.() || []) out.push(a);
+  } catch {}
+  try {
+    for (const s of message.messageSnapshots?.values?.() || []) {
+      for (const a of s.attachments?.values?.() || []) out.push(a);
+    }
+  } catch {}
+  return out;
+}
+
+/** Fetch the message this one is replying to (cache or API) */
+async function fetchRepliedMessage(msg) {
+  const refId = msg?.reference?.messageId;
+  if (!refId) return null;
+  try {
+    const cached = msg.channel?.messages?.cache?.get(refId);
+    if (cached) return cached;
+  } catch {}
+  try {
+    return await msg.channel.messages.fetch(refId);
+  } catch {
+    return null;
+  }
+}
+
 function isReplyingToFile(msg) {
   const ref = msg.reference?.messageId;
   if (!ref) return false;
-  const channel = msg.channel;
-  const repliedMsg = channel.messages.cache.get(ref);
-  if (!repliedMsg) return false;
-  if (repliedMsg.attachments.size > 0) return true;
-  for (const snap of repliedMsg.messageSnapshots?.values?.() || []) {
-    if (snap.attachments.size > 0) return true;
+  const repliedMsg = msg.channel?.messages?.cache?.get(ref);
+  if (!repliedMsg) {
+    // Not in cache yet — treat as file reply so permission does not Input Error;
+    // command handlers will fetch + resolve attachments themselves.
+    return true;
   }
+  if (collectMessageAttachments(repliedMsg).length > 0) return true;
+  // Components V2 messages may still expose attachments; if flag set, allow
+  try {
+    const flags = Number(repliedMsg.flags?.bitfield ?? repliedMsg.flags ?? 0);
+    if (flags & 32768) return true;
+  } catch {}
   return false;
 }
+
+async function isReplyingToFileAsync(msg) {
+  if (!msg?.reference?.messageId) return false;
+  const repliedMsg = await fetchRepliedMessage(msg);
+  if (!repliedMsg) return false;
+  if (collectMessageAttachments(repliedMsg).length > 0) return true;
+  try {
+    const flags = Number(repliedMsg.flags?.bitfield ?? repliedMsg.flags ?? 0);
+    if (flags & 32768) return collectMessageAttachments(repliedMsg).length > 0 || true;
+  } catch {}
+  return false;
+}
+/** Attachments on this message or the message it replies to (Components V2 safe) */
+async function attachmentsFromMsgOrReply(msg, filterFn = null) {
+  let list = collectMessageAttachments(msg);
+  if (!list.length && msg.reference?.messageId) {
+    try {
+      const refMsg = await fetchRepliedMessage(msg);
+      if (refMsg) list = collectMessageAttachments(refMsg);
+    } catch {}
+  }
+  if (typeof filterFn === "function") list = list.filter(filterFn);
+  return list;
+}
+
 /** True if this reply is an error / tips / fail / loading — never attach tokens left */
 function isErrorPayload(body) {
   const contentStr = typeof body.content === "string" ? body.content : "";
@@ -885,17 +948,15 @@ async function sendRenameLoading(message) {
 
 /**
  * Renamer result — Components V2
- * Order: Here you go → File Preview → URL Found (if any)
- * File component (type 13) is INSIDE the container
+ * File Preview (+ URL Found if any) + file component (type 13) inside container
  */
 async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName, footerLine }) {
   const safeName = String(fileName || "file.lua").replace(/[^\w.\-]+/g, "_");
   const file = new AttachmentBuilder(fileBuffer, { name: safeName });
 
-  // Here you go first, then File Preview / URL Found
   const parts = [];
-  if (footerLine) parts.push(String(footerLine).trim());
   if (previewMarkdown) parts.push(String(previewMarkdown).trim());
+  if (footerLine) parts.push(String(footerLine).trim()); // optional, unused by rename
   const body = parts.join("\n\n").slice(0, 4000) || "### File Preview";
 
   const v2Payload = {
@@ -4241,10 +4302,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   if (/^\.extract(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    let attachments = extractAttachmentsOf(msg);
-    if (!attachments.length && msg.reference?.messageId) {
-      try { const ref = await msg.channel.messages.fetch(msg.reference.messageId); attachments = extractAttachmentsOf(ref); } catch {}
-    }
+    let attachments = await attachmentsFromMsgOrReply(msg, a => isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType));
     if (!attachments.length) { replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {}); return; }
     const sourceFile = attachments[0];
     const maxInfo = getMaxFileSize(msg.guild);
@@ -4508,25 +4566,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    let attachments = [...(msg.attachments?.values() || [])].filter(a => {
+    let attachments = await attachmentsFromMsgOrReply(msg, a => {
       const e = ext(a.name);
       return e === "txt" || e === "lua";
     });
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        for (const a of refMsg.attachments?.values?.() || []) {
-          const e = ext(a.name);
-          if (e === "txt" || e === "lua") attachments.push(a);
-        }
-        for (const s of refMsg.messageSnapshots?.values?.() || []) {
-          for (const a of s.attachments?.values?.() || []) {
-            const e = ext(a.name);
-            if (e === "txt" || e === "lua") attachments.push(a);
-          }
-        }
-      } catch {}
-    }
     if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
     const file = attachments[0];
     const maxUploadSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
@@ -4618,25 +4661,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    let attachments = [...(msg.attachments?.values() || [])].filter(a => {
+    let attachments = await attachmentsFromMsgOrReply(msg, a => {
       const e = ext(a.name);
       return e === "txt" || e === "lua";
     });
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        for (const a of refMsg.attachments?.values?.() || []) {
-          const e = ext(a.name);
-          if (e === "txt" || e === "lua") attachments.push(a);
-        }
-        for (const s of refMsg.messageSnapshots?.values?.() || []) {
-          for (const a of s.attachments?.values?.() || []) {
-            const e = ext(a.name);
-            if (e === "txt" || e === "lua") attachments.push(a);
-          }
-        }
-      } catch {}
-    }
     if (!attachments.length) { replyUser(msg, "❌ upload a file so i can make it obfuscate file.").catch(() => {}); return; }
     const file = attachments[0];
     const maxObfSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
@@ -4722,13 +4750,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     if (isDM && !perm.isBuyer) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
-    let attachments = extractAttachmentsOf(msg);
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        attachments = extractAttachmentsOf(refMsg);
-      } catch {}
-    }
+    let attachments = await attachmentsFromMsgOrReply(msg, a => isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType));
     if (!attachments.length) {
       replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {});
       return;
@@ -4792,25 +4814,15 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    let attachments = [...(msg.attachments?.values() || [])].filter(a => {
+    const scriptFilter = (a) => {
       const e = ext(a.name);
       return e === "lua" || e === "txt" || e === "luau";
-    });
+    };
+    let attachments = collectMessageAttachments(msg).filter(scriptFilter);
     if (!attachments.length && msg.reference?.messageId) {
       try {
-        const refMsg = await msg.channel.messages.fetch(msg.reference.messageId);
-        const all = [];
-        for (const a of refMsg.attachments?.values?.() || []) {
-          const e = ext(a.name);
-          if (e === "lua" || e === "txt" || e === "luau") all.push(a);
-        }
-        for (const s of refMsg.messageSnapshots?.values?.() || []) {
-          for (const a of s.attachments?.values?.() || []) {
-            const e = ext(a.name);
-            if (e === "lua" || e === "txt" || e === "luau") all.push(a);
-          }
-        }
-        attachments = all;
+        const refMsg = await fetchRepliedMessage(msg);
+        if (refMsg) attachments = collectMessageAttachments(refMsg).filter(scriptFilter);
       } catch {}
     }
     if (!attachments.length) {
@@ -4887,15 +4899,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
         previewBody += "\n\n**URL Found:**\n" + urlList + (uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : "");
       }
-      const tokLine = isBuyerUser ? "" : tokensResultSuffix(false, cd.tokensLeft ?? peekTokens(msg.author.id, false).tokens);
-      const footerLine = `<@${msg.author.id}> Here you go!\n**Finish in:** \`${finishSec}s\`` + tokLine;
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       pendingTokenLine.delete(String(msg.author.id));
+      // Result: File Preview + URL Found (if any) + file inside V2 — no Here you go / Finish in / tokens
       await sendRenameResult(msg, {
         previewMarkdown: previewBody,
         fileBuffer: Buffer.from(finalOutput, "utf-8"),
-        fileName: outputName,
-        footerLine
+        fileName: outputName
       }).catch(() => {});
     } catch (e) {
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
