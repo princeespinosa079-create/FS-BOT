@@ -948,6 +948,30 @@ async function sendRenameLoading(message) {
   }
 }
 
+/** Renamer Input Error / fail — Components V2 (red accent) */
+const RENAME_V2_ERROR_ACCENT = 0xED4245;
+async function sendRenameInputError(message, description) {
+  const body = `### Input Error
+${String(description || "").slice(0, 3800)}`;
+  const payload = {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: RENAME_V2_ERROR_ACCENT,
+      components: [
+        { type: 10, content: body }
+      ]
+    }]
+  };
+  try {
+    return await replyComponentsV2(message, payload);
+  } catch (e) {
+    console.warn("⚠️ Components V2 error fallback:", e.message?.slice(0, 120));
+    return message.reply({ content: body }).catch(() => null);
+  }
+}
+
+
 /**
  * Renamer result — Components V2
  * File Preview (+ URL Found if any) + file component (type 13) inside container
@@ -1797,12 +1821,19 @@ function cleanLuaForRename(text) {
     }
     return false;
   }
+  // Keep original newlines/spaces — never collapse or trim the whole file
   const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   const out = [];
   let inBlockComment = false;
   for (let originalLine of lines) {
     let line = originalLine;
     const trimmed = line.trim();
+
+    // Preserve blank / whitespace-only lines exactly
+    if (!trimmed) {
+      out.push(originalLine);
+      continue;
+    }
 
     // block comments --[[ ... ]]
     if (inBlockComment) {
@@ -1822,7 +1853,7 @@ function cleanLuaForRename(text) {
     // Script loader lines
     if (hasLoader(trimmed)) continue;
 
-    // Strip inline -- comments (preserve strings)
+    // Strip inline -- comments (preserve strings) — keep leading indent/spaces
     let inS = false, inD = false;
     let cutAt = -1;
     for (let i = 0; i < line.length - 1; i++) {
@@ -1832,15 +1863,21 @@ function cleanLuaForRename(text) {
       if (c === "'" && !inD) inS = !inS;
       if (!inS && !inD && c === "-" && n === "-") { cutAt = i; break; }
     }
-    if (cutAt >= 0) line = line.slice(0, cutAt).replace(/\s+$/, "");
-    if (!line.trim()) continue;
+    if (cutAt >= 0) line = line.slice(0, cutAt);
+    // If only spaces left after cutting a trailing comment, keep as blank line
+    if (!line.trim()) {
+      out.push("");
+      continue;
+    }
 
     // DO NOT rewrite print / warn
     // DO NOT replace Discord invites
+    // DO NOT strip indentation or internal spaces
     out.push(line);
   }
-  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return out.join("\n");
 }
+
 
 function cleanLuaScript(text) {
   if (!text) return "";
@@ -4904,11 +4941,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       } catch {}
     }
     if (!attachments.length) {
-      const errEmbed = new EmbedBuilder()
-        .setColor(0xED4245)
-        .setTitle("Input Error")
-        .setDescription("**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
-      replyUser(msg, { embeds: [errEmbed] }).catch(() => {});
+      await sendRenameInputError(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
       return;
     }
     const file = attachments[0];
@@ -4919,24 +4952,20 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!dlRes.ok) throw new Error(`HTTP ${dlRes.status}`);
       fileContent = await dlRes.text();
     } catch (dlErr) {
-      replyUser(msg, `❌ couldn't read that file (link expired or invalid). Re-upload it and try again, bro.`).catch(() => {});
+      await sendRenameInputError(msg, "Couldn't read that file (link expired or invalid). Re-upload it and try again.");
       return;
     }
     if (!fileContent || fileContent.trim().length < 5) {
-      replyUser(msg, "❌ file is empty or too small, bro.").catch(() => {});
+      await sendRenameInputError(msg, "File is empty or too small.");
       return;
     }
     if (isObfuscatedOrProtectionNotLua(fileContent)) {
-      replyUser(msg, "❌ this is obufscated or protection code, try another.").catch(() => {});
+      await sendRenameInputError(msg, "This is obfuscated or protection code, try another.");
       return;
     }
     const fileExt = ext(file.name);
     if (fileExt !== "lua" && fileExt !== "txt" && fileExt !== "luau") {
-      const errEmbed = new EmbedBuilder()
-        .setColor(0xED4245)
-        .setTitle("Input Error")
-        .setDescription("**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
-      replyUser(msg, { embeds: [errEmbed] }).catch(() => {});
+      await sendRenameInputError(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
       return;
     }
     
@@ -4976,7 +5005,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       }).catch(() => {});
     } catch (e) {
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      replyUser(msg, `❌ failed: ${e.message.slice(0, 150)}`).catch(() => {});
+      await sendRenameInputError(msg, `Failed: ${e.message.slice(0, 150)}`);
     }
     return;
   }
