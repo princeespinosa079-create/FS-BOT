@@ -859,11 +859,13 @@ async function isReplyingToFileAsync(msg) {
 }
 /** Attachments on this message or the message it replies to (Components V2 safe) */
 async function attachmentsFromMsgOrReply(msg, filterFn = null) {
-  let list = collectMessageAttachments(msg);
+  // Only real file attachments (ignore Components V2 text/layout — focus the file)
+  const onlyFiles = (arr) => (arr || []).filter(a => a && (a.url || a.proxyURL || a.proxy_url) && (a.name || a.filename));
+  let list = onlyFiles(collectMessageAttachments(msg));
   if (!list.length && msg.reference?.messageId) {
     try {
       const refMsg = await fetchRepliedMessage(msg);
-      if (refMsg) list = collectMessageAttachments(refMsg);
+      if (refMsg) list = onlyFiles(collectMessageAttachments(refMsg));
     } catch {}
   }
   if (typeof filterFn === "function") list = list.filter(filterFn);
@@ -1771,6 +1773,75 @@ function renameVariables(source) {
 // ============================================================
 // LUA SCRIPT CLEANER
 // ============================================================
+/** Rename cleaner: ONLY comments + script loaders + IP loggers. Never touch print or Discord invites. */
+function cleanLuaForRename(text) {
+  if (!text || typeof text !== "string") return "";
+  const ipGrabberDomains = ["iplogger.org","iplogger.com","grabify.link","grabify.xyz","nipiscan.com","spiderip.com","blasze.tk","blasze.com","ip-api.com","ipify.org","icanhazip.com","ifconfig.co","ifconfig.me","whatismyip.com","ipinfo.io","ipgeolocation.io","ps3cfw.com","2no.co","yip.su","ip-tracker.org","whatismyipaddress.com"];
+  const loaderPatterns = [
+    /loadstring\s*\(\s*game\s*:\s*HttpGet/i,
+    /loadstring\s*\(\s*[^)]*HttpGet/i,
+    /game\s*:\s*HttpGet\s*\(\s*["']https?:\/\//i,
+    /HttpService\s*:\s*GetAsync\s*\(\s*["']https?:\/\//i,
+    /syn\s*\.\s*request\s*\(/i,
+    /http\s*\.\s*get\s*\(\s*["']https?:\/\//i,
+    /require\s*\(\s*["']https?:\/\//i,
+  ];
+  function isGrabber(line) {
+    const lower = String(line || "").toLowerCase();
+    for (const d of ipGrabberDomains) if (lower.includes(d)) return true;
+    return false;
+  }
+  function hasLoader(line) {
+    for (const re of loaderPatterns) {
+      try { if (re.test(line)) return true; } catch {}
+    }
+    return false;
+  }
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const out = [];
+  let inBlockComment = false;
+  for (let originalLine of lines) {
+    let line = originalLine;
+    const trimmed = line.trim();
+
+    // block comments --[[ ... ]]
+    if (inBlockComment) {
+      if (trimmed.includes("]]")) inBlockComment = false;
+      continue;
+    }
+    if (/^--\[\[/.test(trimmed) || /^--\[=+\[/.test(trimmed)) {
+      if (!trimmed.includes("]]")) inBlockComment = true;
+      continue;
+    }
+    // full-line -- comments
+    if (trimmed.startsWith("--")) continue;
+
+    // IP logger lines
+    if (isGrabber(trimmed)) continue;
+
+    // Script loader lines
+    if (hasLoader(trimmed)) continue;
+
+    // Strip inline -- comments (preserve strings)
+    let inS = false, inD = false;
+    let cutAt = -1;
+    for (let i = 0; i < line.length - 1; i++) {
+      const c = line[i], n = line[i + 1];
+      if (c === "\\" && (inS || inD)) { i++; continue; }
+      if (c === '"' && !inS) inD = !inD;
+      if (c === "'" && !inD) inS = !inS;
+      if (!inS && !inD && c === "-" && n === "-") { cutAt = i; break; }
+    }
+    if (cutAt >= 0) line = line.slice(0, cutAt).replace(/\s+$/, "");
+    if (!line.trim()) continue;
+
+    // DO NOT rewrite print / warn
+    // DO NOT replace Discord invites
+    out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function cleanLuaScript(text) {
   if (!text) return "";
   if (typeof text !== "string") { try { text = String(text); } catch { return ""; } }
@@ -4206,39 +4277,46 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
 
-    // enable / toggle channel (id or mention)
-    let chId = null;
-    const mentionMatch = txt.match(/<#(\d+)>/);
-    if (mentionMatch) chId = mentionMatch[1];
-    else if (/^\d{17,20}$/.test(args[0])) chId = args[0].trim();
-    if (!chId) {
-      replyUser(msg, "❌ usage: `.livescan <channel id>` or `.livescan #channel`\nAlso: `.livescan list` · `.livescan off [id]`").catch(() => {});
+    // enable one or MORE channels: .livescan #a #b 123456789012345678
+    const idSet = new Set();
+    for (const m of txt.matchAll(/<#(\d{17,20})>/g)) idSet.add(m[1]);
+    for (const a of args) {
+      const pure = String(a || "").replace(/[<#>]/g, "").trim();
+      if (/^\d{17,20}$/.test(pure)) idSet.add(pure);
+    }
+    if (!idSet.size) {
+      replyUser(msg, "❌ usage: `.livescan <channel id|#channel> [more...]`\nAlso: `.livescan list` · `.livescan off [id]`").catch(() => {});
       return;
     }
 
-    let ch = null;
-    try { ch = await client.channels.fetch(chId); } catch {}
-    if (!ch || !ch.isTextBased?.()) {
-      replyUser(msg, "❌ invalid text channel id.").catch(() => {});
-      return;
+    const added = [];
+    const skipped = [];
+    const failed = [];
+    for (const chId of idSet) {
+      let ch = null;
+      try { ch = await client.channels.fetch(chId); } catch {}
+      if (!ch || !ch.isTextBased?.()) {
+        failed.push(chId);
+        continue;
+      }
+      const idStr = String(ch.id);
+      if (config.liveScanChannelIds.map(String).includes(idStr)) {
+        skipped.push(`<#${idStr}>`);
+        continue;
+      }
+      config.liveScanChannelIds.push(idStr);
+      added.push(`<#${idStr}>`);
     }
-
-    const idStr = String(ch.id);
-    const already = config.liveScanChannelIds.map(String).includes(idStr);
-    if (already) {
-      // toggle off if already watching
-      config.liveScanChannelIds = config.liveScanChannelIds.filter(id => String(id) !== idStr);
-      saveConfig();
-      replyUser(msg, `✅ LiveScan **stopped** on <#${ch.id}> (\`${ch.id}\`).`).catch(() => {});
-      return;
-    }
-
-    config.liveScanChannelIds.push(idStr);
     saveConfig();
-    replyUser(msg, `📡 **LiveScan ON** for <#${ch.id}> (\`${ch.id}\`)\nNew \`.txt\` / \`.lua\` / \`.zip\` uploads there are indexed into the finder automatically.\nRun again on the same channel (or \`.livescan off ${ch.id}\`) to stop.`).catch(() => {});
+    const parts = [];
+    if (added.length) parts.push(`📡 **LiveScan ON** (${added.length}): ${added.join(", ")}`);
+    if (skipped.length) parts.push(`ℹ️ already watching: ${skipped.join(", ")}`);
+    if (failed.length) parts.push(`❌ invalid: ${failed.map(id => `\`${id}\``).join(", ")}`);
+    if (!parts.length) parts.push("❌ nothing changed.");
+    parts.push(`Total live channels: **${config.liveScanChannelIds.length}**`);
+    replyUser(msg, parts.join("\n")).catch(() => {});
     return;
   }
-  // ─────────────────────────────────────────────
   // .scan — Owner Only (supports multiple channels: .scan #ch1 #ch2)
   // ─────────────────────────────────────────────
   if (/^\.scan(?:\s|$)/i.test(txt)) {
@@ -4870,19 +4948,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       try { text = stripGuiCopierHeader(text); } catch {}
       const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
       const foundUrls = text.match(urlRegex) || [];
-      // Local clean only (no AI) — strip credits/comments/IP/loaders, keep executable Lua
-      let finalOutput = cleanLuaScript(text);
-      finalOutput = removeDangerousLines(finalOutput);
-      // Drop leftover credit lines again after clean
-      finalOutput = finalOutput.split("\n").filter(line => {
-        const t = line.trim();
-        if (!t) return true;
-        if (/\bMogged\b/i.test(t) && !/\b(local|function|game)\b/i.test(t)) return false;
-        if (/^By\s+/i.test(t) && !/\b(local|function|game)\b/i.test(t)) return false;
-        if (/discord\.(gg|com\/invite)\//i.test(t) && !/[=(){}]/.test(t) && !/\b(local|function|HttpGet|loadstring|game)\b/i.test(t)) return false;
-        return true;
-      }).join("\n");
-      try { finalOutput = balanceLuaBlocks(finalOutput); } catch {}
+      // // Rename only: comments + script loaders + IP loggers (no print / invite changes)
+      let finalOutput = cleanLuaForRename(text);
       if (!finalOutput || !finalOutput.trim()) throw new Error("empty output after clean");
 
       const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
