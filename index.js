@@ -835,6 +835,34 @@ const IS_COMPONENTS_V2 = (MessageFlags && MessageFlags.IsComponentsV2 != null)
 /** Accent used in renamer V2 containers (matches discohook sample) */
 const RENAME_V2_ACCENT = 6449257;
 
+/** Reply-safe Components V2 send (avoids Input Error on some clients/API paths) */
+async function replyComponentsV2(message, payload) {
+  const base = {
+    ...payload,
+    allowedMentions: {
+      repliedUser: true,
+      parse: [],
+      users: message?.author?.id ? [message.author.id] : []
+    },
+    reply: {
+      messageReference: message.id,
+      failIfNotExists: false
+    }
+  };
+  try {
+    return await message.channel.send(base);
+  } catch (e1) {
+    // Fallback: message.reply without nested reply option
+    try {
+      const { reply, ...rest } = base;
+      return await message.reply(rest);
+    } catch (e2) {
+      console.warn("⚠️ Components V2 reply failed:", e2.message?.slice(0, 140));
+      throw e2;
+    }
+  }
+}
+
 /** Renamer loading message — Components V2 only */
 async function sendRenameLoading(message) {
   const payload = {
@@ -845,11 +873,10 @@ async function sendRenameLoading(message) {
       components: [
         { type: 10, content: "### Renaming...\n⏳ Processing..." }
       ]
-    }],
-    allowedMentions: { repliedUser: true, users: [message.author.id] }
+    }]
   };
   try {
-    return await message.reply(payload);
+    return await replyComponentsV2(message, payload);
   } catch (e) {
     console.warn("⚠️ Components V2 loading fallback:", e.message?.slice(0, 120));
     return message.reply({ content: "### Renaming...\n⏳ Processing..." }).catch(() => null);
@@ -857,14 +884,19 @@ async function sendRenameLoading(message) {
 }
 
 /**
- * Renamer result — Components V2:
- * container (preview text) + sibling file component (type 13) + attachment
+ * Renamer result — Components V2
+ * Order: Here you go → File Preview → URL Found (if any)
+ * File component (type 13) is INSIDE the container
  */
 async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName, footerLine }) {
   const safeName = String(fileName || "file.lua").replace(/[^\w.\-]+/g, "_");
   const file = new AttachmentBuilder(fileBuffer, { name: safeName });
-  let body = String(previewMarkdown || "### File Preview").slice(0, 3800);
-  if (footerLine) body += "\n\n" + String(footerLine).slice(0, 200);
+
+  // Here you go first, then File Preview / URL Found
+  const parts = [];
+  if (footerLine) parts.push(String(footerLine).trim());
+  if (previewMarkdown) parts.push(String(previewMarkdown).trim());
+  const body = parts.join("\n\n").slice(0, 4000) || "### File Preview";
 
   const v2Payload = {
     flags: IS_COMPONENTS_V2,
@@ -874,18 +906,14 @@ async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName
         type: 17,
         accent_color: RENAME_V2_ACCENT,
         components: [
-          { type: 10, content: body }
+          { type: 10, content: body },
+          { type: 13, file: { url: `attachment://${safeName}` } }
         ]
-      },
-      {
-        type: 13,
-        file: { url: `attachment://${safeName}` }
       }
-    ],
-    allowedMentions: { repliedUser: true, users: [message.author.id] }
+    ]
   };
   try {
-    return await message.reply(v2Payload);
+    return await replyComponentsV2(message, v2Payload);
   } catch (e) {
     console.warn("⚠️ Components V2 rename fallback:", e.message?.slice(0, 120));
     return message.reply({
