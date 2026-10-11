@@ -613,13 +613,8 @@ async function checkRegularPermission(msg, needsFileReply = false) {
   if (/^\.help(?:\s|$)/i.test(txt)) {
     const page = 0;
     helpSessions.set(msg.author.id, page);
-    const embed = EmbedBuilder.from(helpPages[page])
-      .setFooter({ text: `Request by @${msg.author.username}│Help Menu`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`help_${msg.author.id}_prev`).setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
-      new ButtonBuilder().setCustomId(`help_${msg.author.id}_next`).setLabel("Next").setStyle(ButtonStyle.Primary).setDisabled(helpPages.length === 1)
-    );
-    replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+    const v2 = buildHelpV2(page, msg.author.id);
+    replyComponentsV2(msg, v2, { mention: false }).catch(() => {});
     return;
   }
 
@@ -768,13 +763,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     replyUser(msg, { embeds: [tagEmbed] }).catch(() => {});
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
-  // Channel lock — has tag but wrong channel → tell them
+  // Channel lock — Components V2 Input Error
   if (!channelAllowed(msg)) {
-    const chEmbed = new EmbedBuilder()
-      .setColor(0xED4245)
-      .setTitle("Input Error")
-      .setDescription("**Tips:**\n- Use command in allowed channel, and use server tag if you don’t have it so you can use command there.");
-    replyUser(msg, { embeds: [chEmbed] }).catch(() => {});
+    sendInputErrorV2(msg, "**Tips:**\n- Use server tag and go to the allowed channel.").catch(() => {});
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
   // Auto-give role when they have the tag (in case sync missed them)
@@ -904,13 +895,14 @@ const FINDER_V2_ACCENT = 0x2B2D31; // black-gray
 const SEPARATOR_SPACING_SMALL = 1;
 
 /** Reply-safe Components V2 send (avoids Input Error on some clients/API paths) */
-async function replyComponentsV2(message, payload) {
+async function replyComponentsV2(message, payload, opts = {}) {
+  const mention = opts.mention === true; // default OFF ping for finder/help-style; pass { mention: true } to ping
   const base = {
     ...payload,
     allowedMentions: {
-      repliedUser: true,
+      repliedUser: mention,
       parse: [],
-      users: message?.author?.id ? [message.author.id] : []
+      users: mention && message?.author?.id ? [message.author.id] : []
     },
     reply: {
       messageReference: message.id,
@@ -999,6 +991,67 @@ async function sendObfResult(message, { loadstring, fileBuffer, fileName }) {
       files: [file],
       allowedMentions: { repliedUser: true, users: [message.author.id] }
     }).catch(() => null);
+  }
+}
+
+/** Upload loading — Components V2 */
+async function sendUploadLoading(message) {
+  const payload = {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: RENAME_V2_ACCENT,
+      components: [
+        { type: 10, content: "### Uploading...\n⏳ Processing..." }
+      ]
+    }]
+  };
+  try {
+    return await replyComponentsV2(message, payload, { mention: false });
+  } catch (e) {
+    return message.reply({ content: "### Uploading...\n⏳ Processing...", allowedMentions: { repliedUser: false, parse: [] } }).catch(() => null);
+  }
+}
+
+/** Upload result — loadstring only (PC + Mobile), no divider / no file */
+async function sendUploadResult(message, { loadstring, tokLine }) {
+  const ls = String(loadstring || "").slice(0, 1800);
+  let body = ("**PC COPY:**\n```lua\n" + ls + "\n```\n\n**MOBILE COPY:**\n`" + ls + "`");
+  if (tokLine) body += "\n" + String(tokLine);
+  body = body.slice(0, 3900);
+  const payload = {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: RENAME_V2_ACCENT,
+      components: [
+        { type: 10, content: body }
+      ]
+    }]
+  };
+  try {
+    return await replyComponentsV2(message, payload, { mention: false });
+  } catch (e) {
+    return message.reply({ content: body, allowedMentions: { repliedUser: false, parse: [] } }).catch(() => null);
+  }
+}
+
+
+/** Generic Input Error — Components V2 (red) */
+async function sendInputErrorV2(message, description) {
+  const body = "### Input Error\n" + String(description || "").slice(0, 3800);
+  const payload = {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: 0xED4245,
+      components: [{ type: 10, content: body }]
+    }]
+  };
+  try {
+    return await replyComponentsV2(message, payload, { mention: false });
+  } catch (e) {
+    return message.reply({ content: body, allowedMentions: { repliedUser: false, parse: [] } }).catch(() => null);
   }
 }
 
@@ -3054,7 +3107,7 @@ client.on("warn", w => console.warn("⚠️ Discord warn:", w));
 const YELLOW_COLOR = 0xF1C40F;
 const helpPages = [
   new EmbedBuilder()
-    .setTitle("Help Menu")
+    .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
 `**\`.rename\`** [\`.rn\`] Remove comments, IP loggers, script loaders.
@@ -3064,7 +3117,7 @@ const helpPages = [
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.`
     ),
   new EmbedBuilder()
-    .setTitle("Help Menu")
+    .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
 `**\`.et\`** Extract files from zip archives.
@@ -3074,7 +3127,7 @@ const helpPages = [
 **\`.get\`** Get file using ID.`
     ),
   new EmbedBuilder()
-    .setTitle("Help Menu")
+    .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
 `**\`.find\`** Search files by name.
@@ -3084,7 +3137,7 @@ const helpPages = [
 **\`.whs\`** Webhook Spammer — Raid a Webhook using its URL.`
     ),
   new EmbedBuilder()
-    .setTitle("Help Menu")
+    .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
 `**\`.coinflip\`** Flip a coin — win or lose **1 token**.
@@ -3094,7 +3147,7 @@ Regular users start with **10 tokens**/day. Most commands cost **1 token**.
     ),
   // Yellow premium page — always last
   new EmbedBuilder()
-    .setTitle("Help Menu")
+    .setTitle("🤖 Bot Commands")
     .setColor(YELLOW_COLOR)
     .setDescription(
 `**\`.redeem\`** [\`.red\`] - Redeem a premium key.
@@ -3104,6 +3157,55 @@ Regular users start with **10 tokens**/day. Most commands cost **1 token**.
     )
 ];
 const helpSessions = new Map();
+
+/** Help page bodies for Components V2 */
+const helpPageBodies = [
+  { color: 0x5865F2, text: `**\`.rename\`** [\`.rn\`] Remove comments, IP loggers, script loaders.
+
+**\`.obf\`** Obfuscate your script — encrypt strings, Anti-Debug, Anti-Dump, make code unreadable.
+
+**\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.` },
+  { color: 0x5865F2, text: `**\`.et\`** Extract files from zip archives.
+
+**\`.upload\`** Turn your file into Script Loader.
+
+**\`.get\`** Get file using ID.` },
+  { color: 0x5865F2, text: `**\`.find\`** Search files by name.
+
+**\`.delwh\`** Delete a webhook using its URL.
+
+**\`.whs\`** Webhook Spammer — Raid a Webhook using its URL.` },
+  { color: 0x5865F2, text: `**\`.coinflip\`** Flip a coin — win or lose **1 token**.
+
+Regular users start with **10 tokens**/day. Most commands cost **1 token**.
+\`.help\` · \`.find\` · \`.redeem\` are free.` },
+  { color: 0xFEE75C, text: `**\`.redeem\`** [\`.red\`] - Redeem a premium key.
+
+> Premium users can use all commands in DMs.
+> Premium users have unlimited tokens.` }
+];
+
+function buildHelpV2(page, userId) {
+  const pageData = helpPageBodies[page] || helpPageBodies[0];
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`help_${userId}_prev`).setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+    new ButtonBuilder().setCustomId(`help_${userId}_next`).setLabel("Next").setStyle(ButtonStyle.Primary).setDisabled(page >= helpPageBodies.length - 1)
+  );
+  return {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: pageData.color,
+      components: [
+        { type: 10, content: ("### 🤖 Bot Commands\n" + pageData.text).slice(0, 4000) },
+        { type: 14, spacing: SEPARATOR_SPACING_SMALL },
+        row.toJSON()
+      ]
+    }],
+    allowedMentions: { repliedUser: false, parse: [] }
+  };
+}
+
 
 // ============================================================
 // BUTTON HANDLER
@@ -3214,15 +3316,17 @@ client.on("interactionCreate", async interaction => {
     }
     let page = helpSessions.get(uid) || 0;
     if (dir === "prev") page = Math.max(0, page - 1);
-    if (dir === "next") page = Math.min(helpPages.length - 1, page + 1);
+    if (dir === "next") page = Math.min(helpPageBodies.length - 1, page + 1);
     helpSessions.set(uid, page);
-    const embed = EmbedBuilder.from(helpPages[page])
-      .setFooter({ text: `Request by @${interaction.user.username}│Help Menu`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`help_${uid}_prev`).setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
-      new ButtonBuilder().setCustomId(`help_${uid}_next`).setLabel("Next").setStyle(ButtonStyle.Primary).setDisabled(page === helpPages.length - 1)
-    );
-    await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
+    const v2 = buildHelpV2(page, uid);
+    try {
+      await interaction.update({ components: v2.components, embeds: [], flags: IS_COMPONENTS_V2 });
+    } catch (e) {
+      try {
+        await interaction.message.edit({ components: v2.components, embeds: [], flags: IS_COMPONENTS_V2 });
+        if (!interaction.replied && !interaction.deferred) await interaction.deferUpdate().catch(() => {});
+      } catch {}
+    }
     return;
   }
   // ─── EXTRACT CAROUSEL BUTTONS ───
@@ -3672,8 +3776,8 @@ client.on("interactionCreate", async interaction => {
     const startAt = Date.now();
     let lastEdit = 0;
     // Ultra-fast (~1ms waves, 40 concurrent) — STOP when time is up
-    const CONCURRENCY = 40;
-    const INTERVAL_MS = 1;
+    const CONCURRENCY = 80;
+    const INTERVAL_MS = 0;
     const payload = JSON.stringify({ content: spamMsg });
     let stopped = false;
 
@@ -3800,17 +3904,23 @@ client.on("interactionCreate", async interaction => {
         await interaction.editReply({ content: "❌ use this in a text channel." });
         return;
       }
-      const panelEmbed = new EmbedBuilder()
-        .setColor(0x5865F2)
-        .setTitle("Finder Source Panel")
-        .setDescription("This panel is only for where you can find old source that you can’t find.")
-        .setFooter({ text: `Sent by @${interaction.user.username}`, iconURL: interaction.user.displayAvatarURL({ dynamic: true, size: 128 }) });
       const panelRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("finderpanel_find").setLabel("Find").setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId("finderpanel_get").setLabel("Get").setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId("finderpanel_redeem").setLabel("Redeem").setStyle(ButtonStyle.Secondary)
       );
-      await targetChannel.send({ embeds: [panelEmbed], components: [panelRow] });
+      await targetChannel.send({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: FINDER_V2_ACCENT,
+          components: [
+            { type: 10, content: "### Finder Panel\nThis panel is only for where you can find old source that you can’t find." },
+            { type: 14, spacing: SEPARATOR_SPACING_SMALL },
+            panelRow.toJSON()
+          ]
+        }]
+      });
       await interaction.editReply({ content: "✅ Finder Source Panel posted." });
       return;
     }
@@ -3911,13 +4021,8 @@ client.on("messageCreate", async msg => {
   if (/^\.help(?:\s|$)/i.test(txt)) {
     const page = 0;
     helpSessions.set(msg.author.id, page);
-    const embed = EmbedBuilder.from(helpPages[page])
-      .setFooter({ text: `Request by @${msg.author.username}│Help Menu`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`help_${msg.author.id}_prev`).setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
-      new ButtonBuilder().setCustomId(`help_${msg.author.id}_next`).setLabel("Next").setStyle(ButtonStyle.Primary).setDisabled(helpPages.length === 1)
-    );
-    replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+    const v2 = buildHelpV2(page, msg.author.id);
+    replyComponentsV2(msg, v2, { mention: false }).catch(() => {});
     return;
   }
 
@@ -4832,18 +4937,25 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     
-    const panelEmbed = new EmbedBuilder()
-      .setColor(getEmbedColor(perm.isBuyer))
-      .setDescription("Click `Start` button below to start.");
-    
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("whs_start")
         .setLabel("Start")
         .setStyle(ButtonStyle.Success)
     );
-    
-    const panelMsg = await replyUser(msg, { embeds: [panelEmbed], components: [row] }).catch(() => {});
+    const v2 = {
+      flags: IS_COMPONENTS_V2,
+      components: [{
+        type: 17,
+        accent_color: RENAME_V2_ACCENT,
+        components: [
+          { type: 10, content: "Click **Start** below to send messages through your webhook." },
+          { type: 14, spacing: SEPARATOR_SPACING_SMALL },
+          row.toJSON()
+        ]
+      }]
+    };
+    const panelMsg = await replyComponentsV2(msg, v2, { mention: false }).catch(() => null);
     if (panelMsg) {
       whsPanelOwners.set(panelMsg.id, msg.author.id);
       setTimeout(() => whsPanelOwners.delete(panelMsg.id), 10 * 60 * 1000);
@@ -4877,7 +4989,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     // Tokens only on final result — not on loading
     const savedTokLine = pendingTokenLine.get(String(msg.author.id)) || "";
     pendingTokenLine.delete(String(msg.author.id));
-    const sentMsg = await replyUser(msg, "⏳ Uploading...").catch(() => {});
+    const sentMsg = await sendUploadLoading(msg).catch(() => null);
     try {
       const res = await fetch(file.url);
       const content = await res.text();
@@ -4927,19 +5039,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!rawUrl) throw new Error("Could not get paste URL from Pastefy response");
       const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
       if (sentMsg) await sentMsg.delete().catch(() => {});
-      const embed = new EmbedBuilder()
-        .setColor(getEmbedColor(isBuyerUser))
-        .setTitle("Script Copy")
-        .setDescription(`\`\`\`lua\n${loadstring}\n\`\`\``)
-        .setFooter({ text: `Request by @${msg.author.username}│Prince Loader`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
       const tokLine = isBuyerUser
         ? ""
         : (tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens) || (savedTokLine ? `\n${savedTokLine}` : ""));
       pendingTokenLine.delete(String(msg.author.id));
-      await replyUser(msg, {
-        content: `<@${msg.author.id}> Here you go!` + tokLine,
-        embeds: [embed]
-      }).catch(() => {});
+      await sendUploadResult(msg, { loadstring, tokLine });
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
       replyUser(msg, `❌ upload failed: ${e.message}`).catch(() => {});
