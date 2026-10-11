@@ -971,6 +971,40 @@ async function attachmentsFromMsgOrReply(msg, filterFn = null) {
   return list;
 }
 
+/** Script files from message or reply (Components V2 — same path as .upload) */
+async function getScriptAttachmentsFromMsgOrReply(msg) {
+  let attachments = await attachmentsFromMsgOrReply(msg, a => {
+    const e = ext(a.name || a.filename);
+    return e === "txt" || e === "lua" || e === "luau";
+  });
+  if (!attachments.length && msg.reference?.messageId) {
+    const any = await attachmentsFromMsgOrReply(msg, null);
+    attachments = any.filter(a => {
+      const e = ext(a.name || a.filename);
+      const ct = String(a.contentType || "").toLowerCase();
+      return e === "txt" || e === "lua" || e === "luau" || e === "text" || !e
+        || ct.includes("text") || ct.includes("lua") || ct.includes("octet");
+    });
+  }
+  // Last resort: if reply exists, pull raw REST attachments and accept text-like
+  if (!attachments.length && msg.reference?.messageId) {
+    try {
+      const raw = await fetchMessageRaw(msg.channel.id, msg.reference.messageId);
+      const list = (attachmentsFromRawMessage(raw) || []).map(a => ({
+        ...a,
+        name: a.name || a.filename,
+        url: a.url || a.proxyURL || a.proxy_url
+      })).filter(a => a.url && a.name);
+      attachments = list.filter(a => {
+        const e = ext(a.name);
+        return e === "txt" || e === "lua" || e === "luau" || e === "text" || !e;
+      });
+      if (!attachments.length) attachments = list; // accept any file; caller validates content
+    } catch {}
+  }
+  return attachments;
+}
+
 /** True if this reply is an error / tips / fail / loading — never attach tokens left */
 function isErrorPayload(body) {
   const contentStr = typeof body.content === "string" ? body.content : "";
@@ -1766,15 +1800,13 @@ async function resolveCobaltMedia(pageUrl) {
     "https://api.cobalt.tools/",
     "https://cobalt.api.timelessnesses.me/",
     "https://co.wuk.sh/",
-    "https://cobalt-api.kwetiaumala.my.id/",
-    "https://api.cobalt.tools/api/json"
+    "https://cobalt-api.kwetiaumala.my.id/"
   ];
   const bodies = [
     { url: pageUrl },
     { url: pageUrl, downloadMode: "auto" },
-    { url: pageUrl, downloadMode: "auto", videoQuality: "max" },
-    { url: pageUrl, downloadMode: "mute" },
-    { url: pageUrl, downloadMode: "audio" }
+    { url: pageUrl, downloadMode: "auto", videoQuality: "1080" },
+    { url: pageUrl, downloadMode: "auto", videoQuality: "max", tiktokFullAudio: false }
   ];
   for (const endpoint of endpoints) {
     for (const body of bodies) {
@@ -1784,21 +1816,18 @@ async function resolveCobaltMedia(pageUrl) {
           headers: {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
           },
           body: JSON.stringify(body)
         });
-        if (!apiRes.ok) continue;
         const data = await apiRes.json().catch(() => null);
         if (!data) continue;
-        // cobalt v7 statuses
-        if ((data.status === "tunnel" || data.status === "redirect" || data.status === "stream" || data.status === "success") && data.url) {
-          return { url: data.url, type: data.audio ? "Audio" : "Video" };
+        if (data.url && /^https?:\/\//i.test(data.url)) {
+          return { url: data.url, type: /audio/i.test(String(data.filename || data.audio || "")) ? "Audio" : "Video" };
         }
-        if (data.url) return { url: data.url, type: data.audio ? "Audio" : "Video" };
-        if (data.audio) return { url: data.audio, type: "Audio" };
+        if (data.audio && /^https?:\/\//i.test(data.audio)) return { url: data.audio, type: "Audio" };
         if (Array.isArray(data.picker) && data.picker[0]?.url) {
-          return { url: data.picker[0].url, type: "Photo (1/" + data.picker.length + ")" };
+          return { url: data.picker[0].url, type: "Photo" };
         }
       } catch {}
     }
@@ -1807,75 +1836,101 @@ async function resolveCobaltMedia(pageUrl) {
 }
 
 async function expandShortUrl(pageUrl) {
+  let url = String(pageUrl || "").trim();
   try {
-    if (!/vm\.tiktok\.com|vt\.tiktok\.com|tiktok\.com\/t\//i.test(pageUrl)) return pageUrl;
-    const res = await fetch(pageUrl, {
-      method: "GET",
-      redirect: "manual",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
-      }
-    });
-    let loc = res.headers.get("location") || res.headers.get("Location");
-    if (loc) {
-      if (loc.startsWith("/")) loc = "https://www.tiktok.com" + loc;
-      if (/^https?:\/\//i.test(loc)) return loc;
+    if (!/vm\.tiktok\.com|vt\.tiktok\.com|tiktok\.com\/t\//i.test(url)) return url;
+    for (const ua of [
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ]) {
+      try {
+        const res = await fetch(url, { method: "GET", redirect: "manual", headers: { "User-Agent": ua } });
+        let loc = res.headers.get("location") || res.headers.get("Location");
+        if (loc) {
+          if (loc.startsWith("/")) loc = "https://www.tiktok.com" + loc;
+          if (/^https?:\/\//i.test(loc)) return loc;
+        }
+      } catch {}
     }
+    try {
+      const res2 = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15" }
+      });
+      if (res2.url && /tiktok\.com/i.test(res2.url)) return res2.url;
+    } catch {}
   } catch {}
-  try {
-    const res2 = await fetch(pageUrl, {
-      method: "GET",
-      redirect: "follow",
-      headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15" }
-    });
-    if (res2.url && /tiktok\.com/i.test(res2.url)) return res2.url;
-  } catch {}
-  return pageUrl;
+  return url;
+}
+
+function extractTikTokVideoId(pageUrl) {
+  const s = String(pageUrl || "");
+  let m = s.match(/\/video\/(\d{5,})/);
+  if (m) return m[1];
+  m = s.match(/[?&]video_id=(\d{5,})/);
+  if (m) return m[1];
+  m = s.match(/(\d{15,})/);
+  return m ? m[1] : null;
 }
 
 async function resolveTikTokMedia(pageUrl) {
   let url = String(pageUrl || "").trim();
-  // Strip tracking params noise but keep video id path
-  try {
-    const u = new URL(url);
-    if (/tiktok\.com/i.test(u.hostname)) {
-      // keep pathname, drop most query except useful ones
-      url = u.origin + u.pathname + (u.search || "");
-    }
-  } catch {}
   url = await expandShortUrl(url);
+  const videoId = extractTikTokVideoId(url);
+  const candidates = [];
+  if (url) candidates.push(url);
+  if (videoId) {
+    candidates.push(`https://www.tiktok.com/@tiktok/video/${videoId}`);
+    candidates.push(`https://www.tiktok.com/video/${videoId}`);
+  }
+  if (pageUrl && pageUrl !== url) candidates.push(pageUrl);
+  const uniq = [...new Set(candidates.filter(Boolean))];
 
   const tryJsonUrl = (data) => {
     if (!data || typeof data !== "object") return null;
-    if (data.url && /^https?:\/\//i.test(data.url)) return { url: data.url, type: data.audio ? "Audio" : "Video" };
-    if (data.audio && /^https?:\/\//i.test(data.audio)) return { url: data.audio, type: "Audio" };
-    if (Array.isArray(data.picker) && data.picker[0]?.url) return { url: data.picker[0].url, type: "Photo" };
-    const d = data.data || data.result || data;
-    if (!d || typeof d !== "object") return null;
-    for (const key of ["hdplay", "play", "wmplay", "nwm_video_url_HQ", "nwm_video_url", "video", "video_url", "download_url"]) {
-      if (d[key] && /^https?:\/\//i.test(d[key])) return { url: d[key], type: "Video" };
+    const stack = [data, data.data, data.result, data.aweme_detail, data.aweme_list?.[0]];
+    for (const d of stack) {
+      if (!d || typeof d !== "object") continue;
+      for (const key of [
+        "url", "audio", "hdplay", "play", "wmplay", "nwm_video_url_HQ", "nwm_video_url",
+        "video", "video_url", "download_url", "playAddr", "downloadAddr", "noWatermark", "no_watermark"
+      ]) {
+        const v = d[key];
+        if (typeof v === "string" && /^https?:\/\//i.test(v) && !/tiktok\.com\/@/i.test(v)) {
+          return { url: v, type: /audio|music|mp3/i.test(key) ? "Audio" : "Video" };
+        }
+        if (v && typeof v === "object") {
+          if (typeof v.url === "string" && /^https?:\/\//i.test(v.url)) return { url: v.url, type: "Video" };
+          if (Array.isArray(v.url_list) && v.url_list[0]) return { url: v.url_list[0], type: "Video" };
+        }
+      }
+      if (d.video?.play_addr?.url_list?.[0]) return { url: d.video.play_addr.url_list[0], type: "Video" };
+      if (d.video?.download_addr?.url_list?.[0]) return { url: d.video.download_addr.url_list[0], type: "Video" };
+      if (d.video?.noWatermark) return { url: d.video.noWatermark, type: "Video" };
+      if (d.video?.playAddr) return { url: d.video.playAddr, type: "Video" };
     }
-    if (d.download?.url) return { url: d.download.url, type: "Video" };
-    if (Array.isArray(d.images) && d.images[0]) return { url: d.images[0], type: "Photo" };
+    if (Array.isArray(data.picker) && data.picker[0]?.url) return { url: data.picker[0].url, type: "Photo" };
     return null;
   };
 
-  for (const u of [...new Set([url, pageUrl])]) {
+  // 1) Cobalt
+  for (const u of uniq) {
     const cobalt = await resolveCobaltMedia(u);
     if (cobalt?.url) return cobalt;
   }
 
-  // tikwm
-  for (const u of [...new Set([url, pageUrl])]) {
+  // 2) tikwm GET/POST
+  for (const u of uniq) {
     for (const apiUrl of [
-      "https://www.tikwm.com/api/?url=" + encodeURIComponent(u) + "&hd=1",
-      "https://tikwm.com/api/?url=" + encodeURIComponent(u) + "&hd=1"
+      `https://www.tikwm.com/api/?url=${encodeURIComponent(u)}&hd=1`,
+      `https://tikwm.com/api/?url=${encodeURIComponent(u)}&hd=1`
     ]) {
       try {
         const api2 = await fetch(apiUrl, {
           headers: {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json,text/plain,*/*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://www.tikwm.com/"
           }
         });
@@ -1893,7 +1948,7 @@ async function resolveTikTokMedia(pageUrl) {
           "User-Agent": "Mozilla/5.0",
           "Referer": "https://www.tikwm.com/"
         },
-        body: "url=" + encodeURIComponent(u) + "&hd=1"
+        body: `url=${encodeURIComponent(u)}&hd=1`
       });
       const d3 = await api3.json().catch(() => null);
       const hit = tryJsonUrl(d3);
@@ -1901,36 +1956,35 @@ async function resolveTikTokMedia(pageUrl) {
     } catch {}
   }
 
-  // Extra public APIs
-  const extras = [
-    "https://api.tiklydown.eu.org/api/download?url=" + encodeURIComponent(url),
-    "https://api.tiklydown.eu.org/api/download/v3?url=" + encodeURIComponent(url),
-    "https://tikdownloader.io/api/ajaxSearch"
-  ];
-  for (const m of extras) {
-    try {
-      if (m.includes("ajaxSearch")) {
-        const r = await fetch(m, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0" },
-          body: "q=" + encodeURIComponent(url) + "&lang=en"
-        });
-        const j = await r.json().catch(() => null);
-        const html = j?.data || j?.html || "";
-        const match = String(html).match(/https?:\/\/[^"'\s<>]+(?:\.mp4|\.mov)[^"'\s<>]*/i);
-        if (match) return { url: match[0].replace(/&amp;/g, "&"), type: "Video" };
-      } else {
-        const r = await fetch(m, { headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" } });
-        const j = await r.json().catch(() => null);
-        const hit = tryJsonUrl(j);
-        if (hit) return hit;
-        // tiklydown shape
-        if (j?.video?.noWatermark) return { url: j.video.noWatermark, type: "Video" };
-        if (j?.video?.playAddr) return { url: j.video.playAddr, type: "Video" };
-        if (j?.result?.video) return { url: j.result.video, type: "Video" };
-      }
-    } catch {}
+  // 3) Other free endpoints
+  for (const u of uniq) {
+    const extras = [
+      `https://api.tiklydown.eu.org/api/download?url=${encodeURIComponent(u)}`,
+      `https://api.tiklydown.eu.org/api/download/v3?url=${encodeURIComponent(u)}`,
+      `https://tikdownloader.io/api/ajaxSearch`
+    ];
+    for (const m of extras) {
+      try {
+        if (m.includes("ajaxSearch")) {
+          const r = await fetch(m, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0" },
+            body: `q=${encodeURIComponent(u)}&lang=en`
+          });
+          const j = await r.json().catch(() => null);
+          const html = j?.data || j?.html || "";
+          const match = String(html).match(/https?:\/\/[^"'\s<>]+(?:\.mp4|\.mov)[^"'\s<>]*/i);
+          if (match) return { url: match[0].replace(/&amp;/g, "&"), type: "Video" };
+        } else {
+          const r = await fetch(m, { headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" } });
+          const j = await r.json().catch(() => null);
+          const hit = tryJsonUrl(j);
+          if (hit) return hit;
+        }
+      } catch {}
+    }
   }
+
   return null;
 }
 
@@ -1939,13 +1993,31 @@ async function downloadAsAttachment(mediaUrl, fallbackName) {
   try {
     const res = await fetch(mediaUrl, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "*/*",
-        "Referer": "https://www.tiktok.com/"
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.tiktok.com/",
+        "Origin": "https://www.tiktok.com"
       },
       redirect: "follow"
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // Retry without Origin
+      const res2 = await fetch(mediaUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Accept": "*/*",
+          "Referer": "https://www.tiktok.com/"
+        },
+        redirect: "follow"
+      });
+      if (!res2.ok) return null;
+      const buf2 = Buffer.from(await res2.arrayBuffer());
+      if (!buf2.length || buf2.length > 24 * 1024 * 1024) return null;
+      let name2 = fallbackName || "download.mp4";
+      if (!/\.[a-z0-9]{2,5}$/i.test(name2)) name2 += ".mp4";
+      return new AttachmentBuilder(buf2, { name: name2.replace(/[^\w.\-]+/g, "_").slice(0, 80) });
+    }
     const buf = Buffer.from(await res.arrayBuffer());
     if (!buf.length || buf.length > 24 * 1024 * 1024) return null; // Discord limit ~25MB
     let name = fallbackName || "download.mp4";
@@ -5229,17 +5301,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    let attachments = await attachmentsFromMsgOrReply(msg, a => {
-      const e = ext(a.name || a.filename);
-      return e === "txt" || e === "lua" || e === "luau";
-    });
-    if (!attachments.length && msg.reference?.messageId) {
-      const any = await attachmentsFromMsgOrReply(msg, null);
-      attachments = any.filter(a => {
-        const e = ext(a.name || a.filename);
-        return e === "txt" || e === "lua" || e === "luau" || !e;
-      });
-    }
+    let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
     if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
     const file = attachments[0];
     const maxUploadSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
@@ -5323,10 +5385,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    let attachments = await attachmentsFromMsgOrReply(msg, a => {
-      const e = ext(a.name);
-      return e === "txt" || e === "lua";
-    });
+    let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
     if (!attachments.length) { replyUser(msg, "❌ upload a file so i can make it obfuscate file.").catch(() => {}); return; }
     const file = attachments[0];
     const maxObfSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
@@ -5401,7 +5460,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
 
   // .et — carousel mode
   if (/^\.et(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, true);
+    const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
@@ -5411,7 +5470,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     if (isDM && !perm.isBuyer) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
-    let attachments = await attachmentsFromMsgOrReply(msg, a => isZipFile(a.name, a.contentType) || isHtmlFile(a.name, a.contentType));
+    let attachments = await attachmentsFromMsgOrReply(msg, a => isZipFile(a.name || a.filename, a.contentType) || isHtmlFile(a.name || a.filename, a.contentType));
+    if (!attachments.length && msg.reference?.messageId) {
+      const any = await attachmentsFromMsgOrReply(msg, null);
+      attachments = any.filter(a => isZipFile(a.name || a.filename, a.contentType) || isHtmlFile(a.name || a.filename, a.contentType));
+    }
     if (!attachments.length) {
       replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {});
       return;
@@ -5475,20 +5538,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    const scriptFilter = (a) => {
-      const e = ext(a.name);
-      return e === "lua" || e === "txt" || e === "luau";
-    };
-    let attachments = await attachmentsFromMsgOrReply(msg, scriptFilter);
-    // Components V2 fallback: any attachment on replied message, then keep text-like files
-    if (!attachments.length && msg.reference?.messageId) {
-      const any = await attachmentsFromMsgOrReply(msg, null);
-      attachments = any.filter(a => {
-        const e = ext(a.name || a.filename);
-        const ct = String(a.contentType || "").toLowerCase();
-        return e === "lua" || e === "txt" || e === "luau" || e === "text" || !e || ct.includes("text") || ct.includes("lua");
-      });
-    }
+    let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
     if (!attachments.length) {
       await sendRenameInputError(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
       return;
