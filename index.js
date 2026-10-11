@@ -794,10 +794,85 @@ function collectMessageAttachments(message) {
     for (const a of message.attachments?.values?.() || []) out.push(a);
   } catch {}
   try {
+    // discord.js Collection sometimes not iterable the same way
+    if (!out.length && message.attachments?.forEach) {
+      message.attachments.forEach(a => out.push(a));
+    }
+  } catch {}
+  try {
     for (const s of message.messageSnapshots?.values?.() || []) {
       for (const a of s.attachments?.values?.() || []) out.push(a);
     }
   } catch {}
+  // Components V2: walk components for type 13 file refs (attachment://name)
+  try {
+    const walk = (comps) => {
+      if (!Array.isArray(comps)) return;
+      for (const c of comps) {
+        if (!c) continue;
+        if (c.type === 13 && c.file) {
+          const name = String(c.file.name || c.file.filename || (c.file.url || "").replace(/^attachment:\/\//, "") || "file");
+          // Prefer matching real attachment by name
+          const match = out.find(a => (a.name || a.filename) === name);
+          if (!match && (c.file.url || "").startsWith("http")) {
+            out.push({ name, url: c.file.url, proxyURL: c.file.url, size: c.file.size || 0 });
+          }
+        }
+        if (Array.isArray(c.components)) walk(c.components);
+      }
+    };
+    walk(message.components);
+  } catch {}
+  return out;
+}
+
+/** Raw REST fetch — most reliable for Components V2 attachment URLs */
+async function fetchMessageRaw(channelId, messageId) {
+  try {
+    const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
+      headers: {
+        Authorization: `Bot ${TOKEN}`,
+        "User-Agent": "DiscordBot (prince, 1.0)"
+      }
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+function attachmentsFromRawMessage(raw) {
+  const out = [];
+  if (!raw) return out;
+  for (const a of raw.attachments || []) {
+    if (!a) continue;
+    out.push({
+      id: a.id,
+      name: a.filename || a.name || "file",
+      filename: a.filename || a.name || "file",
+      url: a.url,
+      proxyURL: a.proxy_url || a.proxyURL || a.url,
+      proxy_url: a.proxy_url || a.url,
+      size: a.size || 0,
+      contentType: a.content_type || a.contentType || null
+    });
+  }
+  // Walk V2 components for type 13
+  const walk = (comps) => {
+    if (!Array.isArray(comps)) return;
+    for (const c of comps) {
+      if (!c) continue;
+      if (c.type === 13 && c.file) {
+        const name = String(c.file.name || c.file.filename || (c.file.url || "").replace(/^attachment:\/\//, "") || "file");
+        if (!out.some(x => x.name === name) && c.file.url && String(c.file.url).startsWith("http")) {
+          out.push({ name, filename: name, url: c.file.url, proxyURL: c.file.url, size: c.file.size || 0 });
+        }
+      }
+      if (Array.isArray(c.components)) walk(c.components);
+    }
+  };
+  try { walk(raw.components); } catch {}
   return out;
 }
 
@@ -805,7 +880,6 @@ function collectMessageAttachments(message) {
 async function fetchRepliedMessage(msg) {
   const refId = msg?.reference?.messageId;
   if (!refId) return null;
-  // Always force-fetch so Components V2 attachment URLs are fresh
   try {
     return await msg.channel.messages.fetch({ message: refId, force: true });
   } catch {}
@@ -823,62 +897,76 @@ function isReplyingToFile(msg) {
   const ref = msg.reference?.messageId;
   if (!ref) return false;
   const repliedMsg = msg.channel?.messages?.cache?.get(ref);
-  if (!repliedMsg) {
-    // Not in cache yet — treat as file reply so permission does not Input Error;
-    // command handlers will fetch + resolve attachments themselves.
-    return true;
-  }
+  if (!repliedMsg) return true; // not cached — let handlers resolve
   if (collectMessageAttachments(repliedMsg).length > 0) return true;
-  // Components V2 messages may still expose attachments; if flag set, allow
   try {
     const flags = Number(repliedMsg.flags?.bitfield ?? repliedMsg.flags ?? 0);
-    if (flags & 32768) return true;
+    if (flags & 32768) return true; // Components V2 — allow, handlers use REST
   } catch {}
   return false;
 }
 
 async function isReplyingToFileAsync(msg) {
   if (!msg?.reference?.messageId) return false;
-  const repliedMsg = await fetchRepliedMessage(msg);
-  if (!repliedMsg) return false;
-  if (collectMessageAttachments(repliedMsg).length > 0) return true;
+  // Any reply may target a V2 file message — resolve via REST if needed
+  const list = await attachmentsFromMsgOrReply(msg, null);
+  if (list.length > 0) return true;
   try {
+    const repliedMsg = await fetchRepliedMessage(msg);
+    if (!repliedMsg) return true;
     const flags = Number(repliedMsg.flags?.bitfield ?? repliedMsg.flags ?? 0);
-    if (flags & 32768) return collectMessageAttachments(repliedMsg).length > 0 || true;
+    if (flags & 32768) return true;
   } catch {}
   return false;
 }
-/** Attachments on this message or the message it replies to (Components V2 safe) */
+
+/** Attachments on this message or the message it replies to (Components V2 safe via REST) */
 async function attachmentsFromMsgOrReply(msg, filterFn = null) {
-  // Real files only — works for normal messages AND Components V2 (type 13 file still lands in attachments)
   const onlyFiles = (arr) => (arr || []).filter(a => {
     if (!a) return false;
     const url = a.url || a.proxyURL || a.proxy_url;
     const name = a.name || a.filename;
     return !!url && !!name;
   }).map(a => {
-    // Normalize so later code can use .url / .name always
-    if (!a.url && (a.proxyURL || a.proxy_url)) {
-      try { a.url = a.proxyURL || a.proxy_url; } catch {}
-    }
-    if (!a.name && a.filename) {
-      try { a.name = a.filename; } catch {}
-    }
-    return a;
+    const url = a.url || a.proxyURL || a.proxy_url;
+    const name = a.name || a.filename;
+    return {
+      id: a.id,
+      name,
+      filename: name,
+      url,
+      proxyURL: a.proxyURL || a.proxy_url || url,
+      size: a.size || 0,
+      contentType: a.contentType || a.content_type || null
+    };
   });
+
   let list = onlyFiles(collectMessageAttachments(msg));
+
   if (!list.length && msg.reference?.messageId) {
+    const refId = msg.reference.messageId;
+    // 1) discord.js object
     try {
       const refMsg = await fetchRepliedMessage(msg);
-      if (refMsg) {
-        list = onlyFiles(collectMessageAttachments(refMsg));
-        // V2: some clients only expose attachments after a second read
-        if (!list.length && refMsg.attachments?.size) {
-          list = onlyFiles([...refMsg.attachments.values()]);
-        }
-      }
+      if (refMsg) list = onlyFiles(collectMessageAttachments(refMsg));
+    } catch {}
+    // 2) Raw REST — reliable for Components V2
+    if (!list.length) {
+      try {
+        const raw = await fetchMessageRaw(msg.channel.id, refId);
+        list = onlyFiles(attachmentsFromRawMessage(raw));
+      } catch {}
+    }
+  }
+
+  // Also: if this msg itself is empty, try raw self (rare)
+  if (!list.length && msg.id) {
+    try {
+      const raw = await fetchMessageRaw(msg.channel.id, msg.id);
+      list = onlyFiles(attachmentsFromRawMessage(raw));
     } catch {}
   }
+
   if (typeof filterFn === "function") list = list.filter(filterFn);
   return list;
 }
@@ -929,16 +1017,25 @@ async function replyComponentsV2(message, payload, opts = {}) {
       failIfNotExists: false
     }
   };
+  // Prefer channel.send + messageReference (works when replying to Components V2)
   try {
+    if (base.flags == null && payload.flags != null) base.flags = payload.flags;
     return await message.channel.send(base);
   } catch (e1) {
-    // Fallback: message.reply without nested reply option
     try {
       const { reply, ...rest } = base;
-      return await message.reply(rest);
+      return await message.channel.send({
+        ...rest,
+        reply: { messageReference: message.id, failIfNotExists: false }
+      });
     } catch (e2) {
-      console.warn("⚠️ Components V2 reply failed:", e2.message?.slice(0, 140));
-      throw e2;
+      try {
+        const { reply, ...rest } = base;
+        return await message.reply(rest);
+      } catch (e3) {
+        console.warn("⚠️ Components V2 reply failed:", e3.message?.slice(0, 140));
+        throw e3;
+      }
     }
   }
 }
@@ -1667,16 +1764,17 @@ function indexMessageFiles(msg) {
 async function resolveCobaltMedia(pageUrl) {
   const endpoints = [
     "https://api.cobalt.tools/",
-    "https://api.cobalt.tools/api/json",
     "https://cobalt.api.timelessnesses.me/",
     "https://co.wuk.sh/",
-    "https://co.wuk.sh/api/json",
-    "https://cobalt.solidsoftware.ru/"
+    "https://cobalt-api.kwetiaumala.my.id/",
+    "https://api.cobalt.tools/api/json"
   ];
   const bodies = [
     { url: pageUrl },
     { url: pageUrl, downloadMode: "auto" },
-    { url: pageUrl, downloadMode: "auto", filenameStyle: "basic", videoQuality: "max" }
+    { url: pageUrl, downloadMode: "auto", videoQuality: "max" },
+    { url: pageUrl, downloadMode: "mute" },
+    { url: pageUrl, downloadMode: "audio" }
   ];
   for (const endpoint of endpoints) {
     for (const body of bodies) {
@@ -1686,13 +1784,17 @@ async function resolveCobaltMedia(pageUrl) {
           headers: {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
           },
           body: JSON.stringify(body)
         });
         if (!apiRes.ok) continue;
         const data = await apiRes.json().catch(() => null);
         if (!data) continue;
+        // cobalt v7 statuses
+        if ((data.status === "tunnel" || data.status === "redirect" || data.status === "stream" || data.status === "success") && data.url) {
+          return { url: data.url, type: data.audio ? "Audio" : "Video" };
+        }
         if (data.url) return { url: data.url, type: data.audio ? "Audio" : "Video" };
         if (data.audio) return { url: data.audio, type: "Audio" };
         if (Array.isArray(data.picker) && data.picker[0]?.url) {
@@ -1704,24 +1806,27 @@ async function resolveCobaltMedia(pageUrl) {
   return null;
 }
 
-/** Resolve TikTok no-watermark URL with multiple APIs */
 async function expandShortUrl(pageUrl) {
   try {
     if (!/vm\.tiktok\.com|vt\.tiktok\.com|tiktok\.com\/t\//i.test(pageUrl)) return pageUrl;
     const res = await fetch(pageUrl, {
       method: "GET",
       redirect: "manual",
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" }
+      headers: {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+      }
     });
-    const loc = res.headers.get("location") || res.headers.get("Location");
-    if (loc && /^https?:\/\//i.test(loc)) return loc.split("?")[0] + (loc.includes("?") ? "?" + loc.split("?")[1] : "");
-    if (loc && loc.startsWith("/")) return "https://www.tiktok.com" + loc;
+    let loc = res.headers.get("location") || res.headers.get("Location");
+    if (loc) {
+      if (loc.startsWith("/")) loc = "https://www.tiktok.com" + loc;
+      if (/^https?:\/\//i.test(loc)) return loc;
+    }
   } catch {}
   try {
     const res2 = await fetch(pageUrl, {
       method: "GET",
       redirect: "follow",
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+      headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15" }
     });
     if (res2.url && /tiktok\.com/i.test(res2.url)) return res2.url;
   } catch {}
@@ -1730,67 +1835,79 @@ async function expandShortUrl(pageUrl) {
 
 async function resolveTikTokMedia(pageUrl) {
   let url = String(pageUrl || "").trim();
+  // Strip tracking params noise but keep video id path
+  try {
+    const u = new URL(url);
+    if (/tiktok\.com/i.test(u.hostname)) {
+      // keep pathname, drop most query except useful ones
+      url = u.origin + u.pathname + (u.search || "");
+    }
+  } catch {}
   url = await expandShortUrl(url);
 
   const tryJsonUrl = (data) => {
     if (!data || typeof data !== "object") return null;
-    if (data.url) return { url: data.url, type: data.audio ? "Audio" : "Video" };
-    if (data.audio) return { url: data.audio, type: "Audio" };
+    if (data.url && /^https?:\/\//i.test(data.url)) return { url: data.url, type: data.audio ? "Audio" : "Video" };
+    if (data.audio && /^https?:\/\//i.test(data.audio)) return { url: data.audio, type: "Audio" };
     if (Array.isArray(data.picker) && data.picker[0]?.url) return { url: data.picker[0].url, type: "Photo" };
     const d = data.data || data.result || data;
-    if (d?.hdplay) return { url: d.hdplay, type: "Video" };
-    if (d?.play) return { url: d.play, type: "Video" };
-    if (d?.wmplay) return { url: d.wmplay, type: "Video" };
-    if (d?.nwm_video_url) return { url: d.nwm_video_url, type: "Video" };
-    if (d?.nwm_video_url_HQ) return { url: d.nwm_video_url_HQ, type: "Video" };
-    if (d?.video) return { url: d.video, type: "Video" };
-    if (d?.download?.url) return { url: d.download.url, type: "Video" };
+    if (!d || typeof d !== "object") return null;
+    for (const key of ["hdplay", "play", "wmplay", "nwm_video_url_HQ", "nwm_video_url", "video", "video_url", "download_url"]) {
+      if (d[key] && /^https?:\/\//i.test(d[key])) return { url: d[key], type: "Video" };
+    }
+    if (d.download?.url) return { url: d.download.url, type: "Video" };
+    if (Array.isArray(d.images) && d.images[0]) return { url: d.images[0], type: "Photo" };
     return null;
   };
 
-  // Cobalt (expanded URL + original)
-  for (const u of [url, pageUrl]) {
+  for (const u of [...new Set([url, pageUrl])]) {
     const cobalt = await resolveCobaltMedia(u);
     if (cobalt?.url) return cobalt;
   }
 
-  // tikwm variants
-  const tikwmUrls = [
-    "https://www.tikwm.com/api/?url=" + encodeURIComponent(url) + "&hd=1",
-    "https://tikwm.com/api/?url=" + encodeURIComponent(url) + "&hd=1",
-    "https://www.tikwm.com/api/?url=" + encodeURIComponent(pageUrl) + "&hd=1"
-  ];
-  for (const apiUrl of tikwmUrls) {
+  // tikwm
+  for (const u of [...new Set([url, pageUrl])]) {
+    for (const apiUrl of [
+      "https://www.tikwm.com/api/?url=" + encodeURIComponent(u) + "&hd=1",
+      "https://tikwm.com/api/?url=" + encodeURIComponent(u) + "&hd=1"
+    ]) {
+      try {
+        const api2 = await fetch(apiUrl, {
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.tikwm.com/"
+          }
+        });
+        const d2 = await api2.json().catch(() => null);
+        const hit = tryJsonUrl(d2);
+        if (hit) return hit;
+      } catch {}
+    }
     try {
-      const api2 = await fetch(apiUrl, {
-        headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" }
+      const api3 = await fetch("https://www.tikwm.com/api/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0",
+          "Referer": "https://www.tikwm.com/"
+        },
+        body: "url=" + encodeURIComponent(u) + "&hd=1"
       });
-      const d2 = await api2.json().catch(() => null);
-      const hit = tryJsonUrl(d2);
+      const d3 = await api3.json().catch(() => null);
+      const hit = tryJsonUrl(d3);
       if (hit) return hit;
     } catch {}
   }
-  try {
-    const api3 = await fetch("https://tikwm.com/api/", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0"
-      },
-      body: "url=" + encodeURIComponent(url) + "&hd=1"
-    });
-    const d3 = await api3.json().catch(() => null);
-    const hit = tryJsonUrl(d3);
-    if (hit) return hit;
-  } catch {}
 
-  // Public downloader mirrors (best-effort)
-  const mirrors = [
-    "https://api.tikmate.app/api/lookup?url=" + encodeURIComponent(url),
+  // Extra public APIs
+  const extras = [
+    "https://api.tiklydown.eu.org/api/download?url=" + encodeURIComponent(url),
+    "https://api.tiklydown.eu.org/api/download/v3?url=" + encodeURIComponent(url),
     "https://tikdownloader.io/api/ajaxSearch"
   ];
-  for (const m of mirrors) {
+  for (const m of extras) {
     try {
       if (m.includes("ajaxSearch")) {
         const r = await fetch(m, {
@@ -1800,13 +1917,17 @@ async function resolveTikTokMedia(pageUrl) {
         });
         const j = await r.json().catch(() => null);
         const html = j?.data || j?.html || "";
-        const match = String(html).match(/https?:\/\/[^"'\s]+\.(?:mp4|mov)[^"'\s]*/i);
+        const match = String(html).match(/https?:\/\/[^"'\s<>]+(?:\.mp4|\.mov)[^"'\s<>]*/i);
         if (match) return { url: match[0].replace(/&amp;/g, "&"), type: "Video" };
       } else {
         const r = await fetch(m, { headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" } });
         const j = await r.json().catch(() => null);
         const hit = tryJsonUrl(j);
         if (hit) return hit;
+        // tiklydown shape
+        if (j?.video?.noWatermark) return { url: j.video.noWatermark, type: "Video" };
+        if (j?.video?.playAddr) return { url: j.video.playAddr, type: "Video" };
+        if (j?.result?.video) return { url: j.result.video, type: "Video" };
       }
     } catch {}
   }
@@ -5109,9 +5230,16 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     const isBuyerUser = perm.isBuyer;
     let attachments = await attachmentsFromMsgOrReply(msg, a => {
-      const e = ext(a.name);
-      return e === "txt" || e === "lua";
+      const e = ext(a.name || a.filename);
+      return e === "txt" || e === "lua" || e === "luau";
     });
+    if (!attachments.length && msg.reference?.messageId) {
+      const any = await attachmentsFromMsgOrReply(msg, null);
+      attachments = any.filter(a => {
+        const e = ext(a.name || a.filename);
+        return e === "txt" || e === "lua" || e === "luau" || !e;
+      });
+    }
     if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
     const file = attachments[0];
     const maxUploadSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
@@ -5352,6 +5480,15 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return e === "lua" || e === "txt" || e === "luau";
     };
     let attachments = await attachmentsFromMsgOrReply(msg, scriptFilter);
+    // Components V2 fallback: any attachment on replied message, then keep text-like files
+    if (!attachments.length && msg.reference?.messageId) {
+      const any = await attachmentsFromMsgOrReply(msg, null);
+      attachments = any.filter(a => {
+        const e = ext(a.name || a.filename);
+        const ct = String(a.contentType || "").toLowerCase();
+        return e === "lua" || e === "txt" || e === "luau" || e === "text" || !e || ct.includes("text") || ct.includes("lua");
+      });
+    }
     if (!attachments.length) {
       await sendRenameInputError(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
       return;
