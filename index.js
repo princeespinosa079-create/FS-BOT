@@ -354,7 +354,8 @@ function checkCommandCooldown(userId, cmd, isBuyerUser) {
 /** Reply helper when out of tokens — never attach tokens left */
 function replyNoTokens(msg, waitUntil) {
   pendingTokenLine.delete(String(msg.author.id));
-  return replyUser(msg, { embeds: [tokenWaitEmbed(waitUntil)] });
+  const leftMs = Math.max(0, (waitUntil || getNextMidnightPHMs()) - Date.now());
+  return sendInputErrorV2(msg, "You need to wait **" + formatTokenWait(leftMs) + "**");
 }
 // ============================================================
 // DISCORD CLIENT
@@ -756,11 +757,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   // Server Tag requirement — regular users MUST adopt this server's Server Tag
   const hasTag = await hasPrinceStatus(msg.author.id);
   if (!hasTag) {
-    const tagEmbed = new EmbedBuilder()
-      .setColor(0xED4245)
-      .setTitle("Input Error")
-      .setDescription("**Tips:**\n- Go on your profile, click `Edit Profile` then scroll down, you’ll see the `Select a Server Tag` click it then use our Server Tag.");
-    replyUser(msg, { embeds: [tagEmbed] }).catch(() => {});
+    sendInputErrorV2(msg, "**Tips:**\n- Go on your profile, click `Edit Profile` then scroll down, you’ll see the `Select a Server Tag` click it then use our Server Tag.").catch(() => {});
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
   // Channel lock — Components V2 Input Error
@@ -808,12 +805,15 @@ function collectMessageAttachments(message) {
 async function fetchRepliedMessage(msg) {
   const refId = msg?.reference?.messageId;
   if (!refId) return null;
+  // Always force-fetch so Components V2 attachment URLs are fresh
   try {
-    const cached = msg.channel?.messages?.cache?.get(refId);
-    if (cached) return cached;
+    return await msg.channel.messages.fetch({ message: refId, force: true });
   } catch {}
   try {
     return await msg.channel.messages.fetch(refId);
+  } catch {}
+  try {
+    return msg.channel?.messages?.cache?.get(refId) || null;
   } catch {
     return null;
   }
@@ -850,13 +850,33 @@ async function isReplyingToFileAsync(msg) {
 }
 /** Attachments on this message or the message it replies to (Components V2 safe) */
 async function attachmentsFromMsgOrReply(msg, filterFn = null) {
-  // Only real file attachments (ignore Components V2 text/layout — focus the file)
-  const onlyFiles = (arr) => (arr || []).filter(a => a && (a.url || a.proxyURL || a.proxy_url) && (a.name || a.filename));
+  // Real files only — works for normal messages AND Components V2 (type 13 file still lands in attachments)
+  const onlyFiles = (arr) => (arr || []).filter(a => {
+    if (!a) return false;
+    const url = a.url || a.proxyURL || a.proxy_url;
+    const name = a.name || a.filename;
+    return !!url && !!name;
+  }).map(a => {
+    // Normalize so later code can use .url / .name always
+    if (!a.url && (a.proxyURL || a.proxy_url)) {
+      try { a.url = a.proxyURL || a.proxy_url; } catch {}
+    }
+    if (!a.name && a.filename) {
+      try { a.name = a.filename; } catch {}
+    }
+    return a;
+  });
   let list = onlyFiles(collectMessageAttachments(msg));
   if (!list.length && msg.reference?.messageId) {
     try {
       const refMsg = await fetchRepliedMessage(msg);
-      if (refMsg) list = onlyFiles(collectMessageAttachments(refMsg));
+      if (refMsg) {
+        list = onlyFiles(collectMessageAttachments(refMsg));
+        // V2: some clients only expose attachments after a second read
+        if (!list.length && refMsg.attachments?.size) {
+          list = onlyFiles([...refMsg.attachments.values()]);
+        }
+      }
     } catch {}
   }
   if (typeof filterFn === "function") list = list.filter(filterFn);
@@ -1685,28 +1705,111 @@ async function resolveCobaltMedia(pageUrl) {
 }
 
 /** Resolve TikTok no-watermark URL with multiple APIs */
-async function resolveTikTokMedia(pageUrl) {
-  const cobalt = await resolveCobaltMedia(pageUrl);
-  if (cobalt?.url) return cobalt;
-  // tikwm GET
+async function expandShortUrl(pageUrl) {
   try {
-    const api2 = await fetch("https://www.tikwm.com/api/?url=" + encodeURIComponent(pageUrl) + "&hd=1");
-    const d2 = await api2.json().catch(() => null);
-    if (d2?.data?.hdplay) return { url: d2.data.hdplay, type: "Video" };
-    if (d2?.data?.play) return { url: d2.data.play, type: "Video" };
-    if (d2?.data?.wmplay) return { url: d2.data.wmplay, type: "Video" };
+    if (!/vm\.tiktok\.com|vt\.tiktok\.com|tiktok\.com\/t\//i.test(pageUrl)) return pageUrl;
+    const res = await fetch(pageUrl, {
+      method: "GET",
+      redirect: "manual",
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" }
+    });
+    const loc = res.headers.get("location") || res.headers.get("Location");
+    if (loc && /^https?:\/\//i.test(loc)) return loc.split("?")[0] + (loc.includes("?") ? "?" + loc.split("?")[1] : "");
+    if (loc && loc.startsWith("/")) return "https://www.tiktok.com" + loc;
   } catch {}
-  // tikwm POST
+  try {
+    const res2 = await fetch(pageUrl, {
+      method: "GET",
+      redirect: "follow",
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+    });
+    if (res2.url && /tiktok\.com/i.test(res2.url)) return res2.url;
+  } catch {}
+  return pageUrl;
+}
+
+async function resolveTikTokMedia(pageUrl) {
+  let url = String(pageUrl || "").trim();
+  url = await expandShortUrl(url);
+
+  const tryJsonUrl = (data) => {
+    if (!data || typeof data !== "object") return null;
+    if (data.url) return { url: data.url, type: data.audio ? "Audio" : "Video" };
+    if (data.audio) return { url: data.audio, type: "Audio" };
+    if (Array.isArray(data.picker) && data.picker[0]?.url) return { url: data.picker[0].url, type: "Photo" };
+    const d = data.data || data.result || data;
+    if (d?.hdplay) return { url: d.hdplay, type: "Video" };
+    if (d?.play) return { url: d.play, type: "Video" };
+    if (d?.wmplay) return { url: d.wmplay, type: "Video" };
+    if (d?.nwm_video_url) return { url: d.nwm_video_url, type: "Video" };
+    if (d?.nwm_video_url_HQ) return { url: d.nwm_video_url_HQ, type: "Video" };
+    if (d?.video) return { url: d.video, type: "Video" };
+    if (d?.download?.url) return { url: d.download.url, type: "Video" };
+    return null;
+  };
+
+  // Cobalt (expanded URL + original)
+  for (const u of [url, pageUrl]) {
+    const cobalt = await resolveCobaltMedia(u);
+    if (cobalt?.url) return cobalt;
+  }
+
+  // tikwm variants
+  const tikwmUrls = [
+    "https://www.tikwm.com/api/?url=" + encodeURIComponent(url) + "&hd=1",
+    "https://tikwm.com/api/?url=" + encodeURIComponent(url) + "&hd=1",
+    "https://www.tikwm.com/api/?url=" + encodeURIComponent(pageUrl) + "&hd=1"
+  ];
+  for (const apiUrl of tikwmUrls) {
+    try {
+      const api2 = await fetch(apiUrl, {
+        headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" }
+      });
+      const d2 = await api2.json().catch(() => null);
+      const hit = tryJsonUrl(d2);
+      if (hit) return hit;
+    } catch {}
+  }
   try {
     const api3 = await fetch("https://tikwm.com/api/", {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
-      body: "url=" + encodeURIComponent(pageUrl) + "&hd=1"
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0"
+      },
+      body: "url=" + encodeURIComponent(url) + "&hd=1"
     });
     const d3 = await api3.json().catch(() => null);
-    if (d3?.data?.hdplay) return { url: d3.data.hdplay, type: "Video" };
-    if (d3?.data?.play) return { url: d3.data.play, type: "Video" };
+    const hit = tryJsonUrl(d3);
+    if (hit) return hit;
   } catch {}
+
+  // Public downloader mirrors (best-effort)
+  const mirrors = [
+    "https://api.tikmate.app/api/lookup?url=" + encodeURIComponent(url),
+    "https://tikdownloader.io/api/ajaxSearch"
+  ];
+  for (const m of mirrors) {
+    try {
+      if (m.includes("ajaxSearch")) {
+        const r = await fetch(m, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0" },
+          body: "q=" + encodeURIComponent(url) + "&lang=en"
+        });
+        const j = await r.json().catch(() => null);
+        const html = j?.data || j?.html || "";
+        const match = String(html).match(/https?:\/\/[^"'\s]+\.(?:mp4|mov)[^"'\s]*/i);
+        if (match) return { url: match[0].replace(/&amp;/g, "&"), type: "Video" };
+      } else {
+        const r = await fetch(m, { headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" } });
+        const j = await r.json().catch(() => null);
+        const hit = tryJsonUrl(j);
+        if (hit) return hit;
+      }
+    } catch {}
+  }
   return null;
 }
 
@@ -1714,7 +1817,11 @@ async function resolveTikTokMedia(pageUrl) {
 async function downloadAsAttachment(mediaUrl, fallbackName) {
   try {
     const res = await fetch(mediaUrl, {
-      headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Referer": "https://www.tiktok.com/"
+      },
       redirect: "follow"
     });
     if (!res.ok) return null;
@@ -3000,6 +3107,7 @@ const commands = [
       .setRequired(true)
       .addChoices(
         { name: "With Embed", value: "good" },
+        { name: "Embed V2", value: "v2" },
         { name: "No Embed", value: "none" }
       ))
     .addStringOption(o => o
@@ -3468,11 +3576,11 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     if (!buyer) {
       const hasTag = await hasPrinceStatus(uid);
       if (!hasTag) {
-        const tagEmbed = new EmbedBuilder()
-          .setColor(0xED4245)
-          .setTitle("Input Error")
-          .setDescription("**Tips:**\n- Go on your profile, click `Edit Profile` then scroll down, you’ll see the `Select a Server Tag` click it then use our Server Tag.");
-        return interaction.reply({ embeds: [tagEmbed], flags: MessageFlags.Ephemeral }).catch(() => {});
+        const body = "### Input Error\n**Tips:**\n- Go on your profile, click `Edit Profile` then scroll down, you’ll see the `Select a Server Tag` click it then use our Server Tag.";
+        return interaction.reply({
+          flags: IS_COMPONENTS_V2 | ((MessageFlags && MessageFlags.Ephemeral != null) ? MessageFlags.Ephemeral : 64),
+          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: body }] }]
+        }).catch(() => {});
       }
     }
     if (interaction.customId === "finderpanel_find") {
@@ -3631,7 +3739,11 @@ client.on("interactionCreate", async interaction => {
     // Token cost (panel Find always costs — unlike prefix .find)
     const tok = tryConsumeToken(interaction.user.id, isBuyerUser);
     if (!tok.ok) {
-      return interaction.reply({ embeds: [tokenWaitEmbed(tok.waitUntil)], flags: MessageFlags.Ephemeral }).catch(() => {});
+      { const leftMs = Math.max(0, (tok.waitUntil || getNextMidnightPHMs()) - Date.now());
+        return interaction.reply({
+          flags: IS_COMPONENTS_V2 | MessageFlags.Ephemeral,
+          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: "### Input Error\nYou need to wait **" + formatTokenWait(leftMs) + "**" }] }]
+        }).catch(() => {}); }
     }
     logFinderPanel(interaction.user, "Find", `Query: \`${query}\``).catch(() => {});
     const results = findFiles(query);
@@ -3694,7 +3806,11 @@ client.on("interactionCreate", async interaction => {
     }
     const tok = tryConsumeToken(interaction.user.id, isBuyerUser);
     if (!tok.ok) {
-      return interaction.reply({ embeds: [tokenWaitEmbed(tok.waitUntil)], flags: MessageFlags.Ephemeral }).catch(() => {});
+      { const leftMs = Math.max(0, (tok.waitUntil || getNextMidnightPHMs()) - Date.now());
+        return interaction.reply({
+          flags: IS_COMPONENTS_V2 | MessageFlags.Ephemeral,
+          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: "### Input Error\nYou need to wait **" + formatTokenWait(leftMs) + "**" }] }]
+        }).catch(() => {}); }
     }
     logFinderPanel(interaction.user, "Get", `ID(s): \`${args.join(", ")}\``).catch(() => {});
     await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -3879,6 +3995,26 @@ client.on("interactionCreate", async interaction => {
       }
       if (type === "none") {
         await targetChannel.send({ content: text });
+      } else if (type === "v2") {
+        let color = RENAME_V2_ACCENT;
+        if (colorRaw) {
+          const named = { blurple: BLURPLE, gray: GRAY_COLOR, grey: GRAY_COLOR, red: 0xED4245, green: 0x57F287, yellow: 0xF1C40F, black: REGULAR_COLOR };
+          const key = colorRaw.toLowerCase().replace(/^#/, "");
+          if (named[colorRaw.toLowerCase()]) color = named[colorRaw.toLowerCase()];
+          else if (/^[0-9a-fA-F]{6}$/.test(key)) color = parseInt(key, 16);
+          else if (/^[0-9a-fA-F]{3}$/.test(key)) color = parseInt(key[0]+key[0]+key[1]+key[1]+key[2]+key[2], 16);
+        }
+        let body = String(text || "");
+        if (title) body = "### " + String(title).slice(0, 200) + "\n" + body;
+        if (footer) body = body + "\n\n-# " + String(footer).slice(0, 200);
+        await targetChannel.send({
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: color,
+            components: [{ type: 10, content: body.slice(0, 4000) }]
+          }]
+        });
       } else {
         let color = BLURPLE;
         if (colorRaw) {
@@ -3892,7 +4028,6 @@ client.on("interactionCreate", async interaction => {
           .setColor(color)
           .setDescription(text);
         if (title) embed.setTitle(title);
-        // Footer only if owner provided one — otherwise no footer
         if (footer) embed.setFooter({ text: footer });
         await targetChannel.send({ embeds: [embed] });
       }
@@ -4007,11 +4142,7 @@ client.on("messageCreate", async msg => {
     const isBuyerUser = await isBuyer(msg.author.id, msg.member);
     if (!isBuyerUser && !/^\.(?:help|profile|prof|redeem|red)(?:\s|$)/i.test(txt)) {
       if (!channelAllowed(msg)) {
-        const chEmbed = new EmbedBuilder()
-          .setColor(0xED4245)
-          .setTitle("Input Error")
-          .setDescription("**Tips:**\n- Use command in allowed channel, and use server tag if you don’t have it so you can use command there.");
-        replyUser(msg, { embeds: [chEmbed] }).catch(() => {});
+        sendInputErrorV2(msg, "**Tips:**\n- Use server tag and go to the allowed channel.").catch(() => {});
         return;
       }
     }
@@ -5220,13 +5351,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const e = ext(a.name);
       return e === "lua" || e === "txt" || e === "luau";
     };
-    let attachments = collectMessageAttachments(msg).filter(scriptFilter);
-    if (!attachments.length && msg.reference?.messageId) {
-      try {
-        const refMsg = await fetchRepliedMessage(msg);
-        if (refMsg) attachments = collectMessageAttachments(refMsg).filter(scriptFilter);
-      } catch {}
-    }
+    let attachments = await attachmentsFromMsgOrReply(msg, scriptFilter);
     if (!attachments.length) {
       await sendRenameInputError(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
       return;
