@@ -898,7 +898,10 @@ const IS_COMPONENTS_V2 = (MessageFlags && MessageFlags.IsComponentsV2 != null)
   ? MessageFlags.IsComponentsV2
   : 32768;
 /** Accent used in renamer V2 containers (matches discohook sample) */
-const RENAME_V2_ACCENT = 6449257;
+const RENAME_V2_ACCENT = 0xF78000; // #f78000
+const FINDER_V2_ACCENT = 0xF78000; // #f78000
+/** Separator spacing: 1 = Small, 2 = Large */
+const SEPARATOR_SPACING_SMALL = 1;
 
 /** Reply-safe Components V2 send (avoids Input Error on some clients/API paths) */
 async function replyComponentsV2(message, payload) {
@@ -982,9 +985,10 @@ async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName
 
   const parts = [];
   if (previewMarkdown) parts.push(String(previewMarkdown).trim());
-  if (footerLine) parts.push(String(footerLine).trim()); // optional, unused by rename
+  if (footerLine) parts.push(String(footerLine).trim());
   const body = parts.join("\n\n").slice(0, 4000) || "### File Preview";
 
+  // Above divider: File Preview + URL Found | Below divider: result file
   const v2Payload = {
     flags: IS_COMPONENTS_V2,
     files: [file],
@@ -994,6 +998,7 @@ async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName
         accent_color: RENAME_V2_ACCENT,
         components: [
           { type: 10, content: body },
+          { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
           { type: 13, file: { url: `attachment://${safeName}` } }
         ]
       }
@@ -1009,6 +1014,34 @@ async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName
       allowedMentions: { repliedUser: true, users: [message.author.id] }
     });
   }
+}
+
+/** Build Finder Source Results Components V2 payload (list + divider + optional action row) */
+function buildFinderV2Payload({ listLines, pageLabel, actionRow, ephemeral = false }) {
+  const listText = Array.isArray(listLines) ? listLines.join("\n") : String(listLines || "");
+  let content = `### Finder Source Results\n${listText}`;
+  if (pageLabel) content += `\n\n-# ${pageLabel}`;
+  content = content.slice(0, 4000);
+  const containerChildren = [
+    { type: 10, content },
+    { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL }
+  ];
+  const components = [
+    {
+      type: 17,
+      accent_color: FINDER_V2_ACCENT,
+      components: containerChildren
+    }
+  ];
+  if (actionRow) {
+    components.push(typeof actionRow.toJSON === "function" ? actionRow.toJSON() : actionRow);
+  }
+  let flags = IS_COMPONENTS_V2;
+  if (ephemeral) {
+    const eph = (MessageFlags && MessageFlags.Ephemeral != null) ? MessageFlags.Ephemeral : 64;
+    flags = flags | eph;
+  }
+  return { flags, components, embeds: [] };
 }
 
 function replyUser(message, payload) {
@@ -3146,16 +3179,18 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     if (menu.page > menu.totalPages) menu.page = menu.totalPages;
     const start = (menu.page - 1) * 8;
     const pageItems = menu.results.slice(start, start + 8);
-    const embed = new EmbedBuilder()
-      .setColor(BLURPLE)
-      .setTitle(getFinderTitle(menu.isBuyer))
-      .setDescription(pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n"))
-      .setFooter({ text: `Pages ${menu.page}/${menu.totalPages} │ Prince Finder` });
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
     );
-    await interaction.update({ embeds: [embed], components: [row] }).catch(() => {});
+    const listLines = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``);
+    const v2 = buildFinderV2Payload({
+      listLines,
+      pageLabel: `Pages ${menu.page}/${menu.totalPages} │ Prince Finder`,
+      actionRow: row,
+      ephemeral: false
+    });
+    await interaction.update({ components: v2.components, embeds: [], flags: IS_COMPONENTS_V2 }).catch(() => {});
     paginationMenus.set(uid, menu);
     return;
   }
@@ -3355,21 +3390,22 @@ client.on("interactionCreate", async interaction => {
         flags: MessageFlags.Ephemeral
       }).catch(() => {});
     }
-    // Finder source embeds — never show tokens left
+    // Finder source — Components V2 (never show tokens left)
     const perPage = 8;
     const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
-    const desc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n");
-    const embed = new EmbedBuilder()
-      .setColor(BLURPLE)
-      .setTitle(getFinderTitle(isBuyerUser))
-      .setDescription(desc)
-      .setFooter({ text: `Pages 1/${totalPages} │ Prince Finder` });
+    const listLines = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``);
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
     );
-    await interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral }).catch(() => {});
+    const v2 = buildFinderV2Payload({
+      listLines,
+      pageLabel: `Pages 1/${totalPages} │ Prince Finder`,
+      actionRow: row,
+      ephemeral: true
+    });
+    await interaction.reply(v2).catch(() => {});
     const replyMsg = await interaction.fetchReply().catch(() => null);
     if (replyMsg) {
       paginationMenus.set(interaction.user.id, {
@@ -5298,20 +5334,20 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const isBuyerUser = perm.isBuyer;
     const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
-    // Finder source embeds — never show tokens left
-    const findDesc = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``).join("\n");
-    const embed = new EmbedBuilder()
-      .setColor(BLURPLE)
-      .setTitle(getFinderTitle(isBuyerUser))
-      .setDescription(findDesc)
-      .setFooter({ text: `Pages 1/${totalPages} │ Prince Finder` });
+    // Finder source — Components V2 (never show tokens left)
+    const listLines = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``);
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
     );
-    // Clear pending so replyUser doesn't append tokens on finder embeds
     pendingTokenLine.delete(String(msg.author.id));
-    const sent = await replyUser(msg, { embeds: [embed], components: [row] }).catch(() => {});
+    const v2 = buildFinderV2Payload({
+      listLines,
+      pageLabel: `Pages 1/${totalPages} │ Prince Finder`,
+      actionRow: row,
+      ephemeral: false
+    });
+    const sent = await replyComponentsV2(msg, v2).catch(() => null);
     if (sent) paginationMenus.set(msg.author.id, {
       results, page: 1, totalPages, messageId: sent.id,
       authorId: msg.author.id, createdAt: Date.now(), isBuyer: isBuyerUser
