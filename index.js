@@ -951,6 +951,57 @@ async function sendRenameLoading(message) {
   }
 }
 
+/** Obfuscator loading — Components V2 */
+async function sendObfLoading(message) {
+  const payload = {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: RENAME_V2_ACCENT,
+      components: [
+        { type: 10, content: "### Obfuscating...\n⏳ Processing..." }
+      ]
+    }]
+  };
+  try {
+    return await replyComponentsV2(message, payload);
+  } catch (e) {
+    return message.reply({ content: "### Obfuscating...\n⏳ Processing..." }).catch(() => null);
+  }
+}
+
+/** Obfuscator result — PC/Mobile copy above divider, file below */
+async function sendObfResult(message, { loadstring, fileBuffer, fileName }) {
+  const safeName = String(fileName || "obfuscated.lua").replace(/[^\w.\-]+/g, "_");
+  const file = new AttachmentBuilder(fileBuffer, { name: safeName });
+  const ls = String(loadstring || "").slice(0, 1800);
+  const body = ("**PC COPY:**\n```lua\n" + ls + "\n```\n\n**MOBILE COPY:**\n`" + ls + "`").slice(0, 3900);
+
+  const v2Payload = {
+    flags: IS_COMPONENTS_V2,
+    files: [file],
+    components: [{
+      type: 17,
+      accent_color: RENAME_V2_ACCENT,
+      components: [
+        { type: 10, content: body },
+        { type: 14, spacing: SEPARATOR_SPACING_SMALL },
+        { type: 13, file: { url: "attachment://" + safeName } }
+      ]
+    }]
+  };
+  try {
+    return await replyComponentsV2(message, v2Payload);
+  } catch (e) {
+    console.warn("⚠️ Components V2 obf fallback:", e.message?.slice(0, 120));
+    return message.reply({
+      content: body,
+      files: [file],
+      allowedMentions: { repliedUser: true, users: [message.author.id] }
+    }).catch(() => null);
+  }
+}
+
 /** Renamer Input Error / fail — Components V2 (red accent) */
 const RENAME_V2_ERROR_ACCENT = 0xED4245;
 async function sendRenameInputError(message, description) {
@@ -1541,29 +1592,103 @@ function indexMessageFiles(msg) {
 
 /** Resolve TikTok/IG media URL via cobalt + fallbacks */
 async function resolveCobaltMedia(pageUrl) {
-  const endpoints = ["https://api.cobalt.tools/", "https://api.cobalt.tools/api/json"];
+  const endpoints = [
+    "https://api.cobalt.tools/",
+    "https://api.cobalt.tools/api/json",
+    "https://cobalt.api.timelessnesses.me/",
+    "https://co.wuk.sh/api/json"
+  ];
   for (const endpoint of endpoints) {
     try {
       const apiRes = await fetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({ url: pageUrl })
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify({ url: pageUrl, downloadMode: "auto", filenameStyle: "basic" })
       });
       if (!apiRes.ok) continue;
       const data = await apiRes.json().catch(() => null);
       if (!data) continue;
+      // cobalt v7+: status tunnel/redirect/picker
       if (data.url) return { url: data.url, type: data.audio ? "Audio" : "Video" };
       if (data.audio) return { url: data.audio, type: "Audio" };
       if (Array.isArray(data.picker) && data.picker[0]?.url) {
         return { url: data.picker[0].url, type: "Photo (1/" + data.picker.length + ")" };
       }
+      if (data.status === "error" && data.text) continue;
     } catch {}
   }
   return null;
 }
 
+/** Resolve TikTok no-watermark URL with multiple APIs */
+async function resolveTikTokMedia(pageUrl) {
+  const cobalt = await resolveCobaltMedia(pageUrl);
+  if (cobalt?.url) return cobalt;
+  // tikwm GET
+  try {
+    const api2 = await fetch("https://www.tikwm.com/api/?url=" + encodeURIComponent(pageUrl) + "&hd=1");
+    const d2 = await api2.json().catch(() => null);
+    if (d2?.data?.hdplay) return { url: d2.data.hdplay, type: "Video" };
+    if (d2?.data?.play) return { url: d2.data.play, type: "Video" };
+    if (d2?.data?.wmplay) return { url: d2.data.wmplay, type: "Video" };
+  } catch {}
+  // tikwm POST
+  try {
+    const api3 = await fetch("https://tikwm.com/api/", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
+      body: "url=" + encodeURIComponent(pageUrl) + "&hd=1"
+    });
+    const d3 = await api3.json().catch(() => null);
+    if (d3?.data?.hdplay) return { url: d3.data.hdplay, type: "Video" };
+    if (d3?.data?.play) return { url: d3.data.play, type: "Video" };
+  } catch {}
+  return null;
+}
+
+/** Download remote media and return AttachmentBuilder (or null if too large/failed) */
+async function downloadAsAttachment(mediaUrl, fallbackName) {
+  try {
+    const res = await fetch(mediaUrl, {
+      headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" },
+      redirect: "follow"
+    });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!buf.length || buf.length > 24 * 1024 * 1024) return null; // Discord limit ~25MB
+    let name = fallbackName || "download.mp4";
+    const cd = res.headers.get("content-disposition") || "";
+    const m = cd.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
+    if (m) name = decodeURIComponent(m[1].replace(/"/g, "")).trim() || name;
+    else {
+      try {
+        const u = new URL(mediaUrl);
+        const base = u.pathname.split("/").pop();
+        if (base && /\.[a-z0-9]{2,5}$/i.test(base)) name = decodeURIComponent(base);
+      } catch {}
+    }
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    if (!/\.[a-z0-9]{2,5}$/i.test(name)) {
+      if (ct.includes("png")) name += ".png";
+      else if (ct.includes("jpeg") || ct.includes("jpg")) name += ".jpg";
+      else if (ct.includes("webp")) name += ".webp";
+      else if (ct.includes("audio")) name += ".mp3";
+      else name += ".mp4";
+    }
+    return new AttachmentBuilder(buf, { name: name.replace(/[^\w.\-]+/g, "_").slice(0, 80) });
+  } catch {
+    return null;
+  }
+}
+
 async function downloadURL(url) {
-  const res = await fetch(url);
+  const res = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" },
+    redirect: "follow"
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
 }
@@ -4815,7 +4940,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const maxObfSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
     const maxObfLabel = isBuyerUser ? "1MB" : "200KB";
     if (file.size > maxObfSize) { replyUser(msg, `❌ max is ${maxObfLabel} lol.`).catch(() => {}); return; }
-    const sentMsg = await replyUser(msg, "🔒 Obfuscating...").catch(() => {});
+    const sentMsg = await sendObfLoading(msg).catch(() => null);
     try {
       const res = await fetch(file.url);
       const source = await res.text();
@@ -4865,13 +4990,12 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!rawUrl) throw new Error("Could not get paste URL from Pastefy response");
       const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
       // Create obfuscated file attachment
-      const obfFileName = "obfuscated.lua";
-      const obfAttachment = new AttachmentBuilder(Buffer.from(obfuscated, "utf-8"), { name: obfFileName });
       if (sentMsg) await sentMsg.delete().catch(() => {});
-      await msg.channel.send({
-        content: `<@${msg.author.id}>\n\`\`\`lua\n${loadstring}\n\`\`\``,
-        files: [obfAttachment]
-      }).catch(() => {});
+      await sendObfResult(msg, {
+        loadstring,
+        fileBuffer: Buffer.from(obfuscated, "utf-8"),
+        fileName: "obfuscated.lua"
+      });
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
       replyUser(msg, `❌ obfuscate failed: ${e.message}`).catch(() => {});
@@ -5108,27 +5232,28 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     if (/instagram\.com|instagr\.am|ig\.me/i.test(arg)) {
       const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
       try {
-        let downloadUrl = null;
-        let mediaType = "Media";
         const resolved = await resolveCobaltMedia(arg);
-        if (resolved?.url) {
-          downloadUrl = resolved.url;
-          mediaType = resolved.type || "Media";
-        }
-        if (!downloadUrl) throw new Error("Failed to get Instagram media");
-        
-        const resEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("📥 Instagram Download")
-          .setDescription("**Type:** " + mediaType + "\n🔗 **Download:** [Click Here](" + downloadUrl + ")")
-          .setFooter({ text: "Request by @" + msg.author.username + "│Instagram DL", iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-        
+        if (!resolved?.url) throw new Error("Failed to get Instagram media");
+        const mediaType = resolved.type || "Media";
+        const attachment = await downloadAsAttachment(resolved.url, "instagram.mp4");
         if (sentMsg) await sentMsg.delete().catch(() => {});
         const elapsed = Date.now() - startTime;
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
-          embeds: [resEmbed]
-        }).catch(() => {});
+        if (attachment) {
+          await msg.channel.send({
+            content: `<@${msg.author.id}> **Here you go bro!**\n**Type:** ${mediaType}\n**Finish in:** \`${elapsed}ms\``,
+            files: [attachment]
+          }).catch(() => {});
+        } else {
+          const resEmbed = new EmbedBuilder()
+            .setColor(getEmbedColor(isBuyerUser))
+            .setTitle("📥 Instagram Download")
+            .setDescription("**Type:** " + mediaType + "\n🔗 **Download:** [Click Here](" + resolved.url + ")")
+            .setFooter({ text: "Request by @" + msg.author.username + "│Instagram DL", iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
+          await msg.channel.send({
+            content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
+            embeds: [resEmbed]
+          }).catch(() => {});
+        }
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, "❌ failed — link may be private, expired, or not a post/reel.").catch(() => {});
@@ -5136,64 +5261,31 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
 
-    // Check if TikTok URL — NO WATERMARK (multi-fallback resolvers)
+    // Check if TikTok URL — download file when possible
     if (/tiktok\.com|vm\.tiktok\.com/i.test(arg)) {
       const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
       try {
-        let videoUrl = null;
-        const tryCobalt = async (endpoint) => {
-          try {
-            const apiRes = await fetch(endpoint, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "Accept": "application/json" },
-              body: JSON.stringify({ url: arg })
-            });
-            if (!apiRes.ok) return null;
-            const data = await apiRes.json().catch(() => null);
-            if (!data) return null;
-            if (data.url) return data.url;
-            if (data.audio) return data.audio;
-            if (Array.isArray(data.picker) && data.picker[0]?.url) return data.picker[0].url;
-            return null;
-          } catch { return null; }
-        };
-        videoUrl = await tryCobalt("https://api.cobalt.tools/");
-        if (!videoUrl) videoUrl = await tryCobalt("https://api.cobalt.tools/api/json");
-        if (!videoUrl) {
-          try {
-            const api2 = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(arg)}&hd=1`);
-            const d2 = await api2.json().catch(() => null);
-            if (d2?.data?.hdplay) videoUrl = d2.data.hdplay;
-            else if (d2?.data?.play) videoUrl = d2.data.play;
-            else if (d2?.data?.wmplay) videoUrl = d2.data.wmplay;
-          } catch {}
-        }
-        if (!videoUrl) {
-          try {
-            const api3 = await fetch("https://tikwm.com/api/", {
-              method: "POST",
-              headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
-              body: `url=${encodeURIComponent(arg)}&hd=1`
-            });
-            const d3 = await api3.json().catch(() => null);
-            if (d3?.data?.hdplay) videoUrl = d3.data.hdplay;
-            else if (d3?.data?.play) videoUrl = d3.data.play;
-          } catch {}
-        }
-        if (!videoUrl) throw new Error("Failed to get video — link may be private/region-locked, try another URL");
-
-        const resEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("📥 TikTok Download")
-          .setDescription(`🔗 **Download:** [Click Here](${videoUrl})`)
-          .setFooter({ text: `Request by @${msg.author.username}│TikTok DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-
+        const resolved = await resolveTikTokMedia(arg);
+        if (!resolved?.url) throw new Error("Failed to get video — link may be private/region-locked, try another URL");
+        const attachment = await downloadAsAttachment(resolved.url, "tiktok.mp4");
         if (sentMsg) await sentMsg.delete().catch(() => {});
         const elapsed = Date.now() - startTime;
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
-          embeds: [resEmbed]
-        }).catch(() => {});
+        if (attachment) {
+          await msg.channel.send({
+            content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
+            files: [attachment]
+          }).catch(() => {});
+        } else {
+          const resEmbed = new EmbedBuilder()
+            .setColor(getEmbedColor(isBuyerUser))
+            .setTitle("📥 TikTok Download")
+            .setDescription(`🔗 **Download:** [Click Here](${resolved.url})`)
+            .setFooter({ text: `Request by @${msg.author.username}│TikTok DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
+          await msg.channel.send({
+            content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
+            embeds: [resEmbed]
+          }).catch(() => {});
+        }
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
         replyUser(msg, `❌ failed: ${e.message.slice(0, 120)}`).catch(() => {});
