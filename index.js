@@ -1596,29 +1596,37 @@ async function resolveCobaltMedia(pageUrl) {
     "https://api.cobalt.tools/",
     "https://api.cobalt.tools/api/json",
     "https://cobalt.api.timelessnesses.me/",
-    "https://co.wuk.sh/api/json"
+    "https://co.wuk.sh/",
+    "https://co.wuk.sh/api/json",
+    "https://cobalt.solidsoftware.ru/"
+  ];
+  const bodies = [
+    { url: pageUrl },
+    { url: pageUrl, downloadMode: "auto" },
+    { url: pageUrl, downloadMode: "auto", filenameStyle: "basic", videoQuality: "max" }
   ];
   for (const endpoint of endpoints) {
-    try {
-      const apiRes = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json"
-        },
-        body: JSON.stringify({ url: pageUrl, downloadMode: "auto", filenameStyle: "basic" })
-      });
-      if (!apiRes.ok) continue;
-      const data = await apiRes.json().catch(() => null);
-      if (!data) continue;
-      // cobalt v7+: status tunnel/redirect/picker
-      if (data.url) return { url: data.url, type: data.audio ? "Audio" : "Video" };
-      if (data.audio) return { url: data.audio, type: "Audio" };
-      if (Array.isArray(data.picker) && data.picker[0]?.url) {
-        return { url: data.picker[0].url, type: "Photo (1/" + data.picker.length + ")" };
-      }
-      if (data.status === "error" && data.text) continue;
-    } catch {}
+    for (const body of bodies) {
+      try {
+        const apiRes = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0"
+          },
+          body: JSON.stringify(body)
+        });
+        if (!apiRes.ok) continue;
+        const data = await apiRes.json().catch(() => null);
+        if (!data) continue;
+        if (data.url) return { url: data.url, type: data.audio ? "Audio" : "Video" };
+        if (data.audio) return { url: data.audio, type: "Audio" };
+        if (Array.isArray(data.picker) && data.picker[0]?.url) {
+          return { url: data.picker[0].url, type: "Photo (1/" + data.picker.length + ")" };
+        }
+      } catch {}
+    }
   }
   return null;
 }
@@ -2888,7 +2896,7 @@ function obfuscateLua(source) {
   const b64Lua = parts.map(s => '"' + s + '"').join("..");
 
   const lines = [
-    "-- Prince Obfuscator | protected",
+    "-- This file was protected using Prince Obfuscator",
     "local _k={" + keyLua + "}",
     "local _b=" + b64Lua,
     'local _t="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"',
@@ -3309,7 +3317,28 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       actionRow: row,
       ephemeral: false
     });
-    await interaction.update({ components: v2.components, embeds: [], flags: IS_COMPONENTS_V2 }).catch(() => {});
+    // Update in-place so the original reply-to-user stays (message_reference preserved)
+    try {
+      await interaction.update({
+        components: v2.components,
+        embeds: [],
+        flags: IS_COMPONENTS_V2
+      });
+    } catch (e) {
+      try {
+        await interaction.message.edit({
+          components: v2.components,
+          embeds: [],
+          flags: IS_COMPONENTS_V2
+        });
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.deferUpdate().catch(() => {});
+        }
+      } catch (e2) {
+        console.warn("⚠️ finder page update:", e2.message?.slice(0, 120));
+        try { await interaction.deferUpdate(); } catch {}
+      }
+    }
     paginationMenus.set(uid, menu);
     return;
   }
@@ -5325,16 +5354,184 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, "❌ .zip files are owner only, dumbass.").catch(() => {});
       return;
     }
-    const freshUrl = await getFreshUrl(file);
-    const fileUrl = freshUrl || file.url;
-    const fileAttachment = { attachment: fileUrl, name: file.filename || "file.lua" };
-    
-    await msg.channel.send({
-      content: `<@${msg.author.id}> **Here you go!**`,
-      files: [fileAttachment]
-    }).catch(() => {});
+    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
+    try {
+      const freshUrl = await getFreshUrl(file);
+      const fileUrl = freshUrl || file.url;
+      if (!fileUrl) throw new Error("file URL expired");
+      let buf = null;
+      try {
+        buf = await downloadURL(fileUrl);
+      } catch {
+        const again = await getFreshUrl(file);
+        if (again) buf = await downloadURL(again);
+      }
+      if (!buf || !buf.length) throw new Error("could not download file");
+      const attachment = new AttachmentBuilder(buf, { name: file.filename || "file.lua" });
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      const elapsed = Date.now() - startTime;
+      await msg.channel.send({
+        content: `<@${msg.author.id}> **Here you go!**\n**Finish in:** \`${elapsed}ms\``,
+        files: [attachment]
+      }).catch(() => {});
+    } catch (e) {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      replyUser(msg, `❌ failed: ${e.message.slice(0, 100)}`).catch(() => {});
+    }
     return;
   }
+
+  // .copy — Owner Only: copy roles/categories/channels from one server into another
+  // Usage: .copy <source_server_id> <dest_server_id>
+  if (/^\.copy(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const ids = txt.match(/\d{17,20}/g) || [];
+    if (ids.length < 2) {
+      replyUser(msg, "❌ usage: `.copy <source_server_id> <dest_server_id>`").catch(() => {});
+      return;
+    }
+    const [srcId, dstId] = ids;
+    if (srcId === dstId) {
+      replyUser(msg, "❌ source and dest must be different servers.").catch(() => {});
+      return;
+    }
+    let srcGuild, dstGuild;
+    try { srcGuild = await client.guilds.fetch(srcId); } catch {}
+    try { dstGuild = await client.guilds.fetch(dstId); } catch {}
+    if (!srcGuild) { replyUser(msg, "❌ invalid source server id (bot must be in that server).").catch(() => {}); return; }
+    if (!dstGuild) { replyUser(msg, "❌ invalid dest server id (bot must be in that server).").catch(() => {}); return; }
+
+    const statusMsg = await replyUser(msg, `⏳ Copying **${srcGuild.name}** → **${dstGuild.name}**...`).catch(() => {});
+    try {
+      const me = await dstGuild.members.fetchMe().catch(() => dstGuild.members.me);
+      if (!me?.permissions?.has?.(PermissionFlagsBits.Administrator) && !me?.permissions?.has?.(PermissionFlagsBits.ManageChannels)) {
+        throw new Error("bot needs Manage Channels / Admin on dest server");
+      }
+
+      // --- Roles (lowest first so hierarchy is preserved) ---
+      const roleMap = new Map(); // oldRoleId -> newRole
+      roleMap.set(srcGuild.id, dstGuild.roles.everyone);
+      const srcRoles = [...srcGuild.roles.cache.values()]
+        .filter(r => r.id !== srcGuild.id && !r.managed)
+        .sort((a, b) => a.position - b.position);
+      let rolesOk = 0;
+      for (const r of srcRoles) {
+        try {
+          const created = await dstGuild.roles.create({
+            name: r.name,
+            color: r.color,
+            hoist: r.hoist,
+            mentionable: r.mentionable,
+            permissions: r.permissions,
+            reason: `copy from ${srcGuild.id} by ${msg.author.id}`
+          });
+          roleMap.set(r.id, created);
+          rolesOk++;
+        } catch (e) {
+          console.warn("⚠️ copy role", r.name, e.message);
+        }
+      }
+
+      // --- Categories then channels ---
+      const chMap = new Map(); // oldChannelId -> newChannel
+      const allCh = [...srcGuild.channels.cache.values()].sort((a, b) => {
+        const ap = a.parentId ? 1 : 0;
+        const bp = b.parentId ? 1 : 0;
+        if (ap !== bp) return ap - bp; // parents (categories) first
+        return (a.rawPosition ?? a.position ?? 0) - (b.rawPosition ?? b.position ?? 0);
+      });
+
+      const mapOverwrites = (overwrites) => {
+        const out = [];
+        for (const ow of overwrites?.cache?.values?.() || overwrites || []) {
+          try {
+            const target = ow.id === srcGuild.id
+              ? dstGuild.id
+              : (roleMap.get(ow.id)?.id || null);
+            // skip member-specific overwrites we can't map
+            if (!target) continue;
+            out.push({
+              id: target,
+              allow: ow.allow?.bitfield ?? ow.allow,
+              deny: ow.deny?.bitfield ?? ow.deny,
+              type: 0 // role
+            });
+          } catch {}
+        }
+        return out;
+      };
+
+      let catsOk = 0, chOk = 0;
+      // Pass 1: categories
+      for (const ch of allCh) {
+        if (ch.type !== ChannelType.GuildCategory) continue;
+        try {
+          const created = await dstGuild.channels.create({
+            name: ch.name,
+            type: ChannelType.GuildCategory,
+            position: ch.rawPosition ?? ch.position,
+            permissionOverwrites: mapOverwrites(ch.permissionOverwrites),
+            reason: `copy from ${srcGuild.id}`
+          });
+          chMap.set(ch.id, created);
+          catsOk++;
+        } catch (e) {
+          console.warn("⚠️ copy category", ch.name, e.message);
+        }
+      }
+      // Pass 2: channels
+      for (const ch of allCh) {
+        if (ch.type === ChannelType.GuildCategory) continue;
+        try {
+          const parent = ch.parentId ? chMap.get(ch.parentId) : null;
+          const opts = {
+            name: ch.name,
+            type: ch.type,
+            topic: ch.topic || undefined,
+            nsfw: !!ch.nsfw,
+            rateLimitPerUser: ch.rateLimitPerUser || undefined,
+            bitrate: ch.bitrate || undefined,
+            userLimit: ch.userLimit || undefined,
+            parent: parent?.id,
+            position: ch.rawPosition ?? ch.position,
+            permissionOverwrites: mapOverwrites(ch.permissionOverwrites),
+            reason: `copy from ${srcGuild.id}`
+          };
+          // Only create channel types the API allows commonly
+          if (![
+            ChannelType.GuildText,
+            ChannelType.GuildVoice,
+            ChannelType.GuildAnnouncement,
+            ChannelType.GuildStageVoice,
+            ChannelType.GuildForum
+          ].includes(ch.type) && ch.type !== 0 && ch.type !== 2 && ch.type !== 5) {
+            // try anyway for unknown numeric types that might still work
+          }
+          const created = await dstGuild.channels.create(opts);
+          chMap.set(ch.id, created);
+          chOk++;
+        } catch (e) {
+          console.warn("⚠️ copy channel", ch.name, e.message);
+        }
+      }
+
+      if (statusMsg) {
+        await statusMsg.edit(
+          `✅ **Copy done**\n` +
+          `**From:** ${srcGuild.name} (\`${srcId}\`)\n` +
+          `**To:** ${dstGuild.name} (\`${dstId}\`)\n` +
+          `Roles: **${rolesOk}** · Categories: **${catsOk}** · Channels: **${chOk}**`
+        ).catch(() => {});
+      } else {
+        replyUser(msg, `✅ copy done — roles ${rolesOk}, cats ${catsOk}, channels ${chOk}`).catch(() => {});
+      }
+    } catch (e) {
+      if (statusMsg) await statusMsg.edit(`❌ copy failed: ${e.message.slice(0, 150)}`).catch(() => {});
+      else replyUser(msg, `❌ copy failed: ${e.message.slice(0, 150)}`).catch(() => {});
+    }
+    return;
+  }
+
   // .renew — Owner Only: silent fast clone (same name/perms/position), delete old — no messages
   if (/^\.renew(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) return;
