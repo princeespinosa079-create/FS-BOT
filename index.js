@@ -898,8 +898,8 @@ const IS_COMPONENTS_V2 = (MessageFlags && MessageFlags.IsComponentsV2 != null)
   ? MessageFlags.IsComponentsV2
   : 32768;
 /** Accent used in renamer V2 containers (matches discohook sample) */
-const RENAME_V2_ACCENT = 0xF78000; // #f78000
-const FINDER_V2_ACCENT = 0xF78000; // #f78000
+const RENAME_V2_ACCENT = 0x2B2D31; // black-gray
+const FINDER_V2_ACCENT = 0x2B2D31; // black-gray
 /** Separator spacing: 1 = Small, 2 = Large */
 const SEPARATOR_SPACING_SMALL = 1;
 
@@ -1538,6 +1538,30 @@ function indexMessageFiles(msg) {
   saveLibrary();
   return found.length;
 }
+
+/** Resolve TikTok/IG media URL via cobalt + fallbacks */
+async function resolveCobaltMedia(pageUrl) {
+  const endpoints = ["https://api.cobalt.tools/", "https://api.cobalt.tools/api/json"];
+  for (const endpoint of endpoints) {
+    try {
+      const apiRes = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ url: pageUrl })
+      });
+      if (!apiRes.ok) continue;
+      const data = await apiRes.json().catch(() => null);
+      if (!data) continue;
+      if (data.url) return { url: data.url, type: data.audio ? "Audio" : "Video" };
+      if (data.audio) return { url: data.audio, type: "Audio" };
+      if (Array.isArray(data.picker) && data.picker[0]?.url) {
+        return { url: data.picker[0].url, type: "Photo (1/" + data.picker.length + ")" };
+      }
+    } catch {}
+  }
+  return null;
+}
+
 async function downloadURL(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2722,86 +2746,54 @@ function goofyscator(source, settings) {
 // ============================================================
 function obfuscateLua(source) {
   if (!source || typeof source !== "string") return source;
-  // Strip UTF8 BOM / normalize newlines — keep logic intact
-  let code = String(source).replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-  if (!code) return source;
+  // Keep original logic intact — NO variable renaming (breaks Roblox execution)
+  let code = String(source).replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!code.trim()) return source;
 
-  // Light local-name scramble (safe identifiers only)
-  const used = new Set();
-  const genName = () => {
-    let n;
-    do {
-      n = "_" + crypto.randomBytes(4).toString("hex");
-    } while (used.has(n));
-    used.add(n);
-    return n;
-  };
-  const reserved = new Set([
-    "string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber",
-    "loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error",
-    "warn","print","select","unpack","require","game","workspace","script","bit","bit32","task","Instance",
-    "Vector3","CFrame","Color3","UDim2","Enum","true","false","nil","and","or","not","if","then","else",
-    "elseif","end","for","while","do","repeat","until","return","function","local","in","break","self",
-    "shared","_G","getgenv","getrenv","getsenv","getrawmetatable","setreadonly","newcclosure","checkcaller",
-    "islclosure","getgc","hookfunction","hookmetamethod","newproxy","buffer","utf8","coroutine"
-  ]);
-  const varMap = new Map();
-  code = code.replace(/\blocal\s+(function\s+)?([A-Za-z_][A-Za-z0-9_]*)/g, (m, isFunc, name) => {
-    if (reserved.has(name) || varMap.has(name)) return m;
-    const nn = genName();
-    varMap.set(name, nn);
-    return isFunc ? ("local function " + nn) : ("local " + nn);
-  });
-  for (const [old, nn] of varMap) {
-    const re = new RegExp("\\b" + old.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "g");
-    code = code.replace(re, nn);
-  }
-
-  // XOR + base64 payload (bit32.bxor works in Roblox Luau)
-  const keyBytes = crypto.randomBytes(12);
+  const keyBytes = crypto.randomBytes(8);
   const plain = Buffer.from(code, "utf8");
   const xored = Buffer.alloc(plain.length);
   for (let i = 0; i < plain.length; i++) xored[i] = plain[i] ^ keyBytes[i % keyBytes.length];
   const b64 = xored.toString("base64");
   const keyLua = Array.from(keyBytes).join(",");
 
-  const vK = genName(), vB = genName(), vD = genName(), vS = genName(), vO = genName();
-  const vI = genName(), vF = genName(), vT = genName(), vC = genName(), vR = genName();
+  const CHUNK = 200;
+  const parts = [];
+  for (let i = 0; i < b64.length; i += CHUNK) parts.push(b64.slice(i, i + CHUNK));
+  const b64Lua = parts.map(s => '"' + s + '"').join("..");
 
-  // Chunk b64 so long strings stay safe (no ]] in base64)
-  // Pure Luau: bit32.bxor + loadstring/load (executor). No setfenv.
-  const out = [
-    `-- Prince Obfuscator | protected`,
-    `local ${vK}={${keyLua}}`,
-    `local ${vB}="${b64}"`,
-    `local ${vD}=function(${vS})`,
-    `local ${vT}="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"`,
-    `${vS}=string.gsub(${vS},"[^"..${vT}.."=]","")`,
-    `local ${vR}={}`,
-    `local ${vC}=0`,
-    `for ${vI}=1,#${vS},4 do`,
-    `local a=string.find(${vT},string.sub(${vS},${vI},${vI}))-1`,
-    `local b=string.find(${vT},string.sub(${vS},${vI}+1,${vI}+1))or 1;b=b-1`,
-    `local c=string.find(${vT},string.sub(${vS},${vI}+2,${vI}+2))or 1;c=c-1`,
-    `local d=string.find(${vT},string.sub(${vS},${vI}+3,${vI}+3))or 1;d=d-1`,
-    `${vC}=${vC}+1;${vR}[${vC}]=string.char(bit32.band(bit32.lshift(a,2)+bit32.rshift(b,4),255))`,
-    `if string.sub(${vS},${vI}+2,${vI}+2)~="="then ${vC}=${vC}+1;${vR}[${vC}]=string.char(bit32.band(bit32.lshift(bit32.band(b,15),4)+bit32.rshift(c,2),255))end`,
-    `if string.sub(${vS},${vI}+3,${vI}+3)~="="then ${vC}=${vC}+1;${vR}[${vC}]=string.char(bit32.band(bit32.lshift(bit32.band(c,3),6)+d,255))end`,
-    `end`,
-    `return table.concat(${vR})`,
-    `end`,
-    `local ${vS}=${vD}(${vB})`,
-    `local ${vO}={}`,
-    `for ${vI}=1,#${vS} do`,
-    `${vO}[${vI}]=string.char(bit32.bxor(string.byte(${vS},${vI}),${vK}[((${vI}-1)%#${vK})+1]))`,
-    `end`,
-    `local ${vF}=(loadstring or load)(table.concat(${vO}))`,
-    `if ${vF} then return ${vF}() end`,
-    ``
-  ].join("\n");
-  return out;
+  const lines = [
+    "-- Prince Obfuscator | protected",
+    "local _k={" + keyLua + "}",
+    "local _b=" + b64Lua,
+    'local _t="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"',
+    "local function _dec(s)",
+    '  s=string.gsub(s,"[^".._t.."=]","")',
+    "  local out={}",
+    "  for i=1,#s,4 do",
+    "    local a=(string.find(_t,string.sub(s,i,i))or 1)-1",
+    "    local b=(string.find(_t,string.sub(s,i+1,i+1))or 1)-1",
+    "    local c=(string.find(_t,string.sub(s,i+2,i+2))or 1)-1",
+    "    local d=(string.find(_t,string.sub(s,i+3,i+3))or 1)-1",
+    "    out[#out+1]=string.char(bit32.band(bit32.lshift(a,2)+bit32.rshift(b,4),255))",
+    '    if string.sub(s,i+2,i+2)~="=" then out[#out+1]=string.char(bit32.band(bit32.lshift(bit32.band(b,15),4)+bit32.rshift(c,2),255)) end',
+    '    if string.sub(s,i+3,i+3)~="=" then out[#out+1]=string.char(bit32.band(bit32.lshift(bit32.band(c,3),6)+d,255)) end',
+    "  end",
+    "  return table.concat(out)",
+    "end",
+    "local _x=_dec(_b)",
+    "local _o={}",
+    "for i=1,#_x do",
+    "  _o[i]=string.char(bit32.bxor(string.byte(_x,i),_k[((i-1)%#_k)+1]))",
+    "end",
+    "local _src=table.concat(_o)",
+    "local _fn=(loadstring or load)(_src)",
+    'if not _fn then error("Prince Obfuscator: load failed",0) end',
+    "return _fn()",
+    ""
+  ];
+  return lines.join("\n");
 }
-
 
 
 
@@ -5118,27 +5110,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       try {
         let downloadUrl = null;
         let mediaType = "Media";
-        try {
-          const apiRes = await fetch("https://api.cobalt.tools/api/json", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Accept": "application/json" },
-            body: JSON.stringify({ url: arg })
-          });
-          if (!apiRes.ok) throw new Error("API " + apiRes.status);
-          const data = await apiRes.json();
-          
-          if (data?.url) {
-            downloadUrl = data.url;
-            mediaType = data.audio ? "Audio" : "Video/Photo";
-          } else if (data?.audio) {
-            downloadUrl = data.audio;
-            mediaType = "Audio";
-          } else if (data?.picker && Array.isArray(data.picker) && data.picker.length > 0) {
-            downloadUrl = data.picker[0].url;
-            mediaType = "Photo (1/" + data.picker.length + ")";
-          }
-        } catch {}
-        
+        const resolved = await resolveCobaltMedia(arg);
+        if (resolved?.url) {
+          downloadUrl = resolved.url;
+          mediaType = resolved.type || "Media";
+        }
         if (!downloadUrl) throw new Error("Failed to get Instagram media");
         
         const resEmbed = new EmbedBuilder()
@@ -5160,39 +5136,58 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
 
-    // Check if TikTok URL — NO WATERMARK
+    // Check if TikTok URL — NO WATERMARK (multi-fallback resolvers)
     if (/tiktok\.com|vm\.tiktok\.com/i.test(arg)) {
       const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
       try {
-        // Try cobalt.tools first (clean, no watermark)
         let videoUrl = null;
-        try {
-          const apiRes = await fetch("https://api.cobalt.tools/api/json", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Accept": "application/json" },
-            body: JSON.stringify({ url: arg })
-          });
-          const data = await apiRes.json();
-          if (data?.url) videoUrl = data.url;
-        } catch {}
-        
-        // Fallback: tikwm
+        const tryCobalt = async (endpoint) => {
+          try {
+            const apiRes = await fetch(endpoint, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Accept": "application/json" },
+              body: JSON.stringify({ url: arg })
+            });
+            if (!apiRes.ok) return null;
+            const data = await apiRes.json().catch(() => null);
+            if (!data) return null;
+            if (data.url) return data.url;
+            if (data.audio) return data.audio;
+            if (Array.isArray(data.picker) && data.picker[0]?.url) return data.picker[0].url;
+            return null;
+          } catch { return null; }
+        };
+        videoUrl = await tryCobalt("https://api.cobalt.tools/");
+        if (!videoUrl) videoUrl = await tryCobalt("https://api.cobalt.tools/api/json");
         if (!videoUrl) {
           try {
-            const api2 = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(arg)}`);
-            const d2 = await api2.json();
-            if (d2?.data?.play) videoUrl = d2.data.play;
+            const api2 = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(arg)}&hd=1`);
+            const d2 = await api2.json().catch(() => null);
+            if (d2?.data?.hdplay) videoUrl = d2.data.hdplay;
+            else if (d2?.data?.play) videoUrl = d2.data.play;
+            else if (d2?.data?.wmplay) videoUrl = d2.data.wmplay;
           } catch {}
         }
-        
-        if (!videoUrl) throw new Error("Failed to get video");
-        
+        if (!videoUrl) {
+          try {
+            const api3 = await fetch("https://tikwm.com/api/", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
+              body: `url=${encodeURIComponent(arg)}&hd=1`
+            });
+            const d3 = await api3.json().catch(() => null);
+            if (d3?.data?.hdplay) videoUrl = d3.data.hdplay;
+            else if (d3?.data?.play) videoUrl = d3.data.play;
+          } catch {}
+        }
+        if (!videoUrl) throw new Error("Failed to get video — link may be private/region-locked, try another URL");
+
         const resEmbed = new EmbedBuilder()
           .setColor(getEmbedColor(isBuyerUser))
           .setTitle("📥 TikTok Download")
           .setDescription(`🔗 **Download:** [Click Here](${videoUrl})`)
           .setFooter({ text: `Request by @${msg.author.username}│TikTok DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-        
+
         if (sentMsg) await sentMsg.delete().catch(() => {});
         const elapsed = Date.now() - startTime;
         await msg.channel.send({
@@ -5201,7 +5196,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         }).catch(() => {});
       } catch (e) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ failed: ${e.message.slice(0, 80)}`).catch(() => {});
+        replyUser(msg, `❌ failed: ${e.message.slice(0, 120)}`).catch(() => {});
       }
       return;
     }
