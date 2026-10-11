@@ -1022,10 +1022,15 @@ function buildFinderV2Payload({ listLines, pageLabel, actionRow, ephemeral = fal
   let content = `### Finder Source Results\n${listText}`;
   if (pageLabel) content += `\n\n-# ${pageLabel}`;
   content = content.slice(0, 4000);
+  // Buttons live INSIDE the container (after separator), matching Components V2 layout
   const containerChildren = [
     { type: 10, content },
-    { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL }
+    { type: 14, spacing: SEPARATOR_SPACING_SMALL }
   ];
+  if (actionRow) {
+    const rowJson = typeof actionRow.toJSON === "function" ? actionRow.toJSON() : actionRow;
+    containerChildren.push(rowJson);
+  }
   const components = [
     {
       type: 17,
@@ -1033,9 +1038,6 @@ function buildFinderV2Payload({ listLines, pageLabel, actionRow, ephemeral = fal
       components: containerChildren
     }
   ];
-  if (actionRow) {
-    components.push(typeof actionRow.toJSON === "function" ? actionRow.toJSON() : actionRow);
-  }
   let flags = IS_COMPONENTS_V2;
   if (ephemeral) {
     const eph = (MessageFlags && MessageFlags.Ephemeral != null) ? MessageFlags.Ephemeral : 64;
@@ -3186,7 +3188,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     const listLines = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``);
     const v2 = buildFinderV2Payload({
       listLines,
-      pageLabel: `Pages ${menu.page}/${menu.totalPages} │ Prince Finder`,
+      pageLabel: `Pages ${menu.page}/${menu.totalPages}`,
       actionRow: row,
       ephemeral: false
     });
@@ -3401,7 +3403,7 @@ client.on("interactionCreate", async interaction => {
     );
     const v2 = buildFinderV2Payload({
       listLines,
-      pageLabel: `Pages 1/${totalPages} │ Prince Finder`,
+      pageLabel: `Pages 1/${totalPages}`,
       actionRow: row,
       ephemeral: true
     });
@@ -5343,7 +5345,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     pendingTokenLine.delete(String(msg.author.id));
     const v2 = buildFinderV2Payload({
       listLines,
-      pageLabel: `Pages 1/${totalPages} │ Prince Finder`,
+      pageLabel: `Pages 1/${totalPages}`,
       actionRow: row,
       ephemeral: false
     });
