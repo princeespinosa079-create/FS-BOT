@@ -607,138 +607,6 @@ async function checkRegularPermission(msg, needsFileReply = false) {
 
   const isDM = !msg.guild;
 
-
-  // .help — works EVERYWHERE for EVERYONE
-  if (/^\.help(?:\s|$)/i.test(txt)) {
-    const page = 0;
-    helpSessions.set(msg.author.id, page);
-    const v2 = buildHelpV2(page, msg.author.id);
-    replyComponentsV2(msg, v2, { mention: false }).catch(() => {});
-    return;
-  }
-
-  // .profile / .prof — works EVERYWHERE for EVERYONE
-  if (/^\.profile(?:\s|$)|^\.prof(?:\s|$)/i.test(txt)) {
-    let targetId = msg.author.id;
-    const mention = msg.mentions.users.first();
-    if (mention) targetId = mention.id;
-    else {
-      const idMatch = txt.match(/(\d{17,20})/);
-      if (idMatch) targetId = idMatch[1];
-    }
-    const activeKey = findActiveKeyForUser(targetId);
-    let displayName = `<@${targetId}>`;
-    try {
-      const u = await client.users.fetch(targetId);
-      if (u) displayName = `@${u.username}`;
-    } catch {}
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}`;
-    const embed = new EmbedBuilder()
-      .setTitle("Profile Status")
-      .setDescription(
-`User: ${displayName} (\`${targetId}\`)
-Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
-      )
-      .setColor(REGULAR_COLOR)
-      .setFooter({ text: timeFooter });
-    replyUser(msg, { embeds: [embed] }).catch(() => {});
-    return;
-  }
-
-  // .generatekey — Owner Only
-  if (/^\.generatekey(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const rest = txt.replace(/^\.generatekey\s+/i, "").trim();
-    const parts = rest.split(/\s+/);
-    const timeStr = parts[0] || "";
-    const amountStr = parts[1] || "1";
-    const durMs = parseDuration(timeStr);
-    const amount = Math.max(1, Math.min(50, parseInt(amountStr) || 1));
-    const generatedKeys = [];
-    for (let i = 0; i < amount; i++) {
-      const key = generateKey();
-      keyStore.keys.push({
-        key,
-        createdAt: Date.now(),
-        expiresAt: durMs === null ? null : Date.now() + durMs,
-        redeemedBy: null
-      });
-      generatedKeys.push(key);
-    }
-    const tmp = `${KEYS_FILE}.tmp`;
-    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
-    const timeText = durMs === null ? "♾️ INFINITE" : `${timeStr}`;
-    const keyList = generatedKeys.map(k => `\`${k}\``).join("\n");
-    replyUser(msg, `✅ Generated ${amount} key(s) — ${timeText} expiry:\n${keyList}`).catch(() => {});
-    return;
-  }
-
-
-  // .removekey — Owner Only (removes key + strips buyer role)
-  if (/^\.removekey(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const key = txt.replace(/^\.removekey\s+/i, "").trim();
-    if (!key) { replyUser(msg, "❌ usage: \`.removekey <key>\`").catch(() => {}); return; }
-    const rec = keyStore.keys.find(k => k.key === key);
-    if (!rec) { replyUser(msg, "❌ key not found.").catch(() => {}); return; }
-    const redeemedBy = rec.redeemedBy;
-    // Remove from keyStore
-    keyStore.keys = keyStore.keys.filter(k => k.key !== key);
-    const tmp = `${KEYS_FILE}.tmp`;
-    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
-    // Strip buyer role from user if redeemed
-    if (redeemedBy) {
-      try {
-        const g = await client.guilds.fetch(GUILD_ID);
-        const m = await g.members.fetch(redeemedBy);
-        await m.roles.remove(BUYER_ROLE_ID);
-        replyUser(msg, `✅ Key removed! Buyer role stripped from <@${redeemedBy}>.`).catch(() => {});
-      } catch (e) {
-        replyUser(msg, `✅ Key removed! (Failed to strip role: ${e.message.slice(0,80)})`).catch(() => {});
-      }
-    } else {
-      replyUser(msg, `✅ Key removed! (was not redeemed yet)`).catch(() => {});
-    }
-    return;
-  }
-
-  // .redeem / .red — EVERYONE can use
-  if (/^\.redeem(?:\s|$)|^\.red(?:\s|$)/i.test(txt)) {
-    const redeemIsBuyer = isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member);
-    const cd = checkCommandCooldown(msg.author.id, "redeem", redeemIsBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    const key = txt.replace(/^\.redeem\s+|^\.red\s+/i, "").trim();
-    if (!key) { replyUser(msg, "❌ Usage: \`.redeem <key>\`").catch(() => {}); return; }
-    // Check if user already has active key
-    if (findActiveKeyForUser(msg.author.id)) {
-      replyUser(msg, "❌ you already got a key, lol.").catch(() => {});
-      return;
-    }
-    const rec = keyStore.keys.find(k => k.key === key);
-    if (!rec) { replyUser(msg, "❌ Invalid key.").catch(() => {}); return; }
-    if (rec.redeemedBy || (rec.expiresAt !== null && rec.expiresAt < Date.now())) {
-      replyUser(msg, "❌ this key was already redeem.").catch(() => {});
-      return;
-    }
-    rec.redeemedBy = msg.author.id;
-    const tmp = `${KEYS_FILE}.tmp`;
-    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
-    try {
-      const g = await client.guilds.fetch(GUILD_ID);
-      const m = await g.members.fetch(msg.author.id);
-      await m.roles.add(BUYER_ROLE_ID);
-    } catch (e) {
-      replyUser(msg, "❌ Key saved but failed to assign role: " + e.message).catch(() => {});
-      return;
-    }
-    replyUser(msg, "✅ key redeemed successfully.").catch(() => {});
-    return;
-  }
-
-
   // Regular user in DMs → tell them to buy access
   if (isDM) {
     return { allowed: false, reason: "❌ buy access if you want to use the command here.", isBuyer: false };
@@ -3847,9 +3715,373 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     modal.addComponents(new ActionRowBuilder().addComponents(idInput));
     return interaction.showModal(modal).catch(() => {});
   }
-  // ─── WHS START BUTTON ───
 
-  // ─────────────────────────────────────────────
+  return;
+});
+
+// ============================================================
+// MODAL SUBMIT — finder panel
+// ============================================================
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isModalSubmit()) return;
+  try {
+    if (interaction.customId === "finderpanel_redeem_modal") {
+      const key = (interaction.fields.getTextInputValue("finderpanel_key") || "").trim();
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      const rec = keyStore.keys.find(k => k.key === key);
+      if (!rec) { await interaction.editReply({ content: "❌ invalid key." }); return; }
+      if (rec.redeemedBy) { await interaction.editReply({ content: "❌ already redeemed." }); return; }
+      if (findActiveKeyForUser(interaction.user.id)) { await interaction.editReply({ content: "❌ you already got a key active." }); return; }
+      if (rec.expiresAt && Date.now() > rec.expiresAt) { await interaction.editReply({ content: "❌ key expired." }); return; }
+      rec.redeemedBy = interaction.user.id;
+      rec.redeemedAt = Date.now();
+      try { fs.writeFileSync(KEYS_FILE, JSON.stringify(keyStore, null, 2)); } catch {}
+      try {
+        const g = await client.guilds.fetch(GUILD_ID);
+        const m = await g.members.fetch(interaction.user.id);
+        await m.roles.add(BUYER_ROLE_ID);
+      } catch {}
+      await interaction.editReply({ content: "✅ key redeemed successfully." });
+      return;
+    }
+    if (interaction.customId === "finderpanel_find_modal") {
+      const query = (interaction.fields.getTextInputValue("finderpanel_query") || "").trim();
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      const isBuyerUser = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
+      const tok = tryConsumeToken(interaction.user.id, isBuyerUser);
+      if (!tok.ok && !isBuyerUser) {
+        const leftMs = Math.max(0, (tok.waitUntil || getNextMidnightPHMs()) - Date.now());
+        await interaction.editReply({ content: `❌ You need to wait **${formatTokenWait(leftMs)}**` });
+        return;
+      }
+      const results = findFiles(query);
+      if (!results.length) { await interaction.editReply({ content: "❌ no found for that, dumbass." }); return; }
+      const perPage = 8;
+      const totalPages = Math.ceil(results.length / perPage);
+      const pageItems = results.slice(0, perPage);
+      const listLines = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``);
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
+        new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
+      );
+      const v2 = buildFinderV2Payload({ listLines, pageLabel: `Pages 1/${totalPages}`, actionRow: row, ephemeral: true });
+      const sent = await interaction.editReply({ ...v2, content: null });
+      if (sent) paginationMenus.set(interaction.user.id, {
+        results, page: 1, totalPages, messageId: sent.id,
+        authorId: interaction.user.id, createdAt: Date.now(), isBuyer: isBuyerUser
+      });
+      return;
+    }
+    if (interaction.customId === "finderpanel_get_modal") {
+      const raw = (interaction.fields.getTextInputValue("finderpanel_ids") || "").trim();
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      const isBuyerUser = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
+      const tok = tryConsumeToken(interaction.user.id, isBuyerUser);
+      if (!tok.ok && !isBuyerUser) {
+        const leftMs = Math.max(0, (tok.waitUntil || getNextMidnightPHMs()) - Date.now());
+        await interaction.editReply({ content: `❌ You need to wait **${formatTokenWait(leftMs)}**` });
+        return;
+      }
+      const ids = raw.split(/[\s,]+/).filter(Boolean);
+      const maxGet = isBuyerUser ? 10 : 1;
+      if (!ids.length) { await interaction.editReply({ content: "❌ put an id." }); return; }
+      if (ids.length > maxGet) { await interaction.editReply({ content: isBuyerUser ? "❌ max 10 id." : "❌ buy premium for multiple id." }); return; }
+      const files = [];
+      for (const id of ids) {
+        const file = getFile(id);
+        if (!file || !canGetLibraryFile(file, interaction.user.id)) continue;
+        const freshUrl = await getFreshUrl(file);
+        files.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
+      }
+      if (!files.length) { await interaction.editReply({ content: "❌ wrong id." }); return; }
+      await interaction.editReply({ content: "**Here you go!**", files });
+      return;
+    }
+  } catch (e) {
+    console.error("❌ modal:", e.message);
+    try {
+      if (interaction.deferred || interaction.replied) await interaction.editReply({ content: "❌ failed." });
+      else await interaction.reply({ content: "❌ failed.", flags: MessageFlags.Ephemeral });
+    } catch {}
+  }
+});
+
+// ============================================================
+// SLASH COMMANDS — /say /finderpanel /blacklist
+// ============================================================
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+  try {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (!isOwner(interaction.user.id)) {
+      await interaction.editReply({ content: "❌ owner only, dumbass." });
+      return;
+    }
+    if (interaction.commandName === "say") {
+      const text = interaction.options.getString("text");
+      const type = interaction.options.getString("type") || "good";
+      const title = interaction.options.getString("title");
+      const footer = interaction.options.getString("footer");
+      const colorRaw = (interaction.options.getString("color") || "").trim();
+      await interaction.deleteReply().catch(() => {});
+      const targetChannel = interaction.channel || interaction.user.dmChannel || await interaction.user.createDM().catch(() => null);
+      if (!targetChannel) {
+        await interaction.followUp({ content: "❌ can't send message here.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        return;
+      }
+      if (type === "none") {
+        await targetChannel.send({ content: text });
+      } else if (type === "v2") {
+        let color = RENAME_V2_ACCENT;
+        if (colorRaw) {
+          const named = { blurple: BLURPLE, gray: GRAY_COLOR, grey: GRAY_COLOR, red: 0xED4245, green: 0x57F287, yellow: 0xF1C40F, black: REGULAR_COLOR };
+          const key = colorRaw.toLowerCase().replace(/^#/, "");
+          if (named[colorRaw.toLowerCase()]) color = named[colorRaw.toLowerCase()];
+          else if (/^[0-9a-fA-F]{6}$/.test(key)) color = parseInt(key, 16);
+        }
+        let body = String(text || "");
+        if (title) body = "### " + String(title).slice(0, 200) + "\n" + body;
+        if (footer) body = body + "\n\n-# " + String(footer).slice(0, 200);
+        await targetChannel.send({
+          flags: IS_COMPONENTS_V2,
+          components: [{ type: 17, accent_color: color, components: [{ type: 10, content: body.slice(0, 4000) }] }]
+        });
+      } else {
+        let color = BLURPLE;
+        if (colorRaw) {
+          const named = { blurple: BLURPLE, gray: GRAY_COLOR, grey: GRAY_COLOR, red: 0xED4245, green: 0x57F287, yellow: 0xF1C40F, black: REGULAR_COLOR };
+          const key = colorRaw.toLowerCase().replace(/^#/, "");
+          if (named[colorRaw.toLowerCase()]) color = named[colorRaw.toLowerCase()];
+          else if (/^[0-9a-fA-F]{6}$/.test(key)) color = parseInt(key, 16);
+        }
+        const embed = new EmbedBuilder().setColor(color).setDescription(text);
+        if (title) embed.setTitle(title);
+        if (footer) embed.setFooter({ text: footer });
+        await targetChannel.send({ embeds: [embed] });
+      }
+      return;
+    }
+    if (interaction.commandName === "finderpanel") {
+      const targetChannel = interaction.channel;
+      if (!targetChannel || !targetChannel.isTextBased?.()) {
+        await interaction.editReply({ content: "❌ use this in a text channel." });
+        return;
+      }
+      const panelRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("finderpanel_find").setLabel("Find").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId("finderpanel_get").setLabel("Get").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId("finderpanel_redeem").setLabel("Redeem").setStyle(ButtonStyle.Secondary)
+      );
+      await targetChannel.send({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: FINDER_V2_ACCENT,
+          components: [
+            { type: 10, content: "### Finder Panel\nThis panel is only for where you can find old source that you can’t find." },
+            { type: 14, spacing: SEPARATOR_SPACING_SMALL },
+            panelRow.toJSON()
+          ]
+        }]
+      });
+      await interaction.editReply({ content: "✅ Finder Source Panel posted." });
+      return;
+    }
+    if (interaction.commandName === "blacklist") {
+      const mode = (interaction.options.getString("mode") || "").toLowerCase();
+      const targetUser = interaction.options.getUser("user");
+      if (mode === "list") {
+        const list = blacklistList();
+        if (!list.length) { await interaction.editReply({ content: "📋 Blacklist is empty." }); return; }
+        const lines = list.slice(0, 50).map((id, i) => `${i + 1}. <@${id}> (\`${id}\`)`);
+        await interaction.editReply({ content: `📋 **Blacklist (${list.length}):**\n${lines.join("\n")}` });
+        return;
+      }
+      if (!targetUser) { await interaction.editReply({ content: "❌ pick a user for Add/Remove." }); return; }
+      if (isOwner(targetUser.id)) { await interaction.editReply({ content: "❌ can't blacklist the owner." }); return; }
+      if (mode === "add") {
+        const ok = blacklistAdd(targetUser.id);
+        await interaction.editReply({ content: ok ? `✅ blacklisted <@${targetUser.id}>.` : `⚠️ already blacklisted.` });
+        return;
+      }
+      if (mode === "remove") {
+        const ok = blacklistRemove(targetUser.id);
+        await interaction.editReply({ content: ok ? `✅ removed <@${targetUser.id}>.` : `⚠️ was not blacklisted.` });
+        return;
+      }
+      await interaction.editReply({ content: "❌ mode must be Add, Remove, or List." });
+      return;
+    }
+  } catch (e) {
+    console.error("❌ slash:", e.message);
+    try {
+      const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
+      if (interaction.deferred || interaction.replied) await interaction.editReply(msg).catch(() => {});
+      else await interaction.reply(msg).catch(() => {});
+    } catch {}
+  }
+});
+
+// ============================================================
+// PREFIX COMMANDS — messageCreate (THIS was missing — all .commands broken)
+// ============================================================
+client.on("messageCreate", async msg => {
+  try {
+    if (!msg || msg.author?.bot) return;
+
+    // Live-scan: index uploads in configured channels
+    try {
+      const liveIds = (config.liveScanChannelIds || []).map(String);
+      if (liveIds.includes(String(msg.channelId))) {
+        const n = indexMessageFiles(msg);
+        if (n > 0) console.log(`📡 LiveScan +${n} file(s) in #${msg.channel?.name || msg.channelId}`);
+      }
+    } catch {}
+
+    const raw = String(msg.content || "");
+    const txt = raw.trim();
+    if (!txt.startsWith(".")) return;
+
+    const isDM = !msg.guild;
+
+
+  // .help — works EVERYWHERE for EVERYONE
+  if (/^\.help(?:\s|$)/i.test(txt)) {
+    const page = 0;
+    helpSessions.set(msg.author.id, page);
+    const v2 = buildHelpV2(page, msg.author.id);
+    replyComponentsV2(msg, v2, { mention: false }).catch(() => {});
+    return;
+  }
+
+  // .profile / .prof — works EVERYWHERE for EVERYONE
+  if (/^\.profile(?:\s|$)|^\.prof(?:\s|$)/i.test(txt)) {
+    let targetId = msg.author.id;
+    const mention = msg.mentions.users.first();
+    if (mention) targetId = mention.id;
+    else {
+      const idMatch = txt.match(/(\d{17,20})/);
+      if (idMatch) targetId = idMatch[1];
+    }
+    const activeKey = findActiveKeyForUser(targetId);
+    let displayName = `<@${targetId}>`;
+    try {
+      const u = await client.users.fetch(targetId);
+      if (u) displayName = `@${u.username}`;
+    } catch {}
+    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}`;
+    const embed = new EmbedBuilder()
+      .setTitle("Profile Status")
+      .setDescription(
+`User: ${displayName} (\`${targetId}\`)
+Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
+      )
+      .setColor(REGULAR_COLOR)
+      .setFooter({ text: timeFooter });
+    replyUser(msg, { embeds: [embed] }).catch(() => {});
+    return;
+  }
+
+  // .generatekey — Owner Only
+  if (/^\.generatekey(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const rest = txt.replace(/^\.generatekey\s+/i, "").trim();
+    const parts = rest.split(/\s+/);
+    const timeStr = parts[0] || "";
+    const amountStr = parts[1] || "1";
+    const durMs = parseDuration(timeStr);
+    const amount = Math.max(1, Math.min(50, parseInt(amountStr) || 1));
+    const generatedKeys = [];
+    for (let i = 0; i < amount; i++) {
+      const key = generateKey();
+      keyStore.keys.push({
+        key,
+        createdAt: Date.now(),
+        expiresAt: durMs === null ? null : Date.now() + durMs,
+        redeemedBy: null
+      });
+      generatedKeys.push(key);
+    }
+    const tmp = `${KEYS_FILE}.tmp`;
+    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
+    const timeText = durMs === null ? "♾️ INFINITE" : `${timeStr}`;
+    const keyList = generatedKeys.map(k => `\`${k}\``).join("\n");
+    replyUser(msg, `✅ Generated ${amount} key(s) — ${timeText} expiry:\n${keyList}`).catch(() => {});
+    return;
+  }
+
+  // .removekey — Owner Only
+  if (/^\.removekey(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
+    const key = txt.replace(/^\.removekey\s+/i, "").trim();
+    if (!key) { replyUser(msg, "❌ usage: \`.removekey <key>\`").catch(() => {}); return; }
+    const rec = keyStore.keys.find(k => k.key === key);
+    if (!rec) { replyUser(msg, "❌ key not found.").catch(() => {}); return; }
+    const redeemedBy = rec.redeemedBy;
+    keyStore.keys = keyStore.keys.filter(k => k.key !== key);
+    const tmp = `${KEYS_FILE}.tmp`;
+    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
+    if (redeemedBy) {
+      try {
+        const g = await client.guilds.fetch(GUILD_ID);
+        const m = await g.members.fetch(redeemedBy);
+        await m.roles.remove(BUYER_ROLE_ID);
+        replyUser(msg, `✅ Key removed! Buyer role stripped from <@${redeemedBy}>.`).catch(() => {});
+      } catch (e) {
+        replyUser(msg, `✅ Key removed! (Failed to strip role: ${e.message.slice(0,80)})`).catch(() => {});
+      }
+    } else {
+      replyUser(msg, `✅ Key removed! (was not redeemed yet)`).catch(() => {});
+    }
+    return;
+  }
+
+  // .redeem / .red
+  if (/^\.(?:redeem|red)(?:\s|$)/i.test(txt)) {
+    const redeemIsBuyer = isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member);
+    const cd = checkCommandCooldown(msg.author.id, "redeem", redeemIsBuyer);
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
+    const key = txt.replace(/^\.(?:redeem|red)\s+/i, "").trim();
+    if (!key) { replyUser(msg, "❌ usage: \`.redeem <key>\`").catch(() => {}); return; }
+    const rec = keyStore.keys.find(k => k.key === key);
+    if (!rec) { replyUser(msg, "❌ invalid key.").catch(() => {}); return; }
+    if (rec.redeemedBy) { replyUser(msg, "❌ already redeemed.").catch(() => {}); return; }
+    if (findActiveKeyForUser(msg.author.id)) {
+      replyUser(msg, "❌ you already got a key active.").catch(() => {}); return;
+    }
+    if (rec.expiresAt && Date.now() > rec.expiresAt) {
+      replyUser(msg, "❌ key expired.").catch(() => {}); return;
+    }
+    rec.redeemedBy = msg.author.id;
+    rec.redeemedAt = Date.now();
+    const tmp = `${KEYS_FILE}.tmp`;
+    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
+    try {
+      const g = await client.guilds.fetch(GUILD_ID);
+      const m = await g.members.fetch(msg.author.id);
+      await m.roles.add(BUYER_ROLE_ID);
+    } catch (e) {
+      replyUser(msg, "❌ Key saved but failed to assign role: " + e.message).catch(() => {});
+      return;
+    }
+    replyUser(msg, "✅ key redeemed successfully.").catch(() => {});
+    return;
+  }
+
+  // Channel lock for regulars — Owner + Buyer bypass (non-free commands)
+  if (msg.guild && txt.startsWith(".") && !isOwner(msg.author.id)) {
+    const isBuyerUser = await isBuyer(msg.author.id, msg.member);
+    if (!isBuyerUser && !/^\.(?:help|profile|prof|redeem|red)(?:\s|$)/i.test(txt)) {
+      if (!channelAllowed(msg)) {
+        sendInputErrorV2(msg, "**Tips:**\n- Use server tag and go to the allowed channel.").catch(() => {});
+        return;
+      }
+    }
+  }
+
   if (/^\.serverlist$/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const guilds = client.guilds.cache.sort((a, b) => b.memberCount - a.memberCount);
@@ -5428,6 +5660,9 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       authorId: msg.author.id, createdAt: Date.now(), isBuyer: isBuyerUser
     });
     return;
+  }
+  } catch (e) {
+    console.error("❌ messageCreate:", e?.message || e);
   }
 });
 // ============================================================
