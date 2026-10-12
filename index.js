@@ -607,9 +607,10 @@ async function checkRegularPermission(msg, needsFileReply = false) {
 
   const isDM = !msg.guild;
 
-  // Regular user in DMs → tell them to buy access
+  // Regular user in DMs → premium required
   if (isDM) {
-    return { allowed: false, reason: "❌ buy access if you want to use the command here.", isBuyer: false };
+    sendInputErrorV2(msg, "Buy a Premium on https://discord.com/channels/1509484518766018711/1539090234354962505 — to use this command or use command in DMs.").catch(() => {});
+    return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
 
   // Cross-server check: must be in main guild
@@ -3830,9 +3831,7 @@ const helpPages = [
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders.
-
-**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
+`**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
 **\`.obf\`** Obfuscate your script — encrypt strings, Anti-Debug, Anti-Dump, make code unreadable.
 
@@ -3872,7 +3871,9 @@ Regular users start with **10 tokens**/day. Most commands cost **1 token**.
     .setTitle("🤖 Bot Commands")
     .setColor(YELLOW_COLOR)
     .setDescription(
-`**\`.redeem\`** [\`.red\`] - Redeem a premium key.
+`**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
+
+**\`.redeem\`** [\`.red\`] - Redeem a premium key.
 
 > Premium users can use all commands in DMs.
 > Premium users have unlimited tokens.`
@@ -3882,9 +3883,7 @@ const helpSessions = new Map();
 
 /** Help page bodies for Components V2 */
 const helpPageBodies = [
-  { color: 0x5865F2, text: `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders.
-
-**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
+  { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
 **\`.obf\`** Obfuscate your script — encrypt strings, Anti-Debug, Anti-Dump, make code unreadable.
 
@@ -3903,7 +3902,9 @@ const helpPageBodies = [
 
 Regular users start with **10 tokens**/day. Most commands cost **1 token**.
 \`.help\` · \`.find\` · \`.redeem\` are free.` },
-  { color: 0xFEE75C, text: `**\`.redeem\`** [\`.red\`] - Redeem a premium key.
+  { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
+
+**\`.redeem\`** [\`.red\`] - Redeem a premium key.
 
 > Premium users can use all commands in DMs.
 > Premium users have unlimited tokens.` }
@@ -5632,6 +5633,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
+    // Buyer / Premium only
+    if (!perm.isBuyer && !isOwner(msg.author.id)) {
+      await sendInputErrorV2(msg, "Buy a Premium on https://discord.com/channels/1509484518766018711/1539090234354962505 — to use this command or use command in DMs.").catch(() => {});
+      return;
+    }
     const cd = checkCommandCooldown(msg.author.id, "clean", perm.isBuyer);
     if (cd.onCooldown) {
       if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
@@ -5640,7 +5646,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const isBuyerUser = perm.isBuyer;
     let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
     if (!attachments.length) {
-      await sendRenameInputError(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
+      await sendRenameInputError(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.");
       return;
     }
     const file = attachments[0];
@@ -5667,7 +5673,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const fileExt = ext(file.name || file.filename || "");
     // Allow missing extension when content is valid (reply / V2 / forward)
     if (fileExt && fileExt !== "lua" && fileExt !== "txt" && fileExt !== "luau") {
-      await sendRenameInputError(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
+      await sendRenameInputError(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.");
       return;
     }
 
@@ -5725,7 +5731,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
     if (!attachments.length) {
-      await sendInputErrorV2(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward a Components V2 result.").catch(() => {});
+      await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.").catch(() => {});
       return;
     }
     const file = attachments[0];
