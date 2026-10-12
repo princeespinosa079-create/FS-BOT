@@ -711,34 +711,49 @@ async function fetchMessageRaw(channelId, messageId) {
 function attachmentsFromRawMessage(raw) {
   const out = [];
   if (!raw) return out;
-  for (const a of raw.attachments || []) {
-    if (!a) continue;
+  const push = (a) => {
+    if (!a) return;
+    const name = a.filename || a.name || "file";
+    const url = a.url || a.proxy_url || a.proxyURL;
+    if (!url || !name) return;
+    if (out.some(x => x.name === name && x.url === url)) return;
     out.push({
       id: a.id,
-      name: a.filename || a.name || "file",
-      filename: a.filename || a.name || "file",
-      url: a.url,
+      name,
+      filename: name,
+      url,
       proxyURL: a.proxy_url || a.proxyURL || a.url,
       proxy_url: a.proxy_url || a.url,
       size: a.size || 0,
       contentType: a.content_type || a.contentType || null
     });
-  }
+  };
+  for (const a of raw.attachments || []) push(a);
   // Walk V2 components for type 13
   const walk = (comps) => {
     if (!Array.isArray(comps)) return;
     for (const c of comps) {
       if (!c) continue;
       if (c.type === 13 && c.file) {
-        const name = String(c.file.name || c.file.filename || (c.file.url || "").replace(/^attachment:\/\//, "") || "file");
-        if (!out.some(x => x.name === name) && c.file.url && String(c.file.url).startsWith("http")) {
-          out.push({ name, filename: name, url: c.file.url, proxyURL: c.file.url, size: c.file.size || 0 });
+        const name = String(c.file.name || c.file.filename || String(c.file.url || "").replace(/^attachment:\/\//, "") || "file");
+        if (c.file.url && String(c.file.url).startsWith("http")) {
+          push({ name, filename: name, url: c.file.url, proxy_url: c.file.url, size: c.file.size || 0, content_type: c.file.content_type || null });
         }
       }
       if (Array.isArray(c.components)) walk(c.components);
     }
   };
   try { walk(raw.components); } catch {}
+  // Forwarded messages: message_snapshots[].message.attachments (REST shape)
+  try {
+    const snaps = raw.message_snapshots || raw.messageSnapshots || [];
+    for (const snap of snaps) {
+      const m = snap?.message || snap;
+      if (!m) continue;
+      for (const a of m.attachments || []) push(a);
+      try { walk(m.components); } catch {}
+    }
+  } catch {}
   return out;
 }
 
@@ -811,13 +826,29 @@ async function attachmentsFromMsgOrReply(msg, filterFn = null) {
 
   if (!list.length && msg.reference?.messageId) {
     const refId = msg.reference.messageId;
+    const refChannelId = msg.reference.channelId || msg.channel?.id;
     // 1) discord.js object
     try {
       const refMsg = await fetchRepliedMessage(msg);
-      if (refMsg) list = onlyFiles(collectMessageAttachments(refMsg));
+      if (refMsg) {
+        list = onlyFiles(collectMessageAttachments(refMsg));
+        // Also use attachmentsOf (V2 + forward-aware)
+        if (!list.length) {
+          try {
+            list = onlyFiles(attachmentsOf(refMsg).map(x => x.attachment));
+          } catch {}
+        }
+      }
     } catch {}
-    // 2) Raw REST — reliable for Components V2
-    if (!list.length) {
+    // 2) Raw REST — reliable for Components V2 + forwards
+    if (!list.length && refChannelId) {
+      try {
+        const raw = await fetchMessageRaw(refChannelId, refId);
+        list = onlyFiles(attachmentsFromRawMessage(raw));
+      } catch {}
+    }
+    // 3) Same channel REST fallback
+    if (!list.length && msg.channel?.id && msg.channel.id !== refChannelId) {
       try {
         const raw = await fetchMessageRaw(msg.channel.id, refId);
         list = onlyFiles(attachmentsFromRawMessage(raw));
@@ -1281,34 +1312,39 @@ function printReport(results) {
 }
 
 async function getScriptAttachmentsFromMsgOrReply(msg) {
+  const isScriptLike = (a) => {
+    if (!a) return false;
+    const e = ext(a.name || a.filename);
+    const ct = String(a.contentType || a.content_type || "").toLowerCase();
+    return e === "txt" || e === "lua" || e === "luau" || e === "text" || !e
+      || ct.includes("text") || ct.includes("lua") || ct.includes("octet") || ct.includes("plain");
+  };
   let attachments = await attachmentsFromMsgOrReply(msg, a => {
     const e = ext(a.name || a.filename);
     return e === "txt" || e === "lua" || e === "luau";
   });
-  if (!attachments.length && msg.reference?.messageId) {
+  if (!attachments.length) {
     const any = await attachmentsFromMsgOrReply(msg, null);
-    attachments = any.filter(a => {
-      const e = ext(a.name || a.filename);
-      const ct = String(a.contentType || "").toLowerCase();
-      return e === "txt" || e === "lua" || e === "luau" || e === "text" || !e
-        || ct.includes("text") || ct.includes("lua") || ct.includes("octet");
-    });
+    attachments = any.filter(isScriptLike);
+    if (!attachments.length && any.length) attachments = any; // accept any file
   }
-  // Last resort: if reply exists, pull raw REST attachments and accept text-like
+  // Reply / forward: raw REST + snapshots
   if (!attachments.length && msg.reference?.messageId) {
-    try {
-      const raw = await fetchMessageRaw(msg.channel.id, msg.reference.messageId);
-      const list = (attachmentsFromRawMessage(raw) || []).map(a => ({
-        ...a,
-        name: a.name || a.filename,
-        url: a.url || a.proxyURL || a.proxy_url
-      })).filter(a => a.url && a.name);
-      attachments = list.filter(a => {
-        const e = ext(a.name);
-        return e === "txt" || e === "lua" || e === "luau" || e === "text" || !e;
-      });
-      if (!attachments.length) attachments = list; // accept any file; caller validates content
-    } catch {}
+    const refId = msg.reference.messageId;
+    const refChannelId = msg.reference.channelId || msg.channel?.id;
+    for (const chId of [...new Set([refChannelId, msg.channel?.id].filter(Boolean))]) {
+      try {
+        const raw = await fetchMessageRaw(chId, refId);
+        const list = (attachmentsFromRawMessage(raw) || []).map(a => ({
+          ...a,
+          name: a.name || a.filename,
+          url: a.url || a.proxyURL || a.proxy_url
+        })).filter(a => a.url && a.name);
+        attachments = list.filter(isScriptLike);
+        if (!attachments.length && list.length) attachments = list;
+        if (attachments.length) break;
+      } catch {}
+    }
   }
   return attachments;
 }
@@ -5627,12 +5663,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       await sendRenameInputError(msg, "Couldn't read that file (link expired or invalid). Re-upload it and try again.");
       return;
     }
-    if (isObfuscatedOrProtectionNotLua(fileContent)) {
-      await sendRenameInputError(msg, "This is obfuscated or protection code, try another.");
-      return;
-    }
+    // .clean works on protected/obfuscated sources — only strips comments/loaders/IP loggers
     const fileExt = ext(file.name || file.filename || "");
-    // Allow missing extension when content is valid (V2 replies)
+    // Allow missing extension when content is valid (reply / V2 / forward)
     if (fileExt && fileExt !== "lua" && fileExt !== "txt" && fileExt !== "luau") {
       await sendRenameInputError(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
       return;
