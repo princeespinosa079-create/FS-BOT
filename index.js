@@ -838,6 +838,448 @@ async function attachmentsFromMsgOrReply(msg, filterFn = null) {
 }
 
 /** Script files from message or reply (Components V2 — same path as .upload) */
+
+// ============================================================
+// OBFUSCATOR DETECTOR (.detect / .dt)
+// ============================================================
+const SIGNATURES = {
+    Prometheus: [
+        [20, /return\s*\(function\s*\(\.\.\.\)\s*local\s+\w\s*=\s*\{/],
+        [45, /=\{\s*(?:'[A-Za-z0-9]+'\s*,\s*){4,}'[A-Za-z0-9]+'\s*\}/],
+        [20, /\b\d{4,7}-\(-?\d{4,7}\)/],
+        [15, /math\.floor/],
+        [10, /string\.char.*table\.concat.*string\.sub/s],
+        [15, /for\s+\w+,\w+\s+in\s+ipairs\s*\(/],
+        [10, /getfenv\s+and\s+getfenv\(\)\s+or\s+_ENV/],
+        [20, /local\s+function\s+\w\s*\(\w\)\s*return\s+\w\[\w\+/],
+        [12, /bit32\.rrotate/],
+        [8,  /bit32\.rshift/],
+        [30, /local\s+\w\s*=\s*\{\s*(?:'(?:\\[0-9]{2,3}){6,}'[;,]?\s*){5,}/],
+        [25, /local\s+function\s+\w+\s*\(\s*\w+\s*\)[\s\S]{0,300}string\.char\s*\([\s\S]{0,200}string\.byte/s],
+        [20, /\bg\s*\[\s*\d+\s*\]/],
+        [18, /string\.byte\s*\(\s*\w+\s*,\s*\w+\s*\)\s*[-+^]\s*\w+/],
+        [35, /^return\s*\(\s*function\s*\(\s*\.\.\.\s*\)\s*local\s+\w\s*=\s*\{\s*'/m],
+    ],
+    "MoonSec V2": [
+        [25, /Protected_by_MoonSecV2/],
+        [50, /[\u3480-\u34c0]{5,}/],
+        [25, /_msec\s*=/],
+        [20, /#\[\[[^\]]{3,}\]\]/],
+        [15, /\(0x[0-9a-f]+\/\d+\)/],
+        [10, /discord\.gg\/gQEH/],
+    ],
+    "MoonSec V3": [
+        [30, /\(\[\[This file was protected with MoonSec V3\]\]\)/],
+        [30, /\:gsub\s*\(\s*'\.+'\s*,\s*\(function\s*\(a\)/],
+        [20, /_[A-Z][a-zA-Z]{6,}\s*=\s*a\s*;/],
+        [25, /return\s*\(function\s*\(\w,\.\.\.\)local\s+\w;local\s+\w;/],
+        [15, /while\s+n<\s+0x[0-9a-f]+\s+and\s+e%0x[0-9a-f]+<0x[0-9a-f]+/],
+        [20, /\bk\s*\(\s*\d{2,3}\s*,\s*"[A-Za-z0-9_()\^>?#_~!|]{20,}"/],
+        [15, /l\.[a-zA-Z_]{6,}\s*\(/],
+        [15, /d\s*=\s*"(?:\\[0-9]{1,3}){10,}"/],
+        [12, /local\s+e\s*=\s*0x01\s+local\s+function\s+k/],
+    ],
+    "Luraph 14": [
+        [50, /--\s*This file was protected using Luraph Obfuscator v14/],
+        [35, /return\s*\(\s*\{[A-Z]{1,3}=bit32\.\w+/],
+        [30, /0[Xx][0-9a-fA-F]+_+[0-9a-fA-F]*/],
+        [25, /0[Bb][01_]{3,}/],
+        [20, /for\s+\w\s*=\s*0[Xx][0-9a-fA-F_]+\s*,\s*0[Xx][0-9a-fA-F_]+/],
+        [20, /\w\[0[Xx][0-9a-fA-F]+__[0-9a-fA-F]*\]/],
+        [20, /0[Xx][0-9a-fA-F]{1,4}_+[0-9a-fA-F]{1,4}/],
+        [15, /\bbuffer\b/],
+        [12, /coroutine\.wrap/],
+        [20, /"[A-Za-z0-9$#@!%^&*()\[\]{}|<>?_=+\-.,;:'"\\/]{200,}"/],
+    ],
+    "Luraph 10": [
+        [60, /--\s*This file was generated using Luraph Obfuscator v10/],
+        [55, /"LPH\|[0-9A-Fa-f]{20,}"/],
+        [40, /string\.char\s*\(\s*\w+\s*,\s*0\s*\)/],
+        [35, /:gsub\s*\(\s*"\.\."/],
+        [30, /return\s+loadstring\s*\(/],
+        [20, /\b[lI]{4,}\b/],
+        [25, /l11i1lIil1lIIiiIill:sub\(5\)/],
+        [20, /tonumber\s*\(\s*\w+\s*,\s*16\s*\)/],
+    ],
+    IronBrew: [
+        [10, /local\s+\w+=string\.byte;local\s+\w+=string\.char;local\s+\w+=string\.sub;local\s+\w+=table\.concat;local\s+\w+=table\.insert;local\s+\w+=math\.ldexp/],
+        [10, /local\s+function\s+\w+\(\w+\)\s*local\s+\w+,\s*\w+,\s*\w+\s*=\s*"",\s*"",\s*\{\}/],
+        [45, /\b\w\('[0-9A-Z]{15,}'\)/],
+        [10, /getfenv\s+or\s+function\s*\(\s*\)\s*return\s+_ENV\s+end/],
+        [10, /unpack\s+or\s+table\.unpack/],
+    ],
+    "25ms Obfuscator": [
+        [30, /(?:\\\d{2,3}){15,}/],
+        [35, /"[A-Za-z0-9+/=]{120,}"/],
+        [25, /string\.gsub\s*\(\s*".-",\s*function/],
+        [30, /\{(?:\d+,){40,}\d+\}/],
+        [20, /math\.ldexp|bit32\.(?:bxor|lshift|rshift)/],
+        [15, /(?:\(\s*\d+\s*[+\-*/]\s*\d+\s*\)){5,}/],
+        [25, /return\s*\(\s*function\s*\(/],
+        [20, /^.{400,}$/m],
+        [15, /(?:[+\-*/%^&|]{1}){20,}/],
+        [40, /(?:\\\d{2,3}){25,}/],
+        [25, /string\.char\s*\(\s*(?:\d+,){10,}\d+\s*\)/]
+    ],
+    IronBrew3: [
+        [30, /^--ironbrew3:tm/],
+        [30, /return\(function\(\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+,\w+/],
+        [40, /bit32\s+or\s+bit/],
+        [35, /(?:[0-9A-Fa-f]{2}){15,}/],
+        [30, /\{(?:\d+,){50,}\d+\},\s*0,\s*255,\s*1\)/],
+        [20, /math\.max,math\.atan2,string\.sub,math\.ceil,string\.len/],
+    ],
+    "LuaObfuscator VM": [
+        [50, /local\s+v0\s*=\s*tonumber\s*;\s*local\s+v1\s*=\s*string\.byte/],
+        [35, /local\s+function\s+v15\s*\(v16,v17/],
+        [50, /return\s+v15\s*\(\s*"LOL!/],
+        [30, /[0-9A-F]{2}3Q00[0-9A-F]/],
+        [30, /[0-9A-F]{2}2Q00[0-9A-F]/],
+        [20, /local\s+function\s+v29\s*\(v57/],
+        [15, /v\d+\s*=\s*unpack\s+or\s+table\.unpack/],
+        [15, /local\s+v8\s*=\s*math\.ldexp/],
+        [15, /getfenv\s+or\s+function\s*\(\s*\)\s*return\s+_ENV\s+end/],
+    ],
+    WynFuscator: [
+        [10, /--\s*Protected by wYnFuscate/],
+        [10, /wynfuscate\.com/],
+        [30, /local\s+cd\s*=\s*"[A-Za-z0-9^*.?()\[\]!@#$%&_~|<>{}`'\-]{80,}"/],
+        [30, /local\s+cG\s*=\s*65536/],
+        [30, /local\s+cj\s*=\s*function\s*\(c8,c9,c4\)/],
+        [25, /cg\[cj\(\d+,cT,5\)\]/],
+        [20, /local\s+cl\s*=\s*"(?:\\[0-9]{1,3}){20,}"/],
+        [15, /c0\s*=\s*4294967296/],
+        [20, /\bcA\s*\(\s*\d+\s*\)/],
+    ],
+    Hercules: [
+        [10, /--\[Protected By Hercules/],
+        [15, /'Protected By Hercules V1\.6 \| github\.com\/zeusssz\/hercules-obfuscator'/],
+        [10, /hercules-obfuscator\.xyz/],
+        [25, /local\s+[A-Z][a-z][A-Za-z]{6,}\s*,\s*[A-Z][a-z][A-Za-z]{6,}/],
+        [30, /[A-Z][a-zA-Z]{6,}\s*=\s*ipairs\s*;/],
+        [25, /[A-Z][a-zA-Z]{6,}\s*=\s*pairs\s*;/],
+        [20, /if\s+false\s+then\s+local\s+\w+\s*=\s*\d+/],
+        [20, /while\s+false\s+do\s+local\s+\w+\s*=\s*\d+\s+break\s+end/],
+        [12, /math\.ldexp/],
+        [50, /\('.*?\\\d+\\\d+'\)/],
+        [15, /return\s+\(function\s*\(\.\.\.\)\s+local\s+[A-Z][a-z][A-Za-z]{5,}/],
+    ],
+    MoonVeil: [
+        [50, /--\s*This script was generated using the MoonVeil Obfuscator/],
+        [40, /moonveil\.cc/],
+        [35, /local\s+\w+,\w+,\w+,\w+=getmetatable,bit32\.bxor,pairs,type/],
+        [30, /\(function\(\.\.\.\)return\{\[1\]=\{\.\.\.\},\[2\]=\w+\(\'#\',\.\.\.\)\}end\)/],
+        [25, /return\s*\{[^}]*\[1\]\s*=\s*\{[^}]*\},\s*\[2\]\s*=\s*\w+\s*\(\s*'#'/],
+        [30, /Ki=Ig\(Ki,'\[\[\^A-Z\]/],
+        [25, /local\s+function\s+\w+\s*\(\w+,\w+,\w+\)\s*if\s+\w+>\w+\s+then\s+return\s+end\s+return\s+\w+\[\w+\]/],
+        [25, /bit32\s*\.\s*lshift\s*,\s*bit32\s*\.\s*rshift\s*,\s*bit32\s*\.\s*band/],
+        [20, /'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\+\/'.*gsub/],
+        [20, /repeat\s+while\s+true\s+do\s+if\s+\w+<=[0-9]+\s+then\s+if\s+\w+<=[0-9]+/],
+        [15, /Ng\[[\w-]+\]\s*or\s+\w+\([\w-]+,/],
+    ],
+    "77fuscator": [
+        [60, /\[\[77fuscator\s+[\d.]+/],
+        [30, /discord\.gg\/[A-Za-z0-9]{8,}/],
+        [35, /do\s+local\s+\w\s*=\s*\[\[77fuscator/],
+        [30, /o,g,s,l,n,b,j,v,bb,m,r,bf=string\.byte,string\.char,string\.sub,table\.concat,math\.ldexp/],
+        [25, /be=function\s*\(\w,\w+\)\s*local\s+\w+\s+local\s+\w+=3/],
+        [25, /bd=function\s*\(\w\)\s*local\s+\w+,\w+,\w+,\w+,\w+,\w+,\w+\s+local\s+\w+=0/],
+        [20, /bj=function\s*\(\s*\)\s*local\s+\w+,\w+\s+local\s+\w+=0/],
+        [20, /getfenv\s+or\s+function\s*\(\s*\)\s*return\s+_ENV\s+end/],
+        [20, /bg,bh=nil/],
+        [15, /q=2\^32-1/],
+        [15, /bh=function\s*\(\w,\w+\)\s*if\s+\w<0\s+then\s+return\s+bg\(/],
+    ],
+    Lunr: [
+        [30, /--\s*This file was protected using Lunr/],
+        [15, /discord\.gg\/BGQkGUW2Qs/],
+        [15, /\{`[A-Za-z0-9+/=]{6,}`\s*[;,]/],
+        [10, /\blocal\s+(?:[lI1i]{4,})\s*=/],
+        [20, /"(?:All warfare is based on deception|The supreme art of war|If you know the enemy)[^"]*Sun Tzu"/],
+        [30, /error\s*\(\s*`Tamper Detected!`\s*\)/],
+        [10, /setmetatable\s*\(\s*\{\s*\}\s*,\s*\{$/],
+        [15, /\(-\d{5,}\+\d{5,}\)/],
+        [10, /getfenv\s+and\s+getfenv\(\)\s+or\s+_ENV/],
+        [50, /lliilI1i\s*=/],
+        [10, /`[A-Za-z0-9+/]{10,}={0,2}`/],
+        [15, /pcall\s*\(\s*function\s*\(\s*\)[^)]{0,80}end\s*\)/],
+    ],
+    LightRay: [
+        [60, /"LPS\?[0-9A-Z]{30,}"/],
+        [40, /return\s*\(\s*function\s*\(\w,\w,\w,\w,\w,\w,\w,\w,\w,\w,\w,\w,\w,\w,\w,\w,\w,\w,\w,\w/],
+        [30, /function\s*\(\s*vk\s*,\s*vB\s*,\s*DH\s*,\s*ZX/],
+        [35, /0[Bb][01_]{8,}/],
+        [25, /\bZV\b.*\bwhile\s*\(ZV\)\s*do\b/s],
+        [30, /vB\[0[BbXx][0-9a-fA-F_]{4,}\]/],
+        [25, /0_[bBxX][0-9a-fA-F_]{4,}/],
+        [20, /\bts\s*\(\s*0[xXbB][0-9a-fA-F_]+\s*,\s*vB\[/],
+        [20, /\brY\s*\(\s*ts\s*\(/],
+        [15, /\}\s*,\s*false\s*,\s*string\.sub\s*,\s*select\s*,\s*error/],
+        [20, /string\.byte\s*,\s*tonumber\s*,\s*math\.ldexp\s*,\s*\.\.\.\s*\)\s*\(\.\.\.\s*\)\s*;/],
+    ],
+
+    "Prince Obfuscator": [
+        [80, /--\s*This file was protected using Prince Obfuscator/i],
+        [50, /This file was protected using Prince Obfuscator/i],
+        [30, /Prince Obfuscator/i],
+    ],
+    Unobfuscated: [
+        [15, /--\s*[A-Za-z ]{5,}/],
+        [20, /function\s+[a-zA-Z_][a-zA-Z0-9_]{3,}\s*\(/],
+        [17, /\bprint\s*\(/],
+        [15, /\bwarn\s*\(/],
+        [15, /\brequire\s*\(/],
+        [15, /\bfor\s+[a-zA-Z_]\w*\s*,\s*[a-zA-Z_]\w*\s+in\s+pairs\s*\(/],
+        [15, /\bif\s+[a-zA-Z_]\w*\s*[=~<>]+\s*[a-zA-Z_\d"']+\s+then\b/],
+        [20, /\blocal\s+[a-zA-Z_][a-zA-Z0-9_]{3,}\s*=/],
+        [15, /local\s+function\s+[a-zA-Z_]\w+\s*\(/],
+        [10, /game\s*:\s*GetService\s*\(/],
+        [10, /game\s*:\s*HttpGet\s*\(/],
+        [12, /workspace\./],
+        [12, /script\./],
+    ],
+};
+
+const _DEFINITELY_OBF = [
+    /This file was protected using Prince Obfuscator/i,
+    /--\s*This file was protected using Prince Obfuscator/i,
+    /`[A-Za-z0-9+/]{10,}={0,2}`/,
+    /error\s*\(\s*`Tamper Detected/,
+    /lliilI1i/,
+    /Protected_by_MoonSecV2/,
+    /Protected By Hercules/,
+    /This file was protected using Lunr/,
+    /This file was protected using Luraph/,
+    /This file was generated using Luraph Obfuscator/,
+    /This script was generated using the MoonVeil/,
+    /\[\[77fuscator/,
+    /--ironbrew3:tm/,
+    /return\s+v15\s*\(\s*"LOL!/,
+    /[\u3480-\u34c0]{5,}/,
+    /\b[lI1i]{5,}\b/,
+    /All warfare is based on deception.*Sun Tzu/,
+    /"LPS\?[0-9A-Z]{30,}"/,
+    /0_[bBxX][0-9a-fA-F_]{6,}/,
+    /wearedevs\.net\/obfuscator/,
+    /return\s*\(\s*function\s*\(\s*\.\.\.\s*\)\s*local\s+\w\s*=\s*\{\s*"(?:\\[0-9]{2,3}){6,}"/,
+];
+
+const _WEAREDEVS_SIGNALS = [
+    /wearedevs\.net\/obfuscator/,
+    /\[\[\s*v\d+\.\d+\.\d+\s+https?:\/\//,
+    /local\s+o\s*=\s*\{\s*"(?:\\[0-9]{2,3}){6,}"/,
+];
+
+function calcEntropy(data) {
+    if (!data) return 0.0;
+    const freq = {};
+    for (const c of data) freq[c] = (freq[c] || 0) + 1;
+    const len = data.length;
+    return -Object.values(freq).reduce((sum, c) => {
+        const p = c / len;
+        return sum + p * Math.log2(p);
+    }, 0);
+}
+
+function statFeatures(code) {
+    const lines = code.split('\n');
+    const totalChars = code.length;
+    if (totalChars === 0) return {};
+    
+    const avgLine = lines.reduce((s, l) => s + l.length, 0) / lines.length;
+    const longLines = lines.filter(l => l.length > 500).length / lines.length;
+    const hexCount = (code.match(/0x[0-9a-fA-F]+/g) || []).length;
+    const numEsc = (code.match(/\\[0-9]{2,3}/g) || []).length;
+    const ops = (code.match(/[+\-*/%^&|]/g) || []).length;
+    const unicodeCnt = (code.match(/[\u3480-\u34c0]{3,}/g) || []).length;
+    const backtickStrings = (code.match(/`[^`]{6,}`/g) || []).length;
+    const ilNames = (code.match(/\b[lI1i]{4,}\b/g) || []).length;
+    const binLiterals = (code.match(/0[Bb][01_]{4,}/g) || []).length;
+    const underscoreHex = (code.match(/0_[bBxX][0-9a-fA-F_]{4,}/g) || []).length;
+    const dqNumescStrings = (code.match(/"(?:\\[0-9]{2,3}){6,}"/g) || []).length;
+
+    return {
+        entropy: calcEntropy(code),
+        avgLineLength: avgLine,
+        longLineRatio: longLines,
+        hexLiteralDensity: hexCount / Math.max(totalChars / 1000, 1),
+        numericEscapeDensity: numEsc / Math.max(totalChars / 1000, 1),
+        operatorDensity: ops / Math.max(totalChars / 1000, 1),
+        unicodeIdentCount: unicodeCnt,
+        backtickStringCount: backtickStrings,
+        ilNameCount: ilNames,
+        binLiteralCount: binLiterals,
+        underscoreHexCount: underscoreHex,
+        dqNumescStrings: dqNumescStrings,
+    };
+}
+
+function isWeAreDevs(code) {
+    for (const pat of _WEAREDEVS_SIGNALS) {
+        if (pat.test(code)) return true;
+    }
+    return false;
+}
+
+function statBonus(obfName, stats, isWad = false) {
+    let bonus = 0.0;
+    const ent = stats.entropy || 0;
+    const nesc = stats.numericEscapeDensity || 0;
+    const avgLine = stats.avgLineLength || 0;
+    const longLine = stats.longLineRatio || 0;
+    const unicodeCnt = stats.unicodeIdentCount || 0;
+    const backtickCnt = stats.backtickStringCount || 0;
+    const ilCnt = stats.ilNameCount || 0;
+    const binCnt = stats.binLiteralCount || 0;
+    const usHex = stats.underscoreHexCount || 0;
+    const dqNesc = stats.dqNumescStrings || 0;
+
+    switch (obfName) {
+        case 'Prometheus':
+            if (nesc > 5) bonus += 10;
+            if (ent > 4.5 && ent < 6.0) bonus += 5;
+            if (nesc > 15) bonus += 15;
+            if (isWad) bonus -= 80;
+            if (dqNesc > 10) bonus -= 40;
+            break;
+        case 'WeAreDevs':
+            if (nesc > 10) bonus += 15;
+            if (dqNesc > 20) bonus += 25;
+            if (ent > 4.0 && ent < 5.5) bonus += 8;
+            if (avgLine > 200) bonus += 10;
+            break;
+        case 'MoonSec V2':
+            if (unicodeCnt > 5) bonus += 20;
+            break;
+        case 'MoonSec V3':
+            if (avgLine > 300) bonus += 8;
+            if (ent > 5.5) bonus += 5;
+            break;
+        case 'Luraph 14':
+            if (longLine > 0.1) bonus += 8;
+            if ((stats.hexLiteralDensity || 0) > 10) bonus += 6;
+            break;
+        case 'Luraph 10':
+            if (ilCnt > 10) bonus += 10;
+            if (ent > 4.5) bonus += 5;
+            break;
+        case 'LightRay':
+            if (binCnt > 20) bonus += 15;
+            if (usHex > 10) bonus += 12;
+            if (avgLine > 1000) bonus += 10;
+            if (ent > 4.8) bonus += 5;
+            break;
+        case 'LuaObfuscator VM':
+            if (longLine > 0.5) bonus += 8;
+            break;
+        case 'WynFuscator':
+            if (avgLine > 500) bonus += 10;
+            if (ent > 5.0) bonus += 5;
+            break;
+        case 'Hercules':
+            if (avgLine > 100) bonus += 5;
+            break;
+        case 'IronBrew':
+            if ((stats.operatorDensity || 0) > 20) bonus += 5;
+            break;
+        case 'MoonVeil':
+            if (avgLine > 200) bonus += 8;
+            if (ent > 5.0) bonus += 5;
+            break;
+        case '77fuscator':
+            if (avgLine > 300) bonus += 8;
+            break;
+        case 'Lunr':
+            if (backtickCnt > 10) bonus += 15;
+            if (ilCnt > 20) bonus += 10;
+            if (ent > 4.5) bonus += 5;
+            break;
+        case '25ms Obfuscator':
+            if ((stats.numericEscapeDensity || 0) > 8) bonus += 12;
+            if ((stats.avgLineLength || 0) > 250) bonus += 10;
+            if ((stats.entropy || 0) > 5.2) bonus += 6;
+            if (isWad) bonus -= 60;
+            if (dqNesc > 10) bonus -= 30;
+            break;
+        case 'Prince Obfuscator':
+            if (ent > 4.5) bonus += 5;
+            break;
+        case 'Unobfuscated':
+            if (avgLine < 120) bonus += 10;
+            if (ent < 4.5) bonus += 8;
+            if (backtickCnt > 5) bonus -= 30;
+            if (ilCnt > 10) bonus -= 25;
+            if (ent > 5.5) bonus -= 20;
+            if (avgLine > 400) bonus -= 15;
+            if (binCnt > 10) bonus -= 20;
+            if (usHex > 5) bonus -= 20;
+            break;
+    }
+    return bonus;
+}
+
+function isDefinitelyObfuscated(code) {
+    for (const pat of _DEFINITELY_OBF) {
+        if (pat.test(code)) return true;
+    }
+    return false;
+}
+
+function detectObfuscatorType(code) {
+    const stats = statFeatures(code);
+    const definitelyObf = isDefinitelyObfuscated(code);
+    const wad = isWeAreDevs(code);
+    const rawScores = {};
+
+    for (const [name, patterns] of Object.entries(SIGNATURES)) {
+        let score = 0.0;
+        for (const [weight, pattern] of patterns) {
+            if (pattern.test(code)) score += weight;
+        }
+        score += statBonus(name, stats, wad);
+        if (name === 'Unobfuscated' && definitelyObf) score = 0.0;
+        rawScores[name] = Math.max(score, 0.0);
+    }
+
+    const sorted = Object.entries(rawScores).sort((a, b) => b[1] - a[1]);
+    const [topName, topScore] = sorted[0];
+    const secondScore = sorted[1]?.[1] || 0.0;
+    const total = Object.values(rawScores).reduce((a, b) => a + b, 0);
+
+    if (topScore <= 0) return [['Custom / Unknown', 0.0]];
+    if (topScore < 20) return [['Custom / Unknown', 0.0]];
+
+    const gapRatio = topScore / Math.max(secondScore, 1);
+    const results = [];
+
+    for (const [name, score] of Object.entries(rawScores)) {
+        let confidence;
+        if (score <= 0) {
+            confidence = 0.0;
+        } else if (name === topName) {
+            const dominance = score / Math.max(total, 1);
+            const gapBonus = Math.min(gapRatio / 3, 1.0);
+            const strength = Math.min(score / 120, 1.0);
+            confidence = dominance * 55 + gapBonus * 25 + strength * 20;
+        } else {
+            const relative = score / Math.max(topScore, 1);
+            const suppress = Math.min(gapRatio / 2, 1.0);
+            confidence = relative * 45 * (1 - suppress);
+        }
+        confidence = Math.round(Math.max(0, Math.min(99.9, confidence)) * 10) / 10;
+        results.push([name, confidence]);
+    }
+    return results.sort((a, b) => b[1] - a[1]);
+}
+
+function printReport(results) {
+    if (!results?.length) return 'Detected: Custom / Unknown (score 1)';
+    const [topName, topPct] = results[0];
+    const score = Math.max(1, Math.min(10, Math.round(topPct / 10)));
+    if (topName === 'Custom / Unknown') return 'Detected: Custom / Unknown (score 1)';
+    return `Detected: ${topName} (score ${score})`;
+}
+
 async function getScriptAttachmentsFromMsgOrReply(msg) {
   let attachments = await attachmentsFromMsgOrReply(msg, a => {
     const e = ext(a.name || a.filename);
@@ -948,7 +1390,7 @@ async function sendRenameLoading(message) {
       type: 17,
       accent_color: RENAME_V2_ACCENT,
       components: [
-        { type: 10, content: "### Renaming...\n⏳ Processing..." }
+        { type: 10, content: "### Cleaning...\n⏳ Processing..." }
       ]
     }]
   };
@@ -956,7 +1398,7 @@ async function sendRenameLoading(message) {
     return await replyComponentsV2(message, payload);
   } catch (e) {
     console.warn("⚠️ Components V2 loading fallback:", e.message?.slice(0, 120));
-    return message.reply({ content: "### Renaming...\n⏳ Processing..." }).catch(() => null);
+    return message.reply({ content: "### Cleaning...\n⏳ Processing..." }).catch(() => null);
   }
 }
 
@@ -1518,31 +1960,61 @@ async function fetchMessages(channel, before) {
 }
 function attachmentsOf(message) {
   const result = [];
-  for (const a of message.attachments?.values?.() || []) {
-    if (isAllowedFileType(a.name, a.contentType)) {
-      result.push({ attachment: a, forwarded: false });
-    }
-  }
-  for (const s of message.messageSnapshots?.values?.() || []) {
-    for (const a of s.attachments?.values?.() || []) {
-      if (isAllowedFileType(a.name, a.contentType)) {
-        result.push({ attachment: a, forwarded: true });
+  const pushAtt = (a, forwarded) => {
+    if (!a) return;
+    const name = a.name || a.filename;
+    const ct = a.contentType || a.content_type;
+    if (!isAllowedFileType(name, ct)) return;
+    if (!a.name && name) try { a.name = name; } catch {}
+    if (!a.url && (a.proxyURL || a.proxy_url)) try { a.url = a.proxyURL || a.proxy_url; } catch {}
+    result.push({ attachment: a, forwarded: !!forwarded });
+  };
+  for (const a of message.attachments?.values?.() || []) pushAtt(a, false);
+  // Components V2 type-13 file refs
+  try {
+    const walk = (comps, attSrc, forwarded) => {
+      if (!Array.isArray(comps)) return;
+      for (const c of comps) {
+        if (!c) continue;
+        if (c.type === 13 && c.file) {
+          const name = String(c.file.name || c.file.filename || String(c.file.url || "").replace(/^attachment:\/\//, "") || "file");
+          const match = [...(attSrc?.values?.() || [])].find(x => (x.name || x.filename) === name);
+          if (match) pushAtt(match, forwarded);
+          else if (c.file.url && String(c.file.url).startsWith("http")) {
+            pushAtt({ name, filename: name, url: c.file.url, proxyURL: c.file.url, size: c.file.size || 0, contentType: c.file.content_type || null }, forwarded);
+          }
+        }
+        if (Array.isArray(c.components)) walk(c.components, attSrc, forwarded);
       }
-    }
+    };
+    walk(message.components, message.attachments, false);
+  } catch {}
+  // Forwarded snapshots (incl. forwarded Components V2 messages)
+  for (const s of message.messageSnapshots?.values?.() || []) {
+    for (const a of s.attachments?.values?.() || []) pushAtt(a, true);
+    try {
+      const walk = (comps) => {
+        if (!Array.isArray(comps)) return;
+        for (const c of comps) {
+          if (!c) continue;
+          if (c.type === 13 && c.file) {
+            const name = String(c.file.name || c.file.filename || String(c.file.url || "").replace(/^attachment:\/\//, "") || "file");
+            const match = [...(s.attachments?.values?.() || [])].find(x => (x.name || x.filename) === name);
+            if (match) pushAtt(match, true);
+            else if (c.file.url && String(c.file.url).startsWith("http")) {
+              pushAtt({ name, filename: name, url: c.file.url, proxyURL: c.file.url, size: c.file.size || 0, contentType: c.file.content_type || null }, true);
+            }
+          }
+          if (Array.isArray(c.components)) walk(c.components);
+        }
+      };
+      walk(s.components);
+    } catch {}
   }
   return result;
 }
 function allAttachmentsOf(message) {
-  const result = [];
-  for (const a of message.attachments?.values?.() || []) {
-    if (isAllowedFileType(a.name, a.contentType)) result.push(a);
-  }
-  for (const s of message.messageSnapshots?.values?.() || []) {
-    for (const a of s.attachments?.values?.() || []) {
-      if (isAllowedFileType(a.name, a.contentType)) result.push(a);
-    }
-  }
-  return result;
+  return attachmentsOf(message).map(x => x.attachment);
 }
 function zipAttachmentsOf(message) {
   const result = [];
@@ -3322,7 +3794,9 @@ const helpPages = [
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.rename\`** [\`.rn\`] Remove comments, IP loggers, script loaders.
+`**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders.
+
+**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
 **\`.obf\`** Obfuscate your script — encrypt strings, Anti-Debug, Anti-Dump, make code unreadable.
 
@@ -3372,7 +3846,9 @@ const helpSessions = new Map();
 
 /** Help page bodies for Components V2 */
 const helpPageBodies = [
-  { color: 0x5865F2, text: `**\`.rename\`** [\`.rn\`] Remove comments, IP loggers, script loaders.
+  { color: 0x5865F2, text: `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders.
+
+**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
 **\`.obf\`** Obfuscate your script — encrypt strings, Anti-Debug, Anti-Dump, make code unreadable.
 
@@ -5114,13 +5590,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // .rename / .rn — mode selection panel
-  if (/^\.(?:rename|rn)$/i.test(txt)) {
+  // .clean / .cl — clean comments/loaders/IP loggers
+  if (/^\.(?:clean|cl)$/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
-    const cd = checkCommandCooldown(msg.author.id, "rename", perm.isBuyer);
+    const cd = checkCommandCooldown(msg.author.id, "clean", perm.isBuyer);
     if (cd.onCooldown) {
       if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
@@ -5202,6 +5678,67 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
+
+  // .detect / .dt — detect obfuscator used on a script
+  if (/^\.(?:detect|dt)(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    const cd = checkCommandCooldown(msg.author.id, "detect", perm.isBuyer);
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
+    let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
+    if (!attachments.length) {
+      await sendInputErrorV2(msg, "**Tips:**\n- Attach a .lua .txt or .luau file.\n- Reply to a message with a file, or forward a Components V2 result.").catch(() => {});
+      return;
+    }
+    const file = attachments[0];
+    const loadingPayload = {
+      flags: IS_COMPONENTS_V2,
+      components: [{
+        type: 17,
+        accent_color: RENAME_V2_ACCENT,
+        components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
+      }]
+    };
+    const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
+    try {
+      let code = null;
+      for (const u of [...new Set([file.url, file.proxyURL, file.proxy_url].filter(Boolean))]) {
+        try {
+          const res = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
+          if (res.ok) {
+            code = await res.text();
+            if (code && code.trim()) break;
+          }
+        } catch {}
+      }
+      if (!code || !code.trim()) throw new Error("could not read file");
+      const results = detectObfuscatorType(code);
+      const [topName, topPct] = results?.[0] || ["Custom / Unknown", 0];
+      const pct = (typeof topPct === "number" ? topPct : 0).toFixed(2);
+      const body = `**Detected: ${topName} (${pct}%)**`;
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      pendingTokenLine.delete(String(msg.author.id));
+      const resultPayload = {
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: body }]
+        }]
+      };
+      await replyComponentsV2(msg, resultPayload, { mention: false }).catch(() => {});
+    } catch (e) {
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
+    }
+    return;
+  }
+
   // .get — regular: 1 ID max, buyer: up to 10 IDs
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
