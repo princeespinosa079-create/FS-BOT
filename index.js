@@ -4354,40 +4354,40 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     const how = [
       "### How to use Script Panel",
       "**1.** Owner runs `/scripanel` in a channel to post this panel.",
-      "**2.** Click **Update** → paste a **Pastefy URL** (from `.upload` / `.obf`) and/or **Script** text.",
+      "**2.** Click **Update** → paste a **Pastefy URL** (from `.upload` / `.obf`) and/or upload **FILE** (script text).",
       "**3.** Every save is protected with **Prince Obfuscator** automatically.",
-      "**4.** To clear stored script/URL, set **Delete** to `yes` in the modal.",
+      "**4.** To remove the Pastefy URL only, set **Delete URL** to `yes` in the modal.",
       "**5.** Only the **owner** can use **How** / **Update** on this panel."
-    ].join("\\n");
+    ].join("\n");
     return interaction.reply({
       flags: IS_COMPONENTS_V2 | ((MessageFlags && MessageFlags.Ephemeral != null) ? MessageFlags.Ephemeral : 64),
       components: [{ type: 17, accent_color: RENAME_V2_ACCENT, components: [{ type: 10, content: how }] }]
     }).catch(() => {});
   }
-  if (interaction.customId === "scripanel_update") {
+if (interaction.customId === "scripanel_update") {
     if (!isOwner(interaction.user.id)) {
       return interaction.reply({ content: "❌ owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     const modal = new ModalBuilder()
       .setCustomId("scripanel_update_modal")
-      .setTitle("Update Script Panel");
+      .setTitle("Upload Lua file");
     const urlInput = new TextInputBuilder()
       .setCustomId("scripanel_url")
-      .setLabel("URL (optional)")
+      .setLabel("Pastefy URL (optional)")
       .setStyle(TextInputStyle.Short)
       .setPlaceholder("https://pastefy.app/XXXX/raw")
       .setRequired(false)
       .setMaxLength(400);
     const fileInput = new TextInputBuilder()
       .setCustomId("scripanel_file")
-      .setLabel("FILE / Script text (optional)")
+      .setLabel("Upload File — paste script source")
       .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("Paste script source here...")
+      .setPlaceholder("Paste one source file to obfuscate / update URL code...")
       .setRequired(false)
       .setMaxLength(4000);
-    const delInput = new TextInputBuilder()
-      .setCustomId("scripanel_delete")
-      .setLabel("Delete Section (type yes to clear)")
+    const delUrlInput = new TextInputBuilder()
+      .setCustomId("scripanel_delete_url")
+      .setLabel("Delete URL (type yes to remove Pastefy URL)")
       .setStyle(TextInputStyle.Short)
       .setPlaceholder("yes / no")
       .setRequired(false)
@@ -4395,18 +4395,15 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     modal.addComponents(
       new ActionRowBuilder().addComponents(urlInput),
       new ActionRowBuilder().addComponents(fileInput),
-      new ActionRowBuilder().addComponents(delInput)
+      new ActionRowBuilder().addComponents(delUrlInput)
     );
     return interaction.showModal(modal).catch(() => {});
   }
-
-
 
   return;
 });
 
 // ============================================================
-
 // MODAL SUBMIT — finder panel
 // ============================================================
 client.on("interactionCreate", async interaction => {
@@ -4492,40 +4489,40 @@ client.on("interactionCreate", async interaction => {
       }
       await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
       try {
-        const delRaw = (interaction.fields.getTextInputValue("scripanel_delete") || "").trim().toLowerCase();
+        const delUrlRaw = (interaction.fields.getTextInputValue("scripanel_delete_url") || "").trim().toLowerCase();
         const urlRaw = (interaction.fields.getTextInputValue("scripanel_url") || "").trim();
         const fileRaw = (interaction.fields.getTextInputValue("scripanel_file") || "").trim();
-        if (delRaw === "yes" || delRaw === "y" || delRaw === "delete") {
+
+        // Delete URL only — remove Pastefy URL, keep protected script if any
+        if (delUrlRaw === "yes" || delUrlRaw === "y" || delUrlRaw === "delete") {
           scripanelStore.url = "";
-          scripanelStore.script = "";
           scripanelStore.updatedAt = Date.now();
           scripanelStore.updatedBy = interaction.user.id;
           saveScripanel();
           try {
             if (interaction.message) await interaction.message.edit(buildScripanelV2());
           } catch {}
-          await interaction.editReply({ content: "✅ Script Panel cleared." });
+          await interaction.editReply({ content: "✅ Pastefy URL removed from Script Panel." });
           return;
         }
+
         // URL must be Pastefy (from .upload / .obf only)
         if (urlRaw && !isPastefyUrl(urlRaw)) {
           await interaction.editReply({ content: "❌ URL must be a **Pastefy** link from `.upload` or `.obf` (pastefy.app)." });
           return;
         }
+
+        // Prefer uploaded/pasted FILE text; else load from Pastefy URL
         let source = fileRaw;
         if (!source && urlRaw) {
           source = await fetchTextFromUrl(urlRaw);
-        } else if (source && urlRaw) {
-          // Prefer pasted file text; still save pastefy URL
-        } else if (!source && !urlRaw) {
-          await interaction.editReply({ content: "❌ put a Pastefy URL or FILE/script text (or Delete = yes)." });
-          return;
         }
         if (!source || !source.trim()) {
-          await interaction.editReply({ content: "❌ could not read script from Pastefy URL / FILE." });
+          await interaction.editReply({ content: "❌ put a Pastefy URL and/or Upload File (script text)." });
           return;
         }
-        // Always Prince Obfuscator on every update
+
+        // Always Prince Obfuscator — updates the code tied to the URL
         const protectedScript = obfuscateLua(source);
         if (urlRaw) scripanelStore.url = urlRaw;
         scripanelStore.script = protectedScript;
@@ -4535,10 +4532,9 @@ client.on("interactionCreate", async interaction => {
         try {
           if (interaction.message) await interaction.message.edit(buildScripanelV2());
         } catch {}
-        // Also send obfuscated file ephemerally so owner can download
         const att = new AttachmentBuilder(Buffer.from(protectedScript, "utf8"), { name: "scripanel_protected.lua" });
         await interaction.editReply({
-          content: "✅ Updated & protected with **Prince Obfuscator**." + (urlRaw ? "\nURL saved: " + urlRaw.slice(0, 150) : ""),
+          content: "✅ Updated & protected with **Prince Obfuscator**." + (urlRaw ? "\nURL: " + urlRaw.slice(0, 150) : ""),
           files: [att]
         });
       } catch (e) {
@@ -4546,6 +4542,7 @@ client.on("interactionCreate", async interaction => {
       }
       return;
     }
+
 
   } catch (e) {
     console.error("❌ modal:", e.message);
