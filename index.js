@@ -104,13 +104,12 @@ let blacklistStore = readJSON(BLACKLIST_FILE, { users: [] });
 if (!blacklistStore || typeof blacklistStore !== "object") blacklistStore = { users: [] };
 if (!Array.isArray(blacklistStore.users)) blacklistStore.users = [];
 const saveBlacklist = () => writeJSON(BLACKLIST_FILE, blacklistStore);
-function isBlacklisted(userId) {
-
 const SCRIPANEL_FILE = path.join(DATA_DIR, "scripanel.json");
 let scripanelStore = readJSON(SCRIPANEL_FILE, { url: "", script: "", updatedAt: 0, updatedBy: null });
 if (!scripanelStore || typeof scripanelStore !== "object") scripanelStore = { url: "", script: "", updatedAt: 0, updatedBy: null };
 const saveScripanel = () => writeJSON(SCRIPANEL_FILE, scripanelStore);
 
+function isBlacklisted(userId) {
   return blacklistStore.users.includes(String(userId));
 }
 function blacklistAdd(userId) {
