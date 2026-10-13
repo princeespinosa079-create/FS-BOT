@@ -3705,33 +3705,63 @@ function goofyscator(source, settings) {
 // LUA OBFUSCATOR (Prince Obfuscator — Roblox/Luau executable protection)
 // ============================================================
 
-function buildScripanelV2() {
-  const hasScript = !!(scripanelStore.script && String(scripanelStore.script).trim());
-  const hasUrl = !!(scripanelStore.url && String(scripanelStore.url).trim());
-  let status = "No script loaded yet. Owner: click **Update** to set a URL or paste a script.";
-  if (hasUrl || hasScript) {
-    const parts = [];
-    if (hasUrl) parts.push("**URL:** " + String(scripanelStore.url).slice(0, 200));
-    if (hasScript) parts.push("**Script:** protected with Prince Obfuscator (" + String(scripanelStore.script).length + " chars)");
-    if (scripanelStore.updatedAt) parts.push("**Updated:** <t:" + Math.floor(scripanelStore.updatedAt / 1000) + ":R>");
-    status = parts.join("\n");
+function isPastefyUrl(url) {
+  try {
+    const u = new URL(String(url || "").trim());
+    return /(^|\.)pastefy\.app$/i.test(u.hostname);
+  } catch {
+    return false;
   }
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("scripanel_how").setLabel("How").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("scripanel_update").setLabel("Update").setStyle(ButtonStyle.Primary)
-  );
-  return {
-    flags: IS_COMPONENTS_V2,
-    components: [{
-      type: 17,
-      accent_color: RENAME_V2_ACCENT,
-      components: [
-        { type: 10, content: ("### Script Panel\n" + status).slice(0, 4000) },
-        { type: 14, spacing: SEPARATOR_SPACING_SMALL },
-        row.toJSON()
-      ]
-    }]
-  };
+}
+
+function buildScripanelV2() {
+  try {
+    const hasScript = !!(scripanelStore && scripanelStore.script && String(scripanelStore.script).trim());
+    const hasUrl = !!(scripanelStore && scripanelStore.url && String(scripanelStore.url).trim());
+    let status = "No script loaded yet. Owner: click **Update** to set a Pastefy URL or paste a script.";
+    if (hasUrl || hasScript) {
+      const parts = [];
+      if (hasUrl) parts.push("**URL:** " + String(scripanelStore.url).slice(0, 200));
+      if (hasScript) parts.push("**Script:** protected with Prince Obfuscator (`" + String(scripanelStore.script).length + "` chars)");
+      if (scripanelStore.updatedAt) parts.push("**Updated:** <t:" + Math.floor(Number(scripanelStore.updatedAt) / 1000) + ":R>");
+      status = parts.join("\n");
+    }
+    const panelRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("scripanel_how").setLabel("How").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId("scripanel_update").setLabel("Update").setStyle(ButtonStyle.Primary)
+    );
+    return {
+      flags: IS_COMPONENTS_V2,
+      embeds: [],
+      components: [{
+        type: 17,
+        accent_color: FINDER_V2_ACCENT,
+        components: [
+          { type: 10, content: ("### Script Panel\n" + status).slice(0, 3900) },
+          { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+          panelRow.toJSON()
+        ]
+      }]
+    };
+  } catch (e) {
+    console.error("buildScripanelV2:", e?.message || e);
+    return {
+      flags: IS_COMPONENTS_V2,
+      embeds: [],
+      components: [{
+        type: 17,
+        accent_color: FINDER_V2_ACCENT,
+        components: [
+          { type: 10, content: "### Script Panel\nNo script loaded yet." },
+          { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId("scripanel_how").setLabel("How").setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId("scripanel_update").setLabel("Update").setStyle(ButtonStyle.Primary)
+          ).toJSON()
+        ]
+      }]
+    };
+  }
 }
 
 function obfuscateLua(source) {
@@ -4325,7 +4355,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     const how = [
       "### How to use Script Panel",
       "**1.** Owner runs `/scripanel` in a channel to post this panel.",
-      "**2.** Click **Update** → paste a **URL** and/or **Script** (file text).",
+      "**2.** Click **Update** → paste a **Pastefy URL** (from `.upload` / `.obf`) and/or **Script** text.",
       "**3.** Every save is protected with **Prince Obfuscator** automatically.",
       "**4.** To clear stored script/URL, set **Delete** to `yes` in the modal.",
       "**5.** Only the **owner** can use **How** / **Update** on this panel."
@@ -4346,7 +4376,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       .setCustomId("scripanel_url")
       .setLabel("URL (optional)")
       .setStyle(TextInputStyle.Short)
-      .setPlaceholder("https://raw.githubusercontent.com/.../script.lua")
+      .setPlaceholder("https://pastefy.app/XXXX/raw")
       .setRequired(false)
       .setMaxLength(400);
     const fileInput = new TextInputBuilder()
@@ -4478,12 +4508,22 @@ client.on("interactionCreate", async interaction => {
           await interaction.editReply({ content: "✅ Script Panel cleared." });
           return;
         }
+        // URL must be Pastefy (from .upload / .obf only)
+        if (urlRaw && !isPastefyUrl(urlRaw)) {
+          await interaction.editReply({ content: "❌ URL must be a **Pastefy** link from `.upload` or `.obf` (pastefy.app)." });
+          return;
+        }
         let source = fileRaw;
         if (!source && urlRaw) {
           source = await fetchTextFromUrl(urlRaw);
+        } else if (source && urlRaw) {
+          // Prefer pasted file text; still save pastefy URL
+        } else if (!source && !urlRaw) {
+          await interaction.editReply({ content: "❌ put a Pastefy URL or FILE/script text (or Delete = yes)." });
+          return;
         }
         if (!source || !source.trim()) {
-          await interaction.editReply({ content: "❌ put a URL or FILE/script text (or Delete = yes)." });
+          await interaction.editReply({ content: "❌ could not read script from Pastefy URL / FILE." });
           return;
         }
         // Always Prince Obfuscator on every update
@@ -4604,14 +4644,49 @@ client.on("interactionCreate", async interaction => {
         await interaction.editReply({ content: "❌ owner only, dumbass." });
         return;
       }
-      const targetChannel = interaction.channel;
+      let targetChannel = interaction.channel;
+      try {
+        if (!targetChannel?.isTextBased?.()) {
+          targetChannel = await client.channels.fetch(interaction.channelId).catch(() => null);
+        }
+      } catch {}
       if (!targetChannel || !targetChannel.isTextBased?.()) {
         await interaction.editReply({ content: "❌ use this in a text channel." });
         return;
       }
-      const payload = buildScripanelV2();
-      await targetChannel.send(payload);
-      await interaction.editReply({ content: "✅ Script Panel posted." });
+      try {
+        const panelRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("scripanel_how").setLabel("How").setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId("scripanel_update").setLabel("Update").setStyle(ButtonStyle.Primary)
+        );
+        const hasScript = !!(scripanelStore?.script && String(scripanelStore.script).trim());
+        const hasUrl = !!(scripanelStore?.url && String(scripanelStore.url).trim());
+        let status = "No script loaded yet. Owner: click **Update** to set a Pastefy URL or paste a script.";
+        if (hasUrl || hasScript) {
+          const parts = [];
+          if (hasUrl) parts.push("**URL:** " + String(scripanelStore.url).slice(0, 200));
+          if (hasScript) parts.push("**Script:** protected with Prince Obfuscator (`" + String(scripanelStore.script).length + "` chars)");
+          if (scripanelStore.updatedAt) parts.push("**Updated:** <t:" + Math.floor(Number(scripanelStore.updatedAt) / 1000) + ":R>");
+          status = parts.join("\n");
+        }
+        await targetChannel.send({
+          flags: IS_COMPONENTS_V2,
+          embeds: [],
+          components: [{
+            type: 17,
+            accent_color: FINDER_V2_ACCENT,
+            components: [
+              { type: 10, content: ("### Script Panel\n" + status).slice(0, 3900) },
+              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+              panelRow.toJSON()
+            ]
+          }]
+        });
+        await interaction.editReply({ content: "✅ Script Panel posted." });
+      } catch (err) {
+        console.error("❌ scripanel send:", err?.message || err);
+        await interaction.editReply({ content: "❌ failed to post panel: " + String(err?.message || err).slice(0, 120) }).catch(() => {});
+      }
       return;
     }
 
@@ -4643,7 +4718,7 @@ if (interaction.commandName === "blacklist") {
   } catch (e) {
     console.error("❌ slash:", e.message);
     try {
-      const msg = { content: "❌ An error occurred.", flags: MessageFlags.Ephemeral };
+      const msg = { content: "❌ An error occurred: " + String(e?.message || e).slice(0, 150), flags: MessageFlags.Ephemeral };
       if (interaction.deferred || interaction.replied) await interaction.editReply(msg).catch(() => {});
       else await interaction.reply(msg).catch(() => {});
     } catch {}
