@@ -3854,8 +3854,27 @@ const commands = [
     .setDescription("Post Finder Source Panel — Owner Only.")
     .toJSON(),
   new SlashCommandBuilder()
-    .setName("scripanel")
-    .setDescription("Post Script Panel (How / Update) — Owner Only.")
+    .setName("update")
+    .setDescription("Update protected script (Pastefy URL / file) — Owner Only.")
+    .addAttachmentOption(opt =>
+      opt.setName("file")
+        .setDescription("Upload Lua/txt source file to protect")
+        .setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt.setName("pastefy-url")
+        .setDescription("Pastefy URL from .upload / .obf")
+        .setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt.setName("delete")
+        .setDescription("Delete stored Pastefy URL? yes / no")
+        .setRequired(false)
+        .addChoices(
+          { name: "yes", value: "yes" },
+          { name: "no", value: "no" }
+        )
+    )
     .toJSON(),
   new SlashCommandBuilder()
     .setName("blacklist")
@@ -4635,58 +4654,135 @@ client.on("interactionCreate", async interaction => {
       return;
     }
     
-    if (interaction.commandName === "scripanel") {
+    if (interaction.commandName === "update") {
       if (!isOwner(interaction.user.id)) {
         await interaction.editReply({ content: "❌ owner only, dumbass." });
         return;
       }
-      let targetChannel = interaction.channel;
+      const fileAtt = interaction.options.getAttachment("file");
+      const urlRaw = (interaction.options.getString("pastefy-url") || "").trim();
+      const delRaw = (interaction.options.getString("delete") || "").trim().toLowerCase();
+
+      const loadingPayload = {
+        flags: IS_COMPONENTS_V2,
+        embeds: [],
+        components: [{
+          type: 17,
+          accent_color: FINDER_V2_ACCENT,
+          components: [{ type: 10, content: "### Updating...\n⏳ Processing..." }]
+        }]
+      };
       try {
-        if (!targetChannel?.isTextBased?.()) {
-          targetChannel = await client.channels.fetch(interaction.channelId).catch(() => null);
-        }
-      } catch {}
-      if (!targetChannel || !targetChannel.isTextBased?.()) {
-        await interaction.editReply({ content: "❌ use this in a text channel." });
-        return;
+        await interaction.editReply(loadingPayload);
+      } catch {
+        await interaction.editReply({ content: "### Updating...\n⏳ Processing..." }).catch(() => {});
       }
+
       try {
-        const panelRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("scripanel_how").setLabel("How").setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId("scripanel_update").setLabel("Update").setStyle(ButtonStyle.Primary)
-        );
-        const hasScript = !!(scripanelStore?.script && String(scripanelStore.script).trim());
-        const hasUrl = !!(scripanelStore?.url && String(scripanelStore.url).trim());
-        let status = "No script loaded yet. Owner: click **Update** to set a Pastefy URL or paste a script.";
-        if (hasUrl || hasScript) {
-          const parts = [];
-          if (hasUrl) parts.push("**URL:** " + String(scripanelStore.url).slice(0, 200));
-          if (hasScript) parts.push("**Script:** protected with Prince Obfuscator (`" + String(scripanelStore.script).length + "` chars)");
-          if (scripanelStore.updatedAt) parts.push("**Updated:** <t:" + Math.floor(Number(scripanelStore.updatedAt) / 1000) + ":R>");
-          status = parts.join("\n");
+        // Delete URL only
+        if (delRaw === "yes" || delRaw === "y") {
+          scripanelStore.url = "";
+          scripanelStore.updatedAt = Date.now();
+          scripanelStore.updatedBy = interaction.user.id;
+          saveScripanel();
+          const urlLine = scripanelStore.url ? String(scripanelStore.url).slice(0, 200) : "*(none)*";
+          const lastLine = scripanelStore.updatedAt
+            ? "<t:" + Math.floor(Number(scripanelStore.updatedAt) / 1000) + ":F>"
+            : "*(never)*";
+          const resultBody = "**URL:** " + urlLine + "\n**Last Updated:** " + lastLine;
+          await interaction.editReply({
+            flags: IS_COMPONENTS_V2,
+            embeds: [],
+            components: [{
+              type: 17,
+              accent_color: FINDER_V2_ACCENT,
+              components: [{ type: 10, content: resultBody.slice(0, 3900) }]
+            }]
+          });
+          return;
         }
-        await targetChannel.send({
+
+        if (urlRaw && !isPastefyUrl(urlRaw)) {
+          await interaction.editReply({
+            flags: IS_COMPONENTS_V2,
+            embeds: [],
+            components: [{
+              type: 17,
+              accent_color: 0xED4245,
+              components: [{ type: 10, content: "### Input Error\nURL must be a **Pastefy** link from `.upload` or `.obf` (pastefy.app)." }]
+            }]
+          });
+          return;
+        }
+
+        let source = null;
+        if (fileAtt?.url) {
+          const res = await fetch(fileAtt.url, {
+            headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" },
+            redirect: "follow"
+          });
+          if (res.ok) source = await res.text();
+        }
+        if (!source && urlRaw) {
+          source = await fetchTextFromUrl(urlRaw);
+        }
+        if (!source || !String(source).trim()) {
+          await interaction.editReply({
+            flags: IS_COMPONENTS_V2,
+            embeds: [],
+            components: [{
+              type: 17,
+              accent_color: 0xED4245,
+              components: [{ type: 10, content: "### Input Error\nProvide **file** and/or **pastefy-url** (or delete: yes)." }]
+            }]
+          });
+          return;
+        }
+
+        const protectedScript = obfuscateLua(source);
+        if (urlRaw) scripanelStore.url = urlRaw;
+        scripanelStore.script = protectedScript;
+        scripanelStore.updatedAt = Date.now();
+        scripanelStore.updatedBy = interaction.user.id;
+        saveScripanel();
+
+        const urlLine = scripanelStore.url ? String(scripanelStore.url).slice(0, 200) : "*(none)*";
+        const lastLine = scripanelStore.updatedAt
+          ? "<t:" + Math.floor(Number(scripanelStore.updatedAt) / 1000) + ":F>"
+          : "*(never)*";
+        const resultBody = "**URL:** " + urlLine + "\n**Last Updated:** " + lastLine;
+        const outName = "obfuscated.lua";
+        const outFile = new AttachmentBuilder(Buffer.from(protectedScript, "utf8"), { name: outName });
+        await interaction.editReply({
           flags: IS_COMPONENTS_V2,
           embeds: [],
+          files: [outFile],
           components: [{
             type: 17,
             accent_color: FINDER_V2_ACCENT,
             components: [
-              { type: 10, content: ("### Script Panel\n" + status).slice(0, 3900) },
+              { type: 10, content: resultBody.slice(0, 3900) },
               { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-              panelRow.toJSON()
+              { type: 13, file: { url: "attachment://" + outName } }
             ]
           }]
         });
-        await interaction.editReply({ content: "✅ Script Panel posted." });
       } catch (err) {
-        console.error("❌ scripanel send:", err?.message || err);
-        await interaction.editReply({ content: "❌ failed to post panel: " + String(err?.message || err).slice(0, 120) }).catch(() => {});
+        console.error("❌ /update:", err?.message || err);
+        await interaction.editReply({
+          flags: IS_COMPONENTS_V2,
+          embeds: [],
+          components: [{
+            type: 17,
+            accent_color: 0xED4245,
+            components: [{ type: 10, content: "### Input Error\n" + String(err?.message || err).slice(0, 200) }]
+          }]
+        }).catch(() => {});
       }
       return;
     }
 
-if (interaction.commandName === "blacklist") {
+    if (interaction.commandName === "blacklist") {
       const mode = (interaction.options.getString("mode") || "").toLowerCase();
       const targetUser = interaction.options.getUser("user");
       if (mode === "list") {
