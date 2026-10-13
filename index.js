@@ -105,6 +105,12 @@ if (!blacklistStore || typeof blacklistStore !== "object") blacklistStore = { us
 if (!Array.isArray(blacklistStore.users)) blacklistStore.users = [];
 const saveBlacklist = () => writeJSON(BLACKLIST_FILE, blacklistStore);
 function isBlacklisted(userId) {
+
+const SCRIPANEL_FILE = path.join(DATA_DIR, "scripanel.json");
+let scripanelStore = readJSON(SCRIPANEL_FILE, { url: "", script: "", updatedAt: 0, updatedBy: null });
+if (!scripanelStore || typeof scripanelStore !== "object") scripanelStore = { url: "", script: "", updatedAt: 0, updatedBy: null };
+const saveScripanel = () => writeJSON(SCRIPANEL_FILE, scripanelStore);
+
   return blacklistStore.users.includes(String(userId));
 }
 function blacklistAdd(userId) {
@@ -1310,6 +1316,54 @@ function printReport(results) {
     const score = Math.max(1, Math.min(10, Math.round(topPct / 10)));
     if (topName === 'Custom / Unknown') return 'Detected: Custom / Unknown (score 1)';
     return `Detected: ${topName} (score ${score})`;
+}
+
+
+/** Fetch remote text (script URL) */
+async function fetchTextFromUrl(url) {
+  const u = String(url || "").trim();
+  if (!/^https?:\/\//i.test(u)) return null;
+  const res = await fetch(u, {
+    headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/plain,*/*" },
+    redirect: "follow"
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const text = await res.text();
+  if (!text || !text.trim()) throw new Error("empty response");
+  return text;
+}
+
+/** Resolve script source for .clean / .detect — file, reply, URL arg, or code block */
+async function resolveScriptInput(msg, txt) {
+  // 1) Attachment / reply / forward
+  let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
+  if (attachments.length) {
+    const file = attachments[0];
+    const tryUrls = [file.url, file.proxyURL, file.proxy_url].filter(Boolean);
+    for (const u of [...new Set(tryUrls)]) {
+      try {
+        const dlRes = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" }, redirect: "follow" });
+        if (dlRes.ok) {
+          const body = await dlRes.text();
+          if (body && body.trim().length >= 5) {
+            return { content: body, name: file.name || file.filename || "script.lua", from: "file" };
+          }
+        }
+      } catch {}
+    }
+  }
+  // 2) URL in command args
+  const urlMatch = String(txt || "").match(/https?:\/\/[^\s<>]+/i);
+  if (urlMatch) {
+    const content = await fetchTextFromUrl(urlMatch[0].replace(/[)>,.]+$/, ""));
+    if (content) return { content, name: "from_url.lua", from: "url" };
+  }
+  // 3) Code block in message
+  const block = String(msg.content || "").match(/```(?:lua|luau|txt)?\s*([\s\S]*?)```/i);
+  if (block && block[1] && block[1].trim().length >= 5) {
+    return { content: block[1].trim(), name: "codeblock.lua", from: "codeblock" };
+  }
+  return null;
 }
 
 async function getScriptAttachmentsFromMsgOrReply(msg) {
@@ -3650,6 +3704,36 @@ function goofyscator(source, settings) {
 // ============================================================
 // LUA OBFUSCATOR (Prince Obfuscator — Roblox/Luau executable protection)
 // ============================================================
+
+function buildScripanelV2() {
+  const hasScript = !!(scripanelStore.script && String(scripanelStore.script).trim());
+  const hasUrl = !!(scripanelStore.url && String(scripanelStore.url).trim());
+  let status = "No script loaded yet. Owner: click **Update** to set a URL or paste a script.";
+  if (hasUrl || hasScript) {
+    const parts = [];
+    if (hasUrl) parts.push("**URL:** " + String(scripanelStore.url).slice(0, 200));
+    if (hasScript) parts.push("**Script:** protected with Prince Obfuscator (" + String(scripanelStore.script).length + " chars)");
+    if (scripanelStore.updatedAt) parts.push("**Updated:** <t:" + Math.floor(scripanelStore.updatedAt / 1000) + ":R>");
+    status = parts.join("\n");
+  }
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("scripanel_how").setLabel("How").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("scripanel_update").setLabel("Update").setStyle(ButtonStyle.Primary)
+  );
+  return {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: RENAME_V2_ACCENT,
+      components: [
+        { type: 10, content: ("### Script Panel\n" + status).slice(0, 4000) },
+        { type: 14, spacing: SEPARATOR_SPACING_SMALL },
+        row.toJSON()
+      ]
+    }]
+  };
+}
+
 function obfuscateLua(source) {
   if (!source || typeof source !== "string") return source;
   // Keep original logic intact — NO variable renaming (breaks Roblox execution)
@@ -3739,6 +3823,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName("finderpanel")
     .setDescription("Post Finder Source Panel — Owner Only.")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("scripanel")
+    .setDescription("Post Script Panel (How / Update) — Owner Only.")
     .toJSON(),
   new SlashCommandBuilder()
     .setName("blacklist")
@@ -4229,10 +4317,67 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     return interaction.showModal(modal).catch(() => {});
   }
 
+  // ─── SCRIPANEL BUTTONS (owner only) ───
+  if (interaction.customId === "scripanel_how") {
+    if (!isOwner(interaction.user.id)) {
+      return interaction.reply({ content: "❌ owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const how = [
+      "### How to use Script Panel",
+      "**1.** Owner runs `/scripanel` in a channel to post this panel.",
+      "**2.** Click **Update** → paste a **URL** and/or **Script** (file text).",
+      "**3.** Every save is protected with **Prince Obfuscator** automatically.",
+      "**4.** To clear stored script/URL, set **Delete** to `yes` in the modal.",
+      "**5.** Only the **owner** can use **How** / **Update** on this panel."
+    ].join("\\n");
+    return interaction.reply({
+      flags: IS_COMPONENTS_V2 | ((MessageFlags && MessageFlags.Ephemeral != null) ? MessageFlags.Ephemeral : 64),
+      components: [{ type: 17, accent_color: RENAME_V2_ACCENT, components: [{ type: 10, content: how }] }]
+    }).catch(() => {});
+  }
+  if (interaction.customId === "scripanel_update") {
+    if (!isOwner(interaction.user.id)) {
+      return interaction.reply({ content: "❌ owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const modal = new ModalBuilder()
+      .setCustomId("scripanel_update_modal")
+      .setTitle("Update Script Panel");
+    const urlInput = new TextInputBuilder()
+      .setCustomId("scripanel_url")
+      .setLabel("URL (optional)")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("https://raw.githubusercontent.com/.../script.lua")
+      .setRequired(false)
+      .setMaxLength(400);
+    const fileInput = new TextInputBuilder()
+      .setCustomId("scripanel_file")
+      .setLabel("FILE / Script text (optional)")
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder("Paste script source here...")
+      .setRequired(false)
+      .setMaxLength(4000);
+    const delInput = new TextInputBuilder()
+      .setCustomId("scripanel_delete")
+      .setLabel("Delete Section (type yes to clear)")
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder("yes / no")
+      .setRequired(false)
+      .setMaxLength(10);
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(urlInput),
+      new ActionRowBuilder().addComponents(fileInput),
+      new ActionRowBuilder().addComponents(delInput)
+    );
+    return interaction.showModal(modal).catch(() => {});
+  }
+
+
+
   return;
 });
 
 // ============================================================
+
 // MODAL SUBMIT — finder panel
 // ============================================================
 client.on("interactionCreate", async interaction => {
@@ -4310,6 +4455,59 @@ client.on("interactionCreate", async interaction => {
       await interaction.editReply({ content: "**Here you go!**", files });
       return;
     }
+
+    if (interaction.customId === "scripanel_update_modal") {
+      if (!isOwner(interaction.user.id)) {
+        await interaction.reply({ content: "❌ owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        return;
+      }
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      try {
+        const delRaw = (interaction.fields.getTextInputValue("scripanel_delete") || "").trim().toLowerCase();
+        const urlRaw = (interaction.fields.getTextInputValue("scripanel_url") || "").trim();
+        const fileRaw = (interaction.fields.getTextInputValue("scripanel_file") || "").trim();
+        if (delRaw === "yes" || delRaw === "y" || delRaw === "delete") {
+          scripanelStore.url = "";
+          scripanelStore.script = "";
+          scripanelStore.updatedAt = Date.now();
+          scripanelStore.updatedBy = interaction.user.id;
+          saveScripanel();
+          try {
+            if (interaction.message) await interaction.message.edit(buildScripanelV2());
+          } catch {}
+          await interaction.editReply({ content: "✅ Script Panel cleared." });
+          return;
+        }
+        let source = fileRaw;
+        if (!source && urlRaw) {
+          source = await fetchTextFromUrl(urlRaw);
+        }
+        if (!source || !source.trim()) {
+          await interaction.editReply({ content: "❌ put a URL or FILE/script text (or Delete = yes)." });
+          return;
+        }
+        // Always Prince Obfuscator on every update
+        const protectedScript = obfuscateLua(source);
+        if (urlRaw) scripanelStore.url = urlRaw;
+        scripanelStore.script = protectedScript;
+        scripanelStore.updatedAt = Date.now();
+        scripanelStore.updatedBy = interaction.user.id;
+        saveScripanel();
+        try {
+          if (interaction.message) await interaction.message.edit(buildScripanelV2());
+        } catch {}
+        // Also send obfuscated file ephemerally so owner can download
+        const att = new AttachmentBuilder(Buffer.from(protectedScript, "utf8"), { name: "scripanel_protected.lua" });
+        await interaction.editReply({
+          content: "✅ Updated & protected with **Prince Obfuscator**." + (urlRaw ? "\nURL saved: " + urlRaw.slice(0, 150) : ""),
+          files: [att]
+        });
+      } catch (e) {
+        await interaction.editReply({ content: "❌ update failed: " + String(e.message || e).slice(0, 120) });
+      }
+      return;
+    }
+
   } catch (e) {
     console.error("❌ modal:", e.message);
     try {
@@ -4400,7 +4598,24 @@ client.on("interactionCreate", async interaction => {
       await interaction.editReply({ content: "✅ Finder Source Panel posted." });
       return;
     }
-    if (interaction.commandName === "blacklist") {
+    
+    if (interaction.commandName === "scripanel") {
+      if (!isOwner(interaction.user.id)) {
+        await interaction.editReply({ content: "❌ owner only, dumbass." });
+        return;
+      }
+      const targetChannel = interaction.channel;
+      if (!targetChannel || !targetChannel.isTextBased?.()) {
+        await interaction.editReply({ content: "❌ use this in a text channel." });
+        return;
+      }
+      const payload = buildScripanelV2();
+      await targetChannel.send(payload);
+      await interaction.editReply({ content: "✅ Script Panel posted." });
+      return;
+    }
+
+if (interaction.commandName === "blacklist") {
       const mode = (interaction.options.getString("mode") || "").toLowerCase();
       const targetUser = interaction.options.getUser("user");
       if (mode === "list") {
@@ -5644,38 +5859,23 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
-    let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
-    if (!attachments.length) {
+    let resolved = null;
+    try {
+      resolved = await resolveScriptInput(msg, txt);
+    } catch (e) {
+      await sendRenameInputError(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`);
+      return;
+    }
+    if (!resolved || !resolved.content) {
       await sendRenameInputError(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.");
       return;
     }
-    const file = attachments[0];
-    // Download file content — url + proxy (Components V2 reply support, same as .upload/.obf)
-    let fileContent = null;
-    const tryUrls = [file.url, file.proxyURL, file.proxy_url].filter(Boolean);
-    for (const u of [...new Set(tryUrls)]) {
-      try {
-        const dlRes = await fetch(u, {
-          headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" },
-          redirect: "follow"
-        });
-        if (dlRes.ok) {
-          fileContent = await dlRes.text();
-          if (fileContent && fileContent.trim().length >= 5) break;
-        }
-      } catch {}
-    }
+    let fileContent = resolved.content;
     if (!fileContent || fileContent.trim().length < 5) {
       await sendRenameInputError(msg, "Couldn't read that file (link expired or invalid). Re-upload it and try again.");
       return;
     }
     // .clean works on protected/obfuscated sources — only strips comments/loaders/IP loggers
-    const fileExt = ext(file.name || file.filename || "");
-    // Allow missing extension when content is valid (reply / V2 / forward)
-    if (fileExt && fileExt !== "lua" && fileExt !== "txt" && fileExt !== "luau") {
-      await sendRenameInputError(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.");
-      return;
-    }
 
     // Process immediately — Components V2 loading
     const loadingMsg = await sendRenameLoading(msg).catch(() => null);
@@ -5729,12 +5929,17 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
-    let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
-    if (!attachments.length) {
+    let resolved = null;
+    try {
+      resolved = await resolveScriptInput(msg, txt);
+    } catch (e) {
+      await sendInputErrorV2(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
+      return;
+    }
+    if (!resolved?.content) {
       await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.").catch(() => {});
       return;
     }
-    const file = attachments[0];
     const loadingPayload = {
       flags: IS_COMPONENTS_V2,
       components: [{
@@ -5745,17 +5950,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     };
     const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
     try {
-      let code = null;
-      for (const u of [...new Set([file.url, file.proxyURL, file.proxy_url].filter(Boolean))]) {
-        try {
-          const res = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
-          if (res.ok) {
-            code = await res.text();
-            if (code && code.trim()) break;
-          }
-        } catch {}
-      }
+      let code = resolved.content;
       if (!code || !code.trim()) throw new Error("could not read file");
+
       const results = detectObfuscatorType(code);
       const [topName, topPct] = results?.[0] || ["Custom / Unknown", 0];
       const pct = (typeof topPct === "number" ? topPct : 0).toFixed(2);
