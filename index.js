@@ -917,7 +917,8 @@ const SIGNATURES = {
         [12, /local\s+e\s*=\s*0x01\s+local\s+function\s+k/],
     ],
     "Luraph 14": [
-        [50, /--\s*This file was protected using Luraph Obfuscator v14/],
+        [55, /--\s*This file was protected using Luraph Obfuscator v14(?:\.\d+)*/i],
+        [50, /Luraph Obfuscator v14(?:\.\d+)*/i],
         [35, /return\s*\(\s*\{[A-Z]{1,3}=bit32\.\w+/],
         [30, /0[Xx][0-9a-fA-F]+_+[0-9a-fA-F]*/],
         [25, /0[Bb][01_]{3,}/],
@@ -929,7 +930,8 @@ const SIGNATURES = {
         [20, /"[A-Za-z0-9$#@!%^&*()\[\]{}|<>?_=+\-.,;:'"\\/]{200,}"/],
     ],
     "Luraph 10": [
-        [60, /--\s*This file was generated using Luraph Obfuscator v10/],
+        [60, /--\s*This file was generated using Luraph Obfuscator v10(?:\.\d+)*/i],
+        [55, /Luraph Obfuscator v10(?:\.\d+)*/i],
         [55, /"LPH\|[0-9A-Fa-f]{20,}"/],
         [40, /string\.char\s*\(\s*\w+\s*,\s*0\s*\)/],
         [35, /:gsub\s*\(\s*"\.\."/],
@@ -1055,6 +1057,143 @@ const SIGNATURES = {
         [20, /string\.byte\s*,\s*tonumber\s*,\s*math\.ldexp\s*,\s*\.\.\.\s*\)\s*\(\.\.\.\s*\)\s*;/],
     ],
 
+
+    Luarmor: [
+        [70, /luarmor\.net/i],
+        [65, /luarmor\.gg/i],
+        [60, /_G\s*\[\s*["']LPH_NO_VIRTUALIZE["']\s*\]/i],
+        [55, /LPH_NO_VIRTUALIZE|LPH_JIT|LPH_ENCFUNC|LPH_ENCSTR/i],
+        [50, /\bLuarmor\b/i],
+        [45, /script_key\s*=\s*script_key\s*or\s*getgenv/i],
+        [40, /getfenv\(\)\.script_key|getgenv\(\)\.script_key/i],
+        [35, /loadstring\s*\(\s*game\s*:\s*HttpGet\s*\(\s*["']https?:\/\/[^"']*luarmor/i],
+        [30, /api\.luarmor\.net|cdn\.luarmor/i],
+        [25, /LRM_[A-Z0-9_]{6,}/],
+    ],
+    WeAreDevs: [
+        [70, /wearedevs\.net\/obfuscator/i],
+        [55, /\[\[\s*v\d+\.\d+\.\d+\s+https?:\/\//],
+        [45, /local\s+o\s*=\s*\{\s*"(?:\\[0-9]{2,3}){6,}"/],
+        [35, /WeAreDevs|wearedevs/i],
+        [30, /return\s*\(\s*function\s*\(\s*\.\.\.\s*\)\s*local\s+\w\s*=\s*\{\s*"(?:\\[0-9]{2,3}){8,}"/],
+    ],
+    PolSec: [
+        [60, /\bPolSec\b|polsec/i],
+        [50, /Protected\s+by\s+PolSec/i],
+        [40, /polsec\.(gg|net|xyz)/i],
+        [30, /PS_[A-Z0-9_]{8,}/],
+    ],
+    "PSU Obfuscator": [
+        [65, /PSU\s*Obfuscator|PSU\s*Protector/i],
+        [55, /--\s*\[\[.*PSU/i],
+        [45, /"LPS\?[0-9A-Z]{20,}"/],
+        [40, /PSU_[A-Za-z0-9_]{6,}/],
+        [30, /getfenv\(\)\.PSU|getgenv\(\)\.PSU/i],
+    ],
+    "Synapse Xen": [
+        [55, /Synapse\s*Xen|synxen/i],
+        [45, /--\s*Protected\s+by\s+Synapse/i],
+        [35, /syn\s*\.\s*crypt|syn\s*\.\s*protect/i],
+        [30, /getgenv\(\)\.syn|getrenv\(\)\.syn/i],
+    ],
+    Hysteria: [
+        [55, /\bHysteria\b|hysteria\s*obf/i],
+        [45, /Protected\s+by\s+Hysteria/i],
+        [35, /HYSTERIA_[A-Z0-9_]+/i],
+    ],
+    AztupBrew: [
+        [55, /AztupBrew|Aztup\s*Brew/i],
+        [45, /--\s*AztupBrew/i],
+        [35, /AZTUP_[A-Z0-9_]+/i],
+    ],
+    DarkEccentric: [
+        [55, /DarkEccentric|darkeccentric/i],
+        [45, /DE_[A-Z][a-zA-Z0-9_]{5,}/],
+        [35, /Protected\s+by\s+DarkEccentric/i],
+    ],
+    Axon: [
+        [50, /\bAxon\b|axon\.exe|axon\s*obfuscator/i],
+        [40, /AXON_[A-Z0-9_]+/],
+        [30, /--\s*Axon/i],
+    ],
+    "Luraph": [
+        [50, /Luraph\s*Obfuscator/i],
+        [45, /--\s*This file was protected using Luraph/i],
+        [40, /--\s*This file was generated using Luraph/i],
+        [35, /"LPH\|[0-9A-Fa-f]{16,}"/],
+        [30, /\bLPH_[A-Z0-9_]+\b/],
+        [25, /luraph\.com|lura\.ph/i],
+    ],
+    "MoonSec": [
+        [45, /MoonSec|moonsec/i],
+        [40, /Protected_by_MoonSec/i],
+        [35, /This file was protected with MoonSec/i],
+        [25, /_msec\s*=/],
+    ],
+    "Bytecode": [
+        [40, /string\.dump\s*\(/],
+        [35, /loadstring\s*\(\s*["']\\x[0-9a-fA-F]{2}/],
+        [30, /(?:\\x[0-9a-fA-F]{2}){20,}/],
+        [25, /load\s*\(\s*["'][\x00-\x1f]/],
+    ],
+    "VM-Obfuscated": [
+        [30, /while\s+true\s+do\s+local\s+\w+\s*=\s*\w+\[\w+\]/],
+        [25, /local\s+\w+\s*=\s*\{\s*\[0\]\s*=\s*function/],
+        [20, /getfenv\s*\(\s*0\s*\)|getfenv\s*\(\s*1\s*\)/],
+        [20, /setfenv\s*\(/],
+        [15, /debug\.getinfo|debug\.traceback/],
+        [15, /newproxy\s*\(\s*true\s*\)/],
+    ],
+    "SimpleObfuscator": [
+        [40, /luaobfuscator\.com|obfuscator\.io\/lua/i],
+        [35, /Simple\s*Obfuscator|Online\s*Lua\s*Obfuscator/i],
+        [30, /--\s*Obfuscated\s+with\s+/i],
+        [25, /local\s+\w+\s*=\s*string\.char\s*\(\s*\d+\s*(?:,\s*\d+){8,}\s*\)/],
+    ],
+    "Xeon": [
+        [50, /\bXeon\b.*[Oo]bfuscator|XeonObfuscator/i],
+        [40, /--\s*Protected\s+by\s+Xeon/i],
+        [30, /XEON_[A-Z0-9_]+/],
+    ],
+    "Script-Ware": [
+        [45, /Script[\s-]?Ware|scriptware/i],
+        [35, /secure_load|sw_crypt/i],
+        [30, /getgenv\(\)\.SW|getgenv\(\)\.ScriptWare/i],
+    ],
+    "Fluxus": [
+        [40, /\bFluxus\b.*protect|fluxus\s*obf/i],
+        [30, /fluxus\.(me|net)/i],
+        [25, /getgenv\(\)\.Fluxus/i],
+    ],
+    "KRNL": [
+        [35, /\bKRNL\b.*protect|krnl\s*obf/i],
+        [25, /getgenv\(\)\.KRNL|getgenv\(\)\.krnl/i],
+    ],
+    "Celery": [
+        [40, /\bCelery\b.*[Oo]bfuscator|celery\s*protect/i],
+        [30, /CELERY_[A-Z0-9_]+/],
+    ],
+    "Panda": [
+        [40, /Panda\s*Obfuscator|pandadevkit/i],
+        [30, /PANDA_[A-Z0-9_]+/],
+    ],
+    "Nihon": [
+        [40, /\bNihon\b.*[Oo]bfuscator|nihon\s*protect/i],
+        [30, /NIHON_[A-Z0-9_]+/],
+    ],
+    "Horion": [
+        [40, /\bHorion\b.*[Oo]bfuscator/i],
+        [30, /HORION_[A-Z0-9_]+/],
+    ],
+    "SkidFuscator": [
+        [45, /SkidFuscator|skidfuscator/i],
+        [35, /--\s*SkidFuscator/i],
+    ],
+    "Remotely": [
+        [40, /Remotely\s*Obfuscator|remotely\.dev/i],
+        [30, /REMOTELY_[A-Z0-9_]+/],
+    ],
+
     "Prince Obfuscator": [
         [80, /--\s*This file was protected using Prince Obfuscator/i],
         [50, /This file was protected using Prince Obfuscator/i],
@@ -1080,25 +1219,30 @@ const SIGNATURES = {
 const _DEFINITELY_OBF = [
     /This file was protected using Prince Obfuscator/i,
     /--\s*This file was protected using Prince Obfuscator/i,
-    /`[A-Za-z0-9+/]{10,}={0,2}`/,
-    /error\s*\(\s*`Tamper Detected/,
-    /lliilI1i/,
-    /Protected_by_MoonSecV2/,
-    /Protected By Hercules/,
-    /This file was protected using Lunr/,
-    /This file was protected using Luraph/,
-    /This file was generated using Luraph Obfuscator/,
-    /This script was generated using the MoonVeil/,
+    /luarmor\.net|luarmor\.gg|LPH_NO_VIRTUALIZE/i,
+    /wearedevs\.net\/obfuscator/i,
+    /Protected_by_MoonSec|This file was protected with MoonSec/i,
+    /This file was protected using Luraph|This file was generated using Luraph/i,
+    /"LPH\|[0-9A-Fa-f]{20,}"/,
+    /"LPS\?[0-9A-Z]{20,}"/,
+    /PolSec|polsec\.(gg|net)/i,
+    /PSU\s*Obfuscator|PSU\s*Protector/i,
+    /Protected By Hercules/i,
+    /This file was protected using Lunr/i,
+    /This script was generated using the MoonVeil/i,
     /\[\[77fuscator/,
     /--ironbrew3:tm/,
     /return\s+v15\s*\(\s*"LOL!/,
     /[\u3480-\u34c0]{5,}/,
     /\b[lI1i]{5,}\b/,
     /All warfare is based on deception.*Sun Tzu/,
-    /"LPS\?[0-9A-Z]{30,}"/,
     /0_[bBxX][0-9a-fA-F_]{6,}/,
-    /wearedevs\.net\/obfuscator/,
+    /`[A-Za-z0-9+/]{10,}={0,2}`/,
+    /error\s*\(\s*`Tamper Detected/,
+    /lliilI1i/,
     /return\s*\(\s*function\s*\(\s*\.\.\.\s*\)\s*local\s+\w\s*=\s*\{\s*"(?:\\[0-9]{2,3}){6,}"/,
+    /script_key\s*=\s*script_key\s*or\s*getgenv/i,
+    /api\.luarmor\.net/i,
 ];
 
 const _WEAREDEVS_SIGNALS = [
@@ -1238,6 +1382,59 @@ function statBonus(obfName, stats, isWad = false) {
             if (isWad) bonus -= 60;
             if (dqNesc > 10) bonus -= 30;
             break;
+        case 'Luarmor':
+            if (ent > 4.5) bonus += 8;
+            if (avgLine > 150) bonus += 5;
+            break;
+        case 'WeAreDevs':
+            if (nesc > 10) bonus += 15;
+            if (dqNesc > 20) bonus += 25;
+            if (ent > 4.0 && ent < 5.5) bonus += 8;
+            if (avgLine > 200) bonus += 10;
+            break;
+        case 'PolSec':
+            if (ent > 5.0) bonus += 6;
+            break;
+        case 'PSU Obfuscator':
+            if (avgLine > 200) bonus += 8;
+            if (ent > 5.0) bonus += 5;
+            break;
+        case 'Synapse Xen':
+        case 'Hysteria':
+        case 'AztupBrew':
+        case 'DarkEccentric':
+        case 'Axon':
+        case 'Xeon':
+        case 'Script-Ware':
+        case 'Fluxus':
+        case 'KRNL':
+        case 'Celery':
+        case 'Panda':
+        case 'Nihon':
+        case 'Horion':
+        case 'SkidFuscator':
+        case 'Remotely':
+            if (ent > 4.8) bonus += 5;
+            if (avgLine > 180) bonus += 4;
+            break;
+        case 'Luraph':
+            if (longLine > 0.1) bonus += 6;
+            if (ent > 4.5) bonus += 5;
+            break;
+        case 'MoonSec':
+            if (unicodeCnt > 3) bonus += 10;
+            if (avgLine > 250) bonus += 5;
+            break;
+        case 'Bytecode':
+            if (ent > 5.5) bonus += 10;
+            break;
+        case 'VM-Obfuscated':
+            if (ent > 5.0) bonus += 6;
+            if (avgLine > 200) bonus += 4;
+            break;
+        case 'SimpleObfuscator':
+            if (nesc > 8) bonus += 8;
+            break;
         case 'Prince Obfuscator':
             if (ent > 4.5) bonus += 5;
             break;
@@ -1260,6 +1457,23 @@ function isDefinitelyObfuscated(code) {
         if (pat.test(code)) return true;
     }
     return false;
+}
+
+
+/** Extract Luraph version string e.g. Luraph V14.9 from source headers */
+function formatLuraphName(code, fallback) {
+    const s = String(code || "");
+    let m = s.match(/Luraph\s+Obfuscator\s+v?(\d+(?:\.\d+){0,3})/i);
+    if (!m) m = s.match(/protected\s+using\s+Luraph(?:\s+Obfuscator)?\s+v?(\d+(?:\.\d+){0,3})/i);
+    if (!m) m = s.match(/generated\s+using\s+Luraph(?:\s+Obfuscator)?\s+v?(\d+(?:\.\d+){0,3})/i);
+    if (!m) m = s.match(/Luraph\s+v(?:ersion\s*)?(\d+(?:\.\d+){0,3})/i);
+    if (!m) m = s.match(/\bLPH[_\s-]*v?(\d+(?:\.\d+){0,2})\b/i);
+    if (m) return "Luraph V" + m[1];
+    // fallback from signature bucket name
+    if (/14/.test(fallback)) return "Luraph V14";
+    if (/10/.test(fallback)) return "Luraph V10";
+    if (/Luraph/i.test(fallback)) return "Luraph";
+    return fallback;
 }
 
 function detectObfuscatorType(code) {
@@ -1304,7 +1518,9 @@ function detectObfuscatorType(code) {
             confidence = relative * 45 * (1 - suppress);
         }
         confidence = Math.round(Math.max(0, Math.min(99.9, confidence)) * 10) / 10;
-        results.push([name, confidence]);
+        let displayName = name;
+        if (/Luraph/i.test(name)) displayName = formatLuraphName(code, name);
+        results.push([displayName, confidence]);
     }
     return results.sort((a, b) => b[1] - a[1]);
 }
@@ -3765,54 +3981,137 @@ function buildScripanelV2() {
 
 function obfuscateLua(source) {
   if (!source || typeof source !== "string") return source;
-  // Keep original logic intact — NO variable renaming (breaks Roblox execution)
   let code = String(source).replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!code.trim()) return source;
 
-  const keyBytes = crypto.randomBytes(8);
+  // Multi-layer Prince protection (Roblox / Luau executable)
+  // 1) rolling XOR  2) byte-pair swap  3) custom alphabet  4) permuted chunks
+  const key = crypto.randomBytes(16);
   const plain = Buffer.from(code, "utf8");
   const xored = Buffer.alloc(plain.length);
-  for (let i = 0; i < plain.length; i++) xored[i] = plain[i] ^ keyBytes[i % keyBytes.length];
-  const b64 = xored.toString("base64");
-  const keyLua = Array.from(keyBytes).join(",");
+  for (let i = 0; i < plain.length; i++) {
+    xored[i] = plain[i] ^ key[i % key.length] ^ ((i * 31 + 17) & 0xff);
+  }
+  for (let i = 0; i + 1 < xored.length; i += 2) {
+    const tmp = xored[i];
+    xored[i] = xored[i + 1];
+    xored[i + 1] = tmp;
+  }
 
-  const CHUNK = 200;
-  const parts = [];
-  for (let i = 0; i < b64.length; i += CHUNK) parts.push(b64.slice(i, i + CHUNK));
-  const b64Lua = parts.map(s => '"' + s + '"').join("..");
+  const std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const alphabetArr = std.split("");
+  for (let i = alphabetArr.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    const tmp = alphabetArr[i];
+    alphabetArr[i] = alphabetArr[j];
+    alphabetArr[j] = tmp;
+  }
+  const alphabet = alphabetArr.join("");
 
-  const lines = [
-    "-- This file was protected using Prince Obfuscator",
-    "local _k={" + keyLua + "}",
-    "local _b=" + b64Lua,
-    'local _t="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"',
-    "local function _dec(s)",
-    '  s=string.gsub(s,"[^".._t.."=]","")',
-    "  local out={}",
-    "  for i=1,#s,4 do",
-    "    local a=(string.find(_t,string.sub(s,i,i))or 1)-1",
-    "    local b=(string.find(_t,string.sub(s,i+1,i+1))or 1)-1",
-    "    local c=(string.find(_t,string.sub(s,i+2,i+2))or 1)-1",
-    "    local d=(string.find(_t,string.sub(s,i+3,i+3))or 1)-1",
-    "    out[#out+1]=string.char(bit32.band(bit32.lshift(a,2)+bit32.rshift(b,4),255))",
-    '    if string.sub(s,i+2,i+2)~="=" then out[#out+1]=string.char(bit32.band(bit32.lshift(bit32.band(b,15),4)+bit32.rshift(c,2),255)) end',
-    '    if string.sub(s,i+3,i+3)~="=" then out[#out+1]=string.char(bit32.band(bit32.lshift(bit32.band(c,3),6)+d,255)) end',
-    "  end",
-    "  return table.concat(out)",
-    "end",
-    "local _x=_dec(_b)",
-    "local _o={}",
-    "for i=1,#_x do",
-    "  _o[i]=string.char(bit32.bxor(string.byte(_x,i),_k[((i-1)%#_k)+1]))",
-    "end",
-    "local _src=table.concat(_o)",
-    "local _fn=(loadstring or load)(_src)",
-    'if not _fn then error("Prince Obfuscator: load failed",0) end',
-    "return _fn()",
-    ""
-  ];
-  return lines.join("\n");
+  function encodeCustom(buf, alpha) {
+    let out = "";
+    for (let i = 0; i < buf.length; i += 3) {
+      const a = buf[i];
+      const b = i + 1 < buf.length ? buf[i + 1] : 0;
+      const c = i + 2 < buf.length ? buf[i + 2] : 0;
+      const n = (a << 16) | (b << 8) | c;
+      out += alpha[(n >> 18) & 63];
+      out += alpha[(n >> 12) & 63];
+      out += (i + 1 < buf.length) ? alpha[(n >> 6) & 63] : "=";
+      out += (i + 2 < buf.length) ? alpha[n & 63] : "=";
+    }
+    return out;
+  }
+  const encoded = encodeCustom(xored, alphabet);
+
+  const CHUNK = 97;
+  const chunks = [];
+  for (let i = 0; i < encoded.length; i += CHUNK) chunks.push(encoded.slice(i, i + CHUNK));
+  const order = chunks.map((_, idx) => idx);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    const tmp = order[i];
+    order[i] = order[j];
+    order[j] = tmp;
+  }
+  const permChunks = order.map((oi) => chunks[oi]);
+  const inv = new Array(order.length);
+  for (let i = 0; i < order.length; i++) inv[order[i]] = i;
+
+  const keyExpr = Array.from(key).map((b) => {
+    const a = crypto.randomInt(1, 40);
+    const x = crypto.randomInt(1, 12);
+    const adj = a * x - b;
+    return "(" + a + "*" + x + "-" + adj + ")";
+  }).join(",");
+
+  const rnd = () => {
+    const letters = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ";
+    const chars = letters + "IlO017";
+    let s = letters[crypto.randomInt(0, letters.length)];
+    for (let i = 0; i < 7; i++) s += chars[crypto.randomInt(0, chars.length)];
+    return s;
+  };
+  const N = { a: rnd(), k: rnd(), p: rnd(), q: rnd(), d: rnd(), v: rnd(), w: rnd(), b: rnd(), x: rnd(), o: rnd(), r: rnd(), f: rnd(), s: rnd(), t: rnd(), z: rnd(), u: rnd() };
+
+  const invLua = inv.join(",");
+  const chunksLua = permChunks.map((s) => '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"').join(",");
+  const alphaEsc = alphabet.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
+  const L = [];
+  L.push("-- This file was protected using Prince Obfuscator");
+  L.push("local " + N.a + '="' + alphaEsc + '"');
+  L.push("local " + N.k + "={" + keyExpr + "}");
+  L.push("local " + N.p + "={" + chunksLua + "}");
+  L.push("local " + N.q + "={" + invLua + "}");
+  L.push("local function " + N.d + "(s)");
+  L.push("  local map={}");
+  L.push("  for i=1,#" + N.a + " do map[string.sub(" + N.a + ",i,i)]=i-1 end");
+  L.push('  s=string.gsub(s,"[^"..' + N.a + '.."=]","")');
+  L.push("  local out={} local u=1");
+  L.push("  for i=1,#s,4 do");
+  L.push("    local b1=map[string.sub(s,i,i)]or 0");
+  L.push("    local b2=map[string.sub(s,i+1,i+1)]or 0");
+  L.push("    local b3=map[string.sub(s,i+2,i+2)]or 0");
+  L.push("    local b4=map[string.sub(s,i+3,i+3)]or 0");
+  L.push("    local n=bit32.bor(bit32.lshift(b1,18),bit32.lshift(b2,12),bit32.lshift(b3,6),b4)");
+  L.push("    out[u]=string.char(bit32.band(bit32.rshift(n,16),255)) u=u+1");
+  L.push('    if string.sub(s,i+2,i+2)~="=" then out[u]=string.char(bit32.band(bit32.rshift(n,8),255)) u=u+1 end');
+  L.push('    if string.sub(s,i+3,i+3)~="=" then out[u]=string.char(bit32.band(n,255)) u=u+1 end');
+  L.push("  end");
+  L.push("  return table.concat(out)");
+  L.push("end");
+  // decoy
+  L.push("local function " + N.w + "() local z=0 for _=1,2 do z=bit32.bxor(z,#" + N.a + ") end return z<0 end");
+  L.push("local function " + N.v + "()");
+  L.push("  if " + N.w + "() then return \"\" end");
+  L.push("  local o={}");
+  L.push("  for i=1,#" + N.q + " do o[i]=" + N.p + "[" + N.q + "[i]+1] end");
+  L.push("  return table.concat(o)");
+  L.push("end");
+  L.push("local " + N.b + "=" + N.v + "()");
+  L.push("local " + N.x + "=" + N.d + "(" + N.b + ")");
+  // undo pair swap
+  L.push("local " + N.o + "={} local len=#" + N.x);
+  L.push("for i=1,len,2 do");
+  L.push("  if i+1<=len then " + N.o + "[i]=string.sub(" + N.x + ",i+1,i+1) " + N.o + "[i+1]=string.sub(" + N.x + ",i,i) else " + N.o + "[i]=string.sub(" + N.x + ",i,i) end");
+  L.push("end");
+  L.push("local " + N.r + "=table.concat(" + N.o + ")");
+  L.push("local " + N.f + "={}");
+  L.push("for i=1,#" + N.r + " do");
+  L.push("  local c=string.byte(" + N.r + ",i)");
+  L.push("  local kb=" + N.k + "[((i-1)%#" + N.k + ")+1]");
+  L.push("  " + N.f + "[i]=string.char(bit32.bxor(c,bit32.band(kb,255),bit32.band(i*31+17,255)))");
+  L.push("end");
+  L.push("local " + N.s + "=table.concat(" + N.f + ")");
+  L.push("local " + N.t + "=(loadstring or load)(" + N.s + ")");
+  L.push('if not ' + N.t + ' then error("Prince Obfuscator: load failed",0) end');
+  L.push("return " + N.t + "()");
+  L.push("");
+  return L.join("\n");
 }
+
+
 
 
 
@@ -3979,7 +4278,6 @@ const helpPages = [
     .setDescription(
 `**\`.et\`** Extract files from zip archives.
 
-**\`.upload\`** Turn your file into Script Loader.
 
 **\`.get\`** Get file using ID.`
     ),
@@ -4026,7 +4324,6 @@ const helpPageBodies = [
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.` },
   { color: 0x5865F2, text: `**\`.et\`** Extract files from zip archives.
 
-**\`.upload\`** Turn your file into Script Loader.
 
 **\`.get\`** Get file using ID.` },
   { color: 0x5865F2, text: `**\`.find\`** Search files by name.
@@ -5749,103 +6046,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // ─────────────────────────────────────────────
-  // ─────────────────────────────────────────────
-  // ─────────────────────────────────────────────
-  // .upload — file → Pastefy loadstring (regular + buyer)
-  // ─────────────────────────────────────────────
+  // (.upload removed)
 
-  if (/^\.upload(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "upload", perm.isBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    const isBuyerUser = perm.isBuyer;
-    let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
-    if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
-    const file = attachments[0];
-    const maxUploadSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
-    const maxUploadLabel = isBuyerUser ? "1MB" : "200KB";
-    if (file.size > maxUploadSize) { replyUser(msg, `❌ max is ${maxUploadLabel} lol.`).catch(() => {}); return; }
-    // Tokens only on final result — not on loading
-    const savedTokLine = pendingTokenLine.get(String(msg.author.id)) || "";
-    pendingTokenLine.delete(String(msg.author.id));
-    const sentMsg = await sendUploadLoading(msg).catch(() => null);
-    try {
-      let content = null;
-      for (const u of [...new Set([file.url, file.proxyURL, file.proxy_url].filter(Boolean))]) {
-        try {
-          const res = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
-          if (res.ok) {
-            content = await res.text();
-            if (content && content.trim()) break;
-          }
-        } catch {}
-      }
-      if (!content) throw new Error("could not read file from reply/attachment");
-      const apiKey = process.env.PASTEFY_API_KEY;
-      if (!apiKey) throw new Error("PASTEFY_API_KEY not set in env vars");
-      // Try Pastefy API v2 with minimal fields
-      const headers = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      };
-      const body = {
-        title: file.name || "script.lua",
-        content: content
-      };
-      let pastefyRes = await fetch("https://pastefy.app/api/v2/paste", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body)
-      });
-      let rawUrl = null;
-      if (pastefyRes.ok) {
-        try {
-          const data = await pastefyRes.json();
-          const pid = data?.id || data?._id || data?.paste?.id;
-          if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
-        } catch {}
-      }
-      // Fallback: try v1 endpoint
-      if (!rawUrl) {
-        const v1Res = await fetch("https://pastefy.app/api/v1/paste", {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body)
-        });
-        if (v1Res.ok) {
-          try {
-            const data = await v1Res.json();
-            const pid = data?.id || data?._id || data?.paste?.id;
-            if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
-          } catch {}
-        } else {
-          // Show v2 error if both failed
-          const errText = await pastefyRes.text();
-          throw new Error(`Pastefy v2 HTTP ${pastefyRes.status}: ${errText.slice(0, 150)}`);
-        }
-      }
-      if (!rawUrl) throw new Error("Could not get paste URL from Pastefy response");
-      const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      const tokLine = isBuyerUser
-        ? ""
-        : (tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens) || (savedTokLine ? `\n${savedTokLine}` : ""));
-      pendingTokenLine.delete(String(msg.author.id));
-      await sendUploadResult(msg, { loadstring, tokLine });
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ upload failed: ${e.message}`).catch(() => {});
-    }
-    return;
-  }
-  // ─────────────────────────────────────────────
   // .obf — Prince Obfuscator (regular + buyer)
   // ─────────────────────────────────────────────
   if (/^\.obf(?:\s|$)/i.test(txt)) {
@@ -6123,7 +6325,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const results = detectObfuscatorType(code);
       const [topName, topPct] = results?.[0] || ["Custom / Unknown", 0];
       const pct = (typeof topPct === "number" ? topPct : 0).toFixed(2);
-      const body = `**Detected: ${topName} (${pct}%)**`;
+      const body = `**Detected: ${topName} (${pct}% sure)**`;
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       pendingTokenLine.delete(String(msg.author.id));
       const resultPayload = {
