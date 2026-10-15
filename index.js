@@ -1623,7 +1623,7 @@ async function getScriptAttachmentsFromMsgOrReply(msg) {
 function isErrorPayload(body) {
   const contentStr = typeof body.content === "string" ? body.content : "";
   // Loading / processing messages — never put tokens on these
-  if (/⏳|uploading|processing|renaming|cleaning|fetching/i.test(contentStr)) return true;
+  if (/⏳|uploading|processing|renaming|cleaning|fetching|dumping/i.test(contentStr)) return true;
   const errRe = /❌|no found for that|not found|failed:|upload failed|scan failed|forward failed|invalid key|owner only|usage:|put (?:file|id|a file)|you're on|need to wait|buy access|buy premium|join in main server|reply to a file|already got a key|already redeem|can't send|not yours|adopt the Server Tag|max \d+ id|wrong, try|empty response|rate limited|input error|dumbass/i;
   if (errRe.test(contentStr)) return true;
   if (body.embeds && body.embeds.length) {
@@ -1923,7 +1923,7 @@ function replyUser(message, payload) {
     const line = pendingTokenLine.get(String(message.author?.id));
     if (line) {
       const contentStr = typeof body.content === "string" ? body.content : "";
-      const isLoading = /⏳|uploading|processing|renaming|cleaning|fetching/i.test(contentStr)
+      const isLoading = /⏳|uploading|processing|renaming|cleaning|fetching|dumping/i.test(contentStr)
         || (body.embeds && body.embeds.some(emb => {
           const d = emb?.data || emb;
           return /processing|fetching|deleting|loading|renaming/i.test(String(d?.title || ""))
@@ -4268,7 +4268,7 @@ const helpPages = [
     .setDescription(
 `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.obf\`** Obfuscate your script — encrypt strings, Anti-Debug, Anti-Dump, make code unreadable.
+**\`.l\`** Luraph Info Dumper — extract seeds, IK dict, function map.
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.`
     ),
@@ -4278,6 +4278,7 @@ const helpPages = [
     .setDescription(
 `**\`.et\`** Extract files from zip archives.
 
+**\`.upload\`** Turn your file into Script Loader.
 
 **\`.get\`** Get file using ID.`
     ),
@@ -4319,11 +4320,12 @@ const helpSessions = new Map();
 const helpPageBodies = [
   { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.obf\`** Obfuscate your script — encrypt strings, Anti-Debug, Anti-Dump, make code unreadable.
+**\`.l\`** Luraph Info Dumper — extract seeds, IK dict, function map.
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.` },
   { color: 0x5865F2, text: `**\`.et\`** Extract files from zip archives.
 
+**\`.upload\`** Turn your file into Script Loader.
 
 **\`.get\`** Get file using ID.` },
   { color: 0x5865F2, text: `**\`.find\`** Search files by name.
@@ -6046,58 +6048,45 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // (.upload removed)
-
-  // .obf — Prince Obfuscator (regular + buyer)
+  // .upload — file → Pastefy loadstring (regular + buyer)
   // ─────────────────────────────────────────────
-  if (/^\.obf(?:\s|$)/i.test(txt)) {
+  if (/^\.upload(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
-    const cd = checkCommandCooldown(msg.author.id, "obf", perm.isBuyer);
+    const cd = checkCommandCooldown(msg.author.id, "upload", perm.isBuyer);
     if (cd.onCooldown) {
       if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
     let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
-    if (!attachments.length) { replyUser(msg, "❌ upload a file so i can make it obfuscate file.").catch(() => {}); return; }
+    if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
     const file = attachments[0];
-    const maxObfSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
-    const maxObfLabel = isBuyerUser ? "1MB" : "200KB";
-    if (file.size > maxObfSize) { replyUser(msg, `❌ max is ${maxObfLabel} lol.`).catch(() => {}); return; }
-    const sentMsg = await sendObfLoading(msg).catch(() => null);
+    const maxUploadSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
+    const maxUploadLabel = isBuyerUser ? "1MB" : "200KB";
+    if (file.size > maxUploadSize) { replyUser(msg, `❌ max is ${maxUploadLabel} lol.`).catch(() => {}); return; }
+    const savedTokLine = pendingTokenLine.get(String(msg.author.id)) || "";
+    pendingTokenLine.delete(String(msg.author.id));
+    const sentMsg = await sendUploadLoading(msg).catch(() => null);
     try {
-      let source = null;
+      let content = null;
       for (const u of [...new Set([file.url, file.proxyURL, file.proxy_url].filter(Boolean))]) {
         try {
           const res = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
           if (res.ok) {
-            source = await res.text();
-            if (source && source.trim()) break;
+            content = await res.text();
+            if (content && content.trim()) break;
           }
         } catch {}
       }
-      if (!source) throw new Error("could not read file from reply/attachment");
-      // Obfuscate the script
-      const obfuscated = obfuscateLua(source);
-      // Upload obfuscated to Pastefy
+      if (!content) throw new Error("could not read file from reply/attachment");
       const apiKey = process.env.PASTEFY_API_KEY;
       if (!apiKey) throw new Error("PASTEFY_API_KEY not set in env vars");
-      const headers = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      };
-      const body = {
-        title: "obfuscated.lua",
-        content: obfuscated
-      };
-      let pastefyRes = await fetch("https://pastefy.app/api/v2/paste", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body)
-      });
+      const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` };
+      const body = { title: file.name || "script.lua", content };
+      let pastefyRes = await fetch("https://pastefy.app/api/v2/paste", { method: "POST", headers, body: JSON.stringify(body) });
       let rawUrl = null;
       if (pastefyRes.ok) {
         try {
@@ -6107,37 +6096,151 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         } catch {}
       }
       if (!rawUrl) {
-        const v1Res = await fetch("https://pastefy.app/api/v1/paste", {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body)
-        });
+        const v1Res = await fetch("https://pastefy.app/api/v1/paste", { method: "POST", headers, body: JSON.stringify(body) });
         if (v1Res.ok) {
           try {
             const data = await v1Res.json();
             const pid = data?.id || data?._id || data?.paste?.id;
             if (pid) rawUrl = `https://pastefy.app/${pid}/raw`;
           } catch {}
-        } else {
-          const errText = await pastefyRes.text();
-          throw new Error(`Pastefy HTTP ${pastefyRes.status}: ${errText.slice(0, 150)}`);
         }
       }
-      if (!rawUrl) throw new Error("Could not get paste URL from Pastefy response");
+      if (!rawUrl) throw new Error("Could not get paste URL from Pastefy");
       const loadstring = `loadstring(game:HttpGet("${rawUrl}"))()`;
-      // Create obfuscated file attachment
       if (sentMsg) await sentMsg.delete().catch(() => {});
-      await sendObfResult(msg, {
-        loadstring,
-        fileBuffer: Buffer.from(obfuscated, "utf-8"),
-        fileName: "obfuscated.lua"
-      });
+      if (savedTokLine) pendingTokenLine.set(String(msg.author.id), savedTokLine);
+      await sendUploadResult(msg, { loadstring, tokLine: isBuyerUser ? "" : savedTokLine }).catch(() => {});
+      pendingTokenLine.delete(String(msg.author.id));
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ obfuscate failed: ${e.message}`).catch(() => {});
+      replyUser(msg, `❌ upload failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
     }
     return;
   }
+
+  // .l — Luraph Info Dumper
+  // ─────────────────────────────────────────────
+  if (/^\.l(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    const cd = checkCommandCooldown(msg.author.id, "l", perm.isBuyer);
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
+    let resolved = null;
+    try { resolved = await resolveScriptInput(msg, txt); } catch (e) {
+      await sendInputErrorV2(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
+      return;
+    }
+    if (!resolved?.content) {
+      await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.").catch(() => {});
+      return;
+    }
+    const loadingPayload = {
+      flags: IS_COMPONENTS_V2,
+      components: [{ type: 17, accent_color: RENAME_V2_ACCENT, components: [{ type: 10, content: "### Dumping...\n⏳ Processing..." }] }]
+    };
+    const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
+    try {
+      const code = String(resolved.content || "");
+      const isLuraph = /LPH:|_bsdata0\s*=|Luraph|LPH\|/i.test(code) || /\bLPH_[A-Z0-9_]+/.test(code);
+      if (!isLuraph) {
+        if (loadingMsg) await loadingMsg.delete().catch(() => {});
+        await replyComponentsV2(msg, {
+          flags: IS_COMPONENTS_V2,
+          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: "❌ not detected as luraph obfuscator (V2)" }] }]
+        }, { mention: false }).catch(() => {});
+        return;
+      }
+      const lines = [];
+      lines.push("### Luraph Info Dump");
+      lines.push(`**Size:** \`${code.length}\` bytes`);
+
+      // _bsdata0 blob + seeds
+      const bsMatch = code.match(/_bsdata0\s*=\s*\{\s*"((?:\\[0-9]{1,3}|[^"\\])*)"\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if (bsMatch) {
+        let blobLen = 0;
+        try {
+          const raw = bsMatch[1].replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+          blobLen = raw.length;
+        } catch { blobLen = Math.floor(bsMatch[1].length / 2); }
+        const s1 = Number(bsMatch[2]);
+        const s2 = Number(bsMatch[3]);
+        lines.push("\n**`_bsdata0` blob**");
+        lines.push(`- length: \`${blobLen}\` bytes`);
+        lines.push(`- seed #1: \`${s1}\` (\`0x${(s1 >>> 0).toString(16).toUpperCase()}\`)`);
+        lines.push(`- seed #2: \`${s2}\` (\`0x${(s2 >>> 0).toString(16).toUpperCase()}\`)`);
+      } else {
+        lines.push("\n**`_bsdata0`:** not found as classic `{blob, seed1, seed2}`");
+      }
+
+      // IK dictionary
+      const ikBlock = code.match(/\bIK\s*=\s*\{([\s\S]{0,4000}?)\}/);
+      if (ikBlock) {
+        const pairs = [...ikBlock[1].matchAll(/\[["']([^"']+)["']\]\s*=\s*["']([^"']*)["']/g)].slice(0, 20);
+        if (pairs.length) {
+          lines.push("\n**String dict (`IK`)**");
+          for (const p of pairs) lines.push(`- \`[${p[1]}]\` → \`${p[2].slice(0, 40)}\``);
+          if (pairs.length >= 20) lines.push("- …");
+        }
+      }
+
+      // Function mapping [n]=name
+      const fmap = new Map();
+      const reMap = /\[(\d+)\]\s*=\s*([a-zA-Z_][\w.]*(?:\.[a-zA-Z_][\w]*)*)/g;
+      let mm;
+      while ((mm = reMap.exec(code)) !== null) {
+        const idx = mm[1];
+        const name = mm[2];
+        if (/^(string|bit32|buffer|table|coroutine|math|utf8|UDim|UDim2|Color3|Vector2|Vector3|Rect|CFrame|Instance|task|debug)\b/.test(name) || name.includes(".")) {
+          if (!fmap.has(idx)) fmap.set(idx, name);
+        }
+        if (fmap.size >= 40) break;
+      }
+      if (fmap.size) {
+        lines.push("\n**Function map**");
+        for (const [idx, name] of [...fmap.entries()].slice(0, 30)) {
+          lines.push(`- \`[${idx}]\` = \`${name}\``);
+        }
+        if (fmap.size > 30) lines.push("- …");
+      }
+
+      // readable strings
+      const strs = new Set();
+      const reStr = /"([^"\\]{4,80})"/g;
+      let sm;
+      while ((sm = reStr.exec(code)) !== null) {
+        const s = sm[1];
+        if (/[a-zA-Z]{3,}/.test(s) && !/^\\[0-9]/.test(s) && s.length < 80) strs.add(s);
+        if (strs.size >= 15) break;
+      }
+      if (strs.size) {
+        lines.push("\n**Readable strings**");
+        for (const s of [...strs].slice(0, 12)) lines.push(`- \`${s.replace(/`/g, "'")}\``);
+      }
+
+      lines.push("\n⚠️ This is NOT a full deobfuscator — only extracts readable info. Luraph requires VM emulation to fully decrypt.");
+
+      const previewLines = code.split("\n").slice(0, 5).join("\n");
+      let body = "### File Preview\n```lua\n" + previewLines.slice(0, 800) + "\n```\n\n" + lines.join("\n");
+      body = body.slice(0, 3900);
+
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      pendingTokenLine.delete(String(msg.author.id));
+      await replyComponentsV2(msg, {
+        flags: IS_COMPONENTS_V2,
+        components: [{ type: 17, accent_color: RENAME_V2_ACCENT, components: [{ type: 10, content: body }] }]
+      }, { mention: false }).catch(() => {});
+    } catch (e) {
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
+    }
+    return;
+  }
+
   // ─────────────────────────────────────────────
 
   // .find, .get, .rename/.rn, .et, .dl/.download
@@ -6325,7 +6428,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const results = detectObfuscatorType(code);
       const [topName, topPct] = results?.[0] || ["Custom / Unknown", 0];
       const pct = (typeof topPct === "number" ? topPct : 0).toFixed(2);
-      const body = `**Detected: ${topName} (${pct}% sure)**`;
+      const body = `**Detected: ${topName} (${pct}%)**`;
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       pendingTokenLine.delete(String(msg.author.id));
       const resultPayload = {
