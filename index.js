@@ -384,6 +384,7 @@ const paginationMenus = new Map();
 const obfTemp = new Map(); // userId -> { source, fileName, isBuyerUser }
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
+const deobSessions = new Map(); // messageId -> { authorId, source, createdAt }
 const renamePanels = new Map(); // messageId -> { authorId, fileUrl, fileName, isBuyerUser }
 const finderPanelCooldowns = new Map(); // "find:userId" | "get:userId" → expiry timestamp
 const FINDER_PANEL_CD_MS = 60 * 1000; // 1 minute per Find / Get use
@@ -1194,6 +1195,19 @@ const SIGNATURES = {
         [30, /REMOTELY_[A-Z0-9_]+/],
     ],
 
+    Faulmor: [
+        [80, /faulmor\.site/i],
+        [70, /--FAULMORV[134]\b/],
+        [65, /\bFAULMORV[134]\b/],
+        [60, /LOADER_HASH\s*=/],
+        [55, /TRIPWIRE_URL|EXEC_URL/i],
+        [50, /__FMOR_HB|FMOR_LOADER_OK/i],
+        [45, /tripwire\s*\(/i],
+        [40, /faulmor:v2:/i],
+        [35, /api\/public\/(exec|tripwire|loaders)/i],
+        [30, /LOADER_TOKEN|EXEC_SIG|EXEC_NONCE|EXEC_TS/],
+        [25, /hwid_mismatch|canary_mismatch|bad_signature/i],
+    ],
     "Prince Obfuscator": [
         [80, /--\s*This file was protected using Prince Obfuscator/i],
         [50, /This file was protected using Prince Obfuscator/i],
@@ -1217,6 +1231,7 @@ const SIGNATURES = {
 };
 
 const _DEFINITELY_OBF = [
+    /faulmor\.site|FAULMORV[134]|__FMOR_HB|faulmor:v2:/i,
     /This file was protected using Prince Obfuscator/i,
     /--\s*This file was protected using Prince Obfuscator/i,
     /luarmor\.net|luarmor\.gg|LPH_NO_VIRTUALIZE/i,
@@ -1435,6 +1450,10 @@ function statBonus(obfName, stats, isWad = false) {
         case 'SimpleObfuscator':
             if (nesc > 8) bonus += 8;
             break;
+        case 'Faulmor':
+            if (avgLine > 100) bonus += 6;
+            if (ent > 4.5) bonus += 4;
+            break;
         case 'Prince Obfuscator':
             if (ent > 4.5) bonus += 5;
             break;
@@ -1549,6 +1568,208 @@ async function fetchTextFromUrl(url) {
 }
 
 /** Resolve script source for .clean / .detect — file, reply, URL arg, or code block */
+
+function deobfuscatePrometheus(source) {
+  let code = String(source || "");
+  if (!code.trim()) return code;
+  // Decode string.char(n,n,...) packs
+  code = code.replace(/string\.char\s*\(\s*((?:\d+\s*,\s*)*\d+)\s*\)/g, (_, nums) => {
+    try {
+      const arr = nums.split(",").map(s => parseInt(s.trim(), 10)).filter(n => n >= 0 && n <= 255);
+      if (arr.length < 2) return _;
+      const s = String.fromCharCode(...arr);
+      if (!/^[\x09\x0a\x0d\x20-\x7e]*$/.test(s)) return _;
+      return JSON.stringify(s);
+    } catch { return _; }
+  });
+  // Decode numeric-escape strings "\065\066..."
+  code = code.replace(/"((?:\\[0-9]{1,3}){4,})"/g, (full, body) => {
+    try {
+      const decoded = body.replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+      if (!/^[\x09\x0a\x0d\x20-\x7e]*$/.test(decoded)) return full;
+      return JSON.stringify(decoded);
+    } catch { return full; }
+  });
+  // Soft unwrap: comment env probe line
+  code = code.replace(/getfenv\s+and\s+getfenv\(\)\s*or\s*_ENV/gi, "_ENV");
+  // Remove wearedevs banner comments
+  code = code.replace(/--[^\n]*wearedevs[^\n]*/gi, "");
+  code = code.replace(/\/\*[^*]*wearedevs[^*]*\*\//gi, "");
+  return code.trim() + "\n";
+}
+
+function deobfuscateMoonveil(source) {
+  let code = String(source || "");
+  if (!code.trim()) return code;
+  // Moonveil static pass: decode char packs + escapes, strip common VM noise markers
+  code = code.replace(/string\.char\s*\(\s*((?:\d+\s*,\s*)*\d+)\s*\)/g, (_, nums) => {
+    try {
+      const arr = nums.split(",").map(s => parseInt(s.trim(), 10)).filter(n => n >= 0 && n <= 255);
+      if (arr.length < 2) return _;
+      const s = String.fromCharCode(...arr);
+      if (!/^[\x09\x0a\x0d\x20-\x7e]*$/.test(s)) return _;
+      return JSON.stringify(s);
+    } catch { return _; }
+  });
+  code = code.replace(/"((?:\\[0-9]{1,3}){4,})"/g, (full, body) => {
+    try {
+      const decoded = body.replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+      if (!/^[\x09\x0a\x0d\x20-\x7e]*$/.test(decoded)) return full;
+      return JSON.stringify(decoded);
+    } catch { return full; }
+  });
+  // Strip Moonveil header markers if present
+  code = code.replace(/--[^\n]*MoonVeil[^\n]*/gi, "");
+  code = code.replace(/--[^\n]*Moonveil[^\n]*/gi, "");
+  // If still pure VM with no readable gain, try extract concatenated long strings
+  const longStrs = [...code.matchAll(/"([^"\\]{20,500})"/g)].map(m => m[1]);
+  if (longStrs.length >= 3 && !/\blocal\s+function\s+[a-zA-Z_]{3,}/.test(code)) {
+    // keep original but with decodes applied
+  }
+  return code.trim() + "\n";
+}
+
+function deobfuscateFaulmor(source) {
+  const code = String(source || "");
+  if (!code.trim()) return code;
+  const out = [];
+  out.push("-- FAULMOR static deobfuscation (best-effort)");
+  out.push("-- Reconstructs baked constants + control-flow outline from loader.");
+  out.push("");
+
+  const pick = (re) => {
+    const m = code.match(re);
+    return m ? (m[1] || m[0]) : null;
+  };
+  const hash = pick(/LOADER_HASH\s*=\s*["']([0-9a-fA-F]{16,})["']/);
+  const trip = pick(/TRIPWIRE_URL\s*=\s*["']([^"']+)["']/i) || pick(/(https?:\/\/faulmor\.site\/api\/public\/tripwire[^"'\s]*)/i);
+  const exec = pick(/EXEC_URL\s*=\s*["']([^"']+)["']/i) || pick(/(https?:\/\/faulmor\.site\/api\/public\/exec[^"'\s]*)/i);
+  const s2 = pick(/(https?:\/\/faulmor\.site\/api\/public\/loaders\/[0-9a-fA-F]+\/stage2[^"'\s]*)/i);
+  const ffa = /FFA_MODE\s*=\s*true/i.test(code);
+  const token = pick(/LOADER_TOKEN\s*=\s*["']([^"']*)["']/);
+  const ts = pick(/EXEC_TS\s*=\s*["']([^"']+)["']/);
+  const nonce = pick(/EXEC_NONCE\s*=\s*["']([^"']+)["']/);
+  const sig = pick(/EXEC_SIG\s*=\s*["']([^"']+)["']/);
+  const maxAge = pick(/MAX_AGE\s*=\s*(\d+)/);
+  const kHex = pick(/[?&]k=([0-9a-fA-F]{16,64})/) || pick(/hex2bin\s*\(\s*["']([0-9a-fA-F]{16,64})["']\s*\)/);
+  const nVal = pick(/\bN\s*=\s*["']([0-9a-fA-F]{8,})["']/) || pick(/[?&]n=([0-9a-fA-F]{8,})/);
+
+  out.push("-- ========== BAKED CONFIG ==========");
+  if (hash) out.push('local LOADER_HASH = "' + hash + '"');
+  if (trip) out.push('local TRIPWIRE_URL = "' + trip + '"');
+  if (exec) out.push('local EXEC_URL = "' + exec + '"');
+  if (s2) out.push('local STAGE2_URL = "' + s2.split('"')[0] + '"');
+  out.push("local FFA_MODE = " + (ffa ? "true" : "false"));
+  if (token !== null) out.push('local LOADER_TOKEN = "' + token + '"');
+  if (ts) out.push('local EXEC_TS = "' + ts + '"');
+  if (nonce) out.push('local EXEC_NONCE = "' + nonce + '"');
+  if (sig) out.push('local EXEC_SIG = "' + sig + '"');
+  if (maxAge) out.push("local MAX_AGE = " + maxAge);
+  if (kHex) out.push('local STAGE1_KEY_HEX = "' + kHex + '"');
+  if (nVal) out.push('local STAGE1_NONCE = "' + nVal + '"');
+  out.push("");
+
+  out.push("-- ========== SNAPSHOTS ==========");
+  out.push("local _loadstring_orig = loadstring or load");
+  out.push("local _setfenv_orig = setfenv");
+  out.push("local _getfenv_orig = getfenv");
+  out.push("");
+
+  out.push("-- ========== KEY RESOLUTION ==========");
+  out.push("local function _find_key()");
+  out.push("  if FFA_MODE then return \"\" end");
+  out.push("  if LOADER_TOKEN and LOADER_TOKEN ~= \"\" then return \"\" end");
+  out.push("  local k = (getgenv and getgenv().script_key) or _G.script_key");
+  out.push("  return k or \"\"");
+  out.push("end");
+  out.push("");
+
+  out.push("-- ========== IDENTITY ==========");
+  out.push("-- hwid = RbxAnalyticsService:GetClientId()");
+  out.push("-- executor / user / place / job collected at runtime");
+  out.push("");
+
+  out.push("-- ========== ANTI-CRACK (blacklist globals) ==========");
+  const tools = [];
+  const toolRe = /["'](RemoteSpy|SimpleSpy|Dex|DexExplorer|InfYieldExecuted|SaturnHub|SaladHub|Hydroxide|UniversalSpy|SecureSpy|__SCRIPTKEY_GRABBER|_KEY_LOGGER|__keyhook|__LOADER_DUMP|__decompile_hook)["']/g;
+  let tm;
+  while ((tm = toolRe.exec(code)) !== null) tools.push(tm[1]);
+  const uniqTools = [...new Set(tools)];
+  if (uniqTools.length) {
+    out.push("local CRACK_BLACKLIST = {");
+    for (const name of uniqTools) out.push('  "' + name + '",');
+    out.push("}");
+  } else {
+    out.push("local CRACK_BLACKLIST = { \"RemoteSpy\", \"SimpleSpy\", \"Dex\", \"Hydroxide\", \"__LOADER_DUMP\" }");
+  }
+  out.push("");
+
+  out.push("-- ========== EXEC REQUEST (outline) ==========");
+  out.push("-- POST EXEC_URL JSON: k,p,h,l,e,u,r,pi,j,t,n,s");
+  out.push("-- Response header: --FAULMORV4|--FAULMORV3|--FAULMOR + ts nonce len chk sig");
+  out.push("-- HMAC secret = \"faulmor:v2:\" .. secret_key .. \":\" .. hwid .. \":\" .. LOADER_HASH");
+  out.push("-- V4 payload may be stream-XOR decrypted with SHA256(secret..\":enc:\"..nonce..\":\"..block)");
+  out.push("");
+
+  out.push("-- ========== STAGE-1 XOR (if key present) ==========");
+  out.push("local function faulmor_stage1_xor(ct, keyBytes)");
+  out.push("  local plain = {}");
+  out.push("  for i = 1, #ct do");
+  out.push("    local ks = bit32.bxor(keyBytes[((i-1) % #keyBytes)+1], (i*131 + math.floor((i-1)/#keyBytes)) % 256)");
+  out.push("    plain[i] = string.char(bit32.bxor(string.byte(ct, i), ks))");
+  out.push("  end");
+  out.push("  return table.concat(plain)");
+  out.push("end");
+  out.push("");
+
+  // Try decrypt embedded base64 with discovered key
+  if (kHex && kHex.length >= 16) {
+    const keyBytes = [];
+    for (let i = 0; i + 1 < kHex.length; i += 2) keyBytes.push(parseInt(kHex.slice(i, i + 2), 16));
+    const b64s = [...code.matchAll(/["']([A-Za-z0-9+/]{64,}={0,2})["']/g)].map(m => m[1]).slice(0, 5);
+    for (const b64 of b64s) {
+      try {
+        const ct = Buffer.from(b64, "base64");
+        if (ct.length < 16) continue;
+        const plain = Buffer.alloc(ct.length);
+        for (let i = 0; i < ct.length; i++) {
+          const ks = keyBytes[i % keyBytes.length] ^ (( (i + 1) * 131 + Math.floor(i / keyBytes.length) ) % 256);
+          plain[i] = ct[i] ^ ks;
+        }
+        const text = plain.toString("utf8");
+        if (/\b(local|function|return|game)\b/.test(text) && text.length > 20) {
+          out.push("-- decrypted blob (stage1 xor attempt):");
+          out.push("--[[" );
+          out.push(text.slice(0, 8000));
+          out.push("--]]");
+          out.push("");
+          break;
+        }
+      } catch {}
+    }
+  }
+
+  // Extract faulmor header lines from source
+  const hdrs = code.match(/--FAULMORV?[0-9]*[^\n]*/g) || [];
+  if (hdrs.length) {
+    out.push("-- response header markers found in source:");
+    for (const h of hdrs.slice(0, 5)) out.push("-- " + h);
+    out.push("");
+  }
+
+  out.push("-- ========== EXECUTE ==========");
+  out.push("-- fn = _loadstring_orig(payload)");
+  out.push("-- setfenv / newcclosure optional");
+  out.push("-- env.__FMOR_HB = \"FMOR_LOADER_OK\"");
+  out.push("-- return fn()");
+  out.push("");
+  out.push("-- NOTE: Full runtime path needs live HWID + server. This file is static reconstruction only.");
+  out.push("");
+  return out.join("\n");
+}
+
+
+
 async function resolveScriptInput(msg, txt) {
   // 1) Attachment / reply / forward
   let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
@@ -4279,7 +4500,7 @@ const helpPages = [
     .setDescription(
 `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.l\`** Obfuscator dumper — Luraph + Prometheus / WeAreDevs info.
+**\`.deob\`** Deobfuscate scripts (Prometheus / Moonveil panel).
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.`
     ),
@@ -4331,7 +4552,7 @@ const helpSessions = new Map();
 const helpPageBodies = [
   { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.l\`** Obfuscator dumper — Luraph + Prometheus / WeAreDevs info.
+**\`.deob\`** Deobfuscate scripts (Prometheus / Moonveil panel).
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.` },
   { color: 0x5865F2, text: `**\`.et\`** Extract files from zip archives.
@@ -4497,6 +4718,83 @@ client.on("interactionCreate", async interaction => {
     }
     return;
   }
+  // ─── DEOB BUTTONS ───
+  if (interaction.customId.startsWith("deob_prometheus_") || interaction.customId.startsWith("deob_moonveil_") || interaction.customId.startsWith("deob_faulmor_")) {
+    const uid = interaction.customId.split("_").pop();
+    if (interaction.user.id !== uid) {
+      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const session = deobSessions.get(interaction.message.id);
+    if (!session || session.authorId !== interaction.user.id) {
+      return interaction.reply({ content: "❌ panel expired — run `.deob` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    let mode = "moonveil";
+    if (interaction.customId.startsWith("deob_prometheus_")) mode = "prometheus";
+    else if (interaction.customId.startsWith("deob_faulmor_")) mode = "faulmor";
+    else if (interaction.customId.startsWith("deob_moonveil_")) mode = "moonveil";
+    const loadingPayload = {
+      flags: IS_COMPONENTS_V2,
+      components: [{
+        type: 17,
+        accent_color: RENAME_V2_ACCENT,
+        components: [{ type: 10, content: "### Deobfuscating...\n⏳ Processing..." }]
+      }]
+    };
+    try {
+      await interaction.update(loadingPayload);
+    } catch {
+      try { await interaction.deferUpdate(); } catch {}
+      try {
+        await interaction.message.edit(loadingPayload);
+      } catch {}
+    }
+    try {
+      let out;
+      if (mode === "prometheus") out = deobfuscatePrometheus(session.source);
+      else if (mode === "faulmor") out = deobfuscateFaulmor(session.source);
+      else out = deobfuscateMoonveil(session.source);
+      if (!out || !String(out).trim()) throw new Error("empty output");
+      const previewLines = String(out).split("\n").slice(0, 5).join("\n");
+      const body = ("### File Preview\n```lua\n" + previewLines.slice(0, 800) + "\n```").slice(0, 3900);
+      const dumpName = "deobfuscated.lua";
+      const dumpFile = new AttachmentBuilder(Buffer.from(String(out), "utf8"), { name: dumpName });
+      const resultPayload = {
+        flags: IS_COMPONENTS_V2,
+        files: [dumpFile],
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [
+            { type: 10, content: body },
+            { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+            { type: 13, file: { url: "attachment://" + dumpName } }
+          ]
+        }]
+      };
+      try {
+        await interaction.message.edit(resultPayload);
+      } catch (e1) {
+        try {
+          await interaction.followUp(resultPayload);
+        } catch {
+          await interaction.channel.send(resultPayload).catch(() => {});
+        }
+      }
+      deobSessions.delete(interaction.message.id);
+    } catch (e) {
+      const errBody = "### Input Error\n" + String(e.message || e).slice(0, 200);
+      try {
+        await interaction.message.edit({
+          flags: IS_COMPONENTS_V2,
+          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: errBody }] }]
+        });
+      } catch {
+        await interaction.followUp({ content: errBody, flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+    }
+    return;
+  }
+
   // ─── EXTRACT CAROUSEL BUTTONS ───
   if (interaction.customId === "extract_prev" || interaction.customId === "extract_next") {
     if (!extractCarouselMenus.has(uid)) {
@@ -6126,14 +6424,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .l — Obfuscator Info Dumper (Luraph + Prometheus / WeAreDevs)
+  // .deob — deobfuscator panel (Prometheus / Moonveil)
   // ─────────────────────────────────────────────
-  if (/^\.l(?:\s|$)/i.test(txt)) {
+  if (/^\.deob(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
-    const cd = checkCommandCooldown(msg.author.id, "l", perm.isBuyer);
+    const cd = checkCommandCooldown(msg.author.id, "deob", perm.isBuyer);
     if (cd.onCooldown) {
       if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
@@ -6147,189 +6445,62 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.").catch(() => {});
       return;
     }
-    const loadingPayload = {
-      flags: IS_COMPONENTS_V2,
-      components: [{ type: 17, accent_color: RENAME_V2_ACCENT, components: [{ type: 10, content: "### Dumping...\n⏳ Processing..." }] }]
-    };
-    const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
+    const code = String(resolved.content || "");
+    if (code.trim().length < 5) {
+      await sendInputErrorV2(msg, "Couldn't read that file (link expired or invalid). Re-upload it and try again.").catch(() => {});
+      return;
+    }
+    let topName = "Unknown";
+    let topPct = 0;
     try {
-      const code = String(resolved.content || "");
-      const isLuraph = /LPH:|_bsdata0\s*=|Luraph|LPH\|/i.test(code) || /\bLPH_[A-Z0-9_]+/.test(code);
-      const isPrometheus = /getfenv\s+and\s+getfenv\(\)\s*or\s*_ENV/i.test(code)
-        || /return\s*\(\s*function\s*\(\s*\.\.\.\s*\)\s*local\s+\w\s*=\s*\{/i.test(code)
-        || /wearedevs\.net\/obfuscator/i.test(code)
-        || /Prometheus/i.test(code)
-        || (/\b\d{4,7}-\(-?\d{4,7}\)/.test(code) && /string\.char/.test(code) && /bit32\./.test(code));
-
-      if (!isLuraph && !isPrometheus) {
-        if (loadingMsg) await loadingMsg.delete().catch(() => {});
-        await replyComponentsV2(msg, {
-          flags: IS_COMPONENTS_V2,
-          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: "❌ not detected as luraph or prometheus obfuscator" }] }]
-        }, { mention: false }).catch(() => {});
-        return;
+      const results = detectObfuscatorType(code);
+      if (results?.length) {
+        topName = results[0][0] || "Unknown";
+        topPct = typeof results[0][1] === "number" ? results[0][1] : 0;
       }
-
-      const lines = [];
-      const kind = isLuraph && isPrometheus ? "Luraph + Prometheus" : isLuraph ? "Luraph" : "Prometheus / WeAreDevs";
-      lines.push("### Obfuscator Info Dump");
-      lines.push(`**Detected:** \`${kind}\``);
-      lines.push(`**Size:** \`${code.length}\` bytes`);
-
-      if (isLuraph) {
-        lines.push("\n## Luraph");
-        const bsMatch = code.match(/_bsdata0\s*=\s*\{\s*"((?:\\[0-9]{1,3}|[^"\\])*)"\s*,\s*(\d+)\s*,\s*(\d+)/);
-        if (bsMatch) {
-          let blobLen = 0;
-          try {
-            const raw = bsMatch[1].replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
-            blobLen = raw.length;
-          } catch { blobLen = Math.floor(bsMatch[1].length / 2); }
-          const s1 = Number(bsMatch[2]);
-          const s2 = Number(bsMatch[3]);
-          lines.push("**`_bsdata0` blob**");
-          lines.push(`- length: \`${blobLen}\` bytes`);
-          lines.push(`- seed #1: \`${s1}\` (\`0x${(s1 >>> 0).toString(16).toUpperCase()}\`)`);
-          lines.push(`- seed #2: \`${s2}\` (\`0x${(s2 >>> 0).toString(16).toUpperCase()}\`)`);
-        } else {
-          lines.push("**`_bsdata0`:** not found as classic `{blob, seed1, seed2}`");
-        }
-        const ikBlock = code.match(/\bIK\s*=\s*\{([\s\S]{0,4000}?)\}/);
-        if (ikBlock) {
-          const pairs = [...ikBlock[1].matchAll(/\[["']([^"']+)["']\]\s*=\s*["']([^"']*)["']/g)].slice(0, 20);
-          if (pairs.length) {
-            lines.push("**String dict (`IK`)**");
-            for (const pr of pairs) lines.push(`- \`[${pr[1]}]\` → \`${pr[2].slice(0, 40)}\``);
-          }
-        }
-        const fmap = new Map();
-        const reMap = /\[(\d+)\]\s*=\s*([a-zA-Z_][\w.]*(?:\.[a-zA-Z_][\w]*)*)/g;
-        let mm;
-        while ((mm = reMap.exec(code)) !== null) {
-          const idx = mm[1], name = mm[2];
-          if (/^(string|bit32|buffer|table|coroutine|math|utf8|UDim|UDim2|Color3|Vector2|Vector3|Rect|CFrame|Instance|task|debug)\b/.test(name) || name.includes(".")) {
-            if (!fmap.has(idx)) fmap.set(idx, name);
-          }
-          if (fmap.size >= 40) break;
-        }
-        if (fmap.size) {
-          lines.push("**Function map**");
-          for (const [idx, name] of [...fmap.entries()].slice(0, 25)) lines.push(`- \`[${idx}]\` = \`${name}\``);
-        }
-      }
-
-      if (isPrometheus) {
-        lines.push("\n## Prometheus / WeAreDevs");
-        if (/wearedevs\.net\/obfuscator/i.test(code)) lines.push("- marker: `wearedevs.net/obfuscator`");
-        if (/getfenv\s+and\s+getfenv\(\)\s*or\s*_ENV/i.test(code)) lines.push("- env hook: `getfenv and getfenv() or _ENV`");
-        if (/return\s*\(\s*function\s*\(\s*\.\.\.\s*\)/i.test(code)) lines.push("- wrapper: `return (function(...)`");
-        // constant / string table candidates
-        const tableMatches = [...code.matchAll(/\blocal\s+([A-Za-z_]\w*)\s*=\s*\{/g)].slice(0, 30);
-        const bigTables = [];
-        for (const tm of tableMatches) {
-          const name = tm[1];
-          const start = code.indexOf("{", tm.index);
-          if (start < 0) continue;
-          let depth = 0, end = -1;
-          for (let k = start; k < Math.min(code.length, start + 120000); k++) {
-            const ch = code[k];
-            if (ch === "{") depth++;
-            else if (ch === "}") {
-              depth--;
-              if (depth === 0) { end = k; break; }
-            }
-          }
-          if (end < 0) continue;
-          const slice = code.slice(start, end + 1);
-          if (slice.length < 80) continue;
-          const strCount = (slice.match(/"[^"]{3,}"/g) || []).length;
-          const numesc = (slice.match(/\\[0-9]{2,3}/g) || []).length;
-          if (strCount >= 5 || numesc >= 20 || slice.length > 500) {
-            bigTables.push({ name, len: slice.length, strCount, numesc });
-          }
-        }
-        bigTables.sort((a, b) => b.len - a.len);
-        if (bigTables.length) {
-          lines.push("**Constant / string tables**");
-          for (const bt of bigTables.slice(0, 8)) {
-            lines.push(`- \`${bt.name}\` — ${bt.len} chars, ~${bt.strCount} strings, ~${bt.numesc} numeric escapes`);
-          }
-        }
-        // string.char packs
-        const charPacks = [...code.matchAll(/string\.char\s*\(\s*((?:\d+\s*,\s*){4,}\d+)\s*\)/g)].slice(0, 15);
-        if (charPacks.length) {
-          lines.push("**`string.char` packs**");
-          for (const cp of charPacks) {
-            try {
-              const nums = cp[1].split(",").map(s => parseInt(s.trim(), 10)).filter(n => n >= 0 && n <= 255);
-              const decoded = String.fromCharCode(...nums);
-              if (/[\x20-\x7e]{4,}/.test(decoded)) lines.push(`- \`${decoded.slice(0, 60).replace(/`/g, "'")}\``);
-            } catch {}
-          }
-        }
-        // numeric-escape strings
-        const escStrs = [...code.matchAll(/"((?:\\[0-9]{2,3}){6,})"/g)].slice(0, 12);
-        if (escStrs.length) {
-          lines.push("**Numeric-escape strings**");
-          for (const es of escStrs) {
-            try {
-              const decoded = es[1].replace(/\\([0-9]{2,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
-              const printable = decoded.replace(/[^\x20-\x7e]/g, ".");
-              if (printable.replace(/\./g, "").length >= 3) lines.push(`- \`${printable.slice(0, 70)}\``);
-            } catch {}
-          }
-        }
-        // readable plain strings
-        const plain = new Set();
-        const reStr = /"([^"\\]{4,60})"/g;
-        let sm;
-        while ((sm = reStr.exec(code)) !== null) {
-          const s = sm[1];
-          if (/[a-zA-Z]{3,}/.test(s) && !/^\\[0-9]/.test(s)) plain.add(s);
-          if (plain.size >= 12) break;
-        }
-        if (plain.size) {
-          lines.push("**Readable strings**");
-          for (const s of [...plain].slice(0, 10)) lines.push(`- \`${s.replace(/`/g, "'")}\``);
-        }
-      }
-
-      lines.push("\n⚠️ This is NOT a full deobfuscator — only extracts readable info. Full decrypt needs VM / trace emulation.");
-
-      const previewLines = code.split("\n").slice(0, 5).join("\n");
-      let body = "### File Preview\n```lua\n" + previewLines.slice(0, 800) + "\n```\n\n" + lines.join("\n");
-      body = body.slice(0, 3900);
-      const dumpName = "dump.lua";
-      const dumpFile = new AttachmentBuilder(Buffer.from(lines.join("\n"), "utf8"), { name: dumpName });
-
-      if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      pendingTokenLine.delete(String(msg.author.id));
-      await replyComponentsV2(msg, {
+    } catch {}
+    const pct = (typeof topPct === "number" ? topPct : 0).toFixed(2);
+    const body = `**Detected: ${topName} (${pct}%)**\nClick one deobfuscator below:`;
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`deob_prometheus_${msg.author.id}`).setLabel("Prometheus").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`deob_moonveil_${msg.author.id}`).setLabel("Moonveil").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`deob_faulmor_${msg.author.id}`).setLabel("Faulmor").setStyle(ButtonStyle.Secondary)
+    );
+    try {
+      const panelMsg = await replyComponentsV2(msg, {
         flags: IS_COMPONENTS_V2,
-        files: [dumpFile],
         components: [{
           type: 17,
           accent_color: RENAME_V2_ACCENT,
           components: [
-            { type: 10, content: body },
+            { type: 10, content: body.slice(0, 3900) },
             { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-            { type: 13, file: { url: "attachment://" + dumpName } }
+            row.toJSON()
           ]
         }]
-      }, { mention: false }).catch(() => {});
+      }, { mention: false });
+      if (panelMsg?.id) {
+        deobSessions.set(panelMsg.id, {
+          authorId: msg.author.id,
+          source: code,
+          createdAt: Date.now()
+        });
+        // prune old sessions
+        if (deobSessions.size > 80) {
+          const cutoff = Date.now() - 30 * 60 * 1000;
+          for (const [k, v] of deobSessions) {
+            if (!v?.createdAt || v.createdAt < cutoff) deobSessions.delete(k);
+          }
+        }
+      }
+      pendingTokenLine.delete(String(msg.author.id));
     } catch (e) {
-      if (loadingMsg) await loadingMsg.delete().catch(() => {});
       await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
     }
     return;
   }
 
-  // ─────────────────────────────────────────────
 
-  // .find, .get, .rename/.rn, .et, .dl/.download
-  // ─────────────────────────────────────────────
-
-  // .et — carousel mode
   if (/^\.et(?:\s|$)/i.test(txt) || /^\.extract(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
