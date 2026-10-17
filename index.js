@@ -23,6 +23,15 @@ const path = require("path");
 const AdmZip = require("adm-zip");
 const os = require("os");
 const crypto = require("crypto");
+let prometheusDeobf = null;
+try {
+  prometheusDeobf = require(path.join(__dirname, "prometheus-deobfuscator", "src", "index.js"));
+} catch (e) {
+  try { prometheusDeobf = require("./prometheus-deobfuscator/src/index.js"); } catch (e2) {
+    console.warn("⚠️ prometheus-deobfuscator not loaded:", e2.message?.slice(0, 120));
+  }
+}
+
 const OpenAI = require("openai");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const openaiClient = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
@@ -1570,226 +1579,28 @@ async function fetchTextFromUrl(url) {
 /** Resolve script source for .clean / .detect — file, reply, URL arg, or code block */
 
 function deobfuscatePrometheus(source) {
-  let code = String(source || "");
+  const code = String(source || "");
   if (!code.trim()) return "-- empty source\n";
-
-  const evalInt = (expr) => {
-    try {
-      let e = String(expr).replace(/\s+/g, "");
-      if (!/^[-+0-9()]+$/.test(e)) return null;
-      const v = Function('"use strict"; return (' + e + ");")();
-      return typeof v === "number" && Number.isFinite(v) ? (v | 0) : null;
-    } catch { return null; }
-  };
-  const decodeNumEsc = (s) => {
-    try {
-      return String(s).replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10) & 255));
-    } catch { return s; }
-  };
-
-  // ── 1) Extract primary string table (first local X={...} with many \ddd strings) ──
-  let tableVar = null;
-  let rawEntries = [];
-  const tableHead = code.match(/local\s+([A-Za-z_]\w*)\s*=\s*\{/);
-  if (tableHead) {
-    tableVar = tableHead[1];
-    const start = code.indexOf(tableHead[0]);
-    const brace = code.indexOf("{", start);
-    let depth = 0, end = -1;
-    for (let k = brace; k < code.length && k < brace + 800000; k++) {
-      const ch = code[k];
-      if (ch === "{") depth++;
-      else if (ch === "}") {
-        depth--;
-        if (depth === 0) { end = k; break; }
-      }
-    }
-    if (end > brace) {
-      const region = code.slice(brace + 1, end);
-      const parts = [];
-      let cur = "";
-      let inStr = false;
-      for (let i = 0; i < region.length; i++) {
-        const ch = region[i];
-        if (ch === "\\" && inStr) { cur += ch + (region[i + 1] || ""); i++; continue; }
-        if (ch === '"') { inStr = !inStr; cur += ch; continue; }
-        if (!inStr && (ch === "," || ch === ";")) { parts.push(cur); cur = ""; continue; }
-        cur += ch;
-      }
-      if (cur.trim()) parts.push(cur);
-      for (const part of parts) {
-        const sm = part.match(/"((?:\\[0-9]{1,3}|[^"\\])*)"/);
-        if (sm) rawEntries.push(decodeNumEsc(sm[1]));
-        else if (/^\s*$/.test(part)) rawEntries.push("");
-      }
-    }
+  if (!prometheusDeobf || typeof prometheusDeobf.deobfuscate !== "function") {
+    throw new Error("Prometheus deobfuscator module missing — place prometheus-deobfuscator next to index.js");
   }
-  if (!rawEntries.length) {
-    const escRe = /"((?:\\[0-9]{1,3}){2,})"/g;
-    let m;
-    while ((m = escRe.exec(code)) !== null) rawEntries.push(decodeNumEsc(m[1]));
-  }
-
-  // ── 2) Simulate index shuffle: for _,n in ipairs({{a,b},{c,d}}) do while n[1]<n[2] do swap S[n[1]],S[n[2]] ──
-  const S = rawEntries.slice();
-  const shuffleBlocks = [...code.matchAll(/ipairs\s*\(\s*\{([\s\S]*?)\}\s*\)\s*do\s*while/gi)];
-  for (const sb of shuffleBlocks) {
-    const pairs = [];
-    const pairRe = /\{\s*([-+0-9()]+)\s*[,;]\s*([-+0-9()]+)\s*\}/g;
-    let pm;
-    while ((pm = pairRe.exec(sb[1])) !== null) {
-      const a = evalInt(pm[1]);
-      const b = evalInt(pm[2]);
-      if (a !== null && b !== null) pairs.push([a, b]);
-    }
-    for (const [lo, hi] of pairs) {
-      // Lua 1-based inclusive range swap bubble as in sample
-      let left = lo, right = hi;
-      // The sample mutates n[1]/n[2] while swapping S entries — approximate as reverse range
-      if (left >= 1 && right >= 1 && left <= S.length && right <= S.length && left < right) {
-        const slice = S.slice(left - 1, right);
-        slice.reverse();
-        for (let i = 0; i < slice.length; i++) S[left - 1 + i] = slice[i];
-      }
-    }
-  }
-
-  // ── 3) Custom alphabet map (char -> 0..63) ──
-  let alphabet = null;
-  const mapCandidates = [...code.matchAll(/([A-Za-z_]\w*)\s*=\s*\{([\s\S]{60,15000}?)\}/g)];
-  for (const mc of mapCandidates) {
-    const body = mc[2];
-    const pairs = [];
-    const pairRe = /(?:\[["']([^"']+)["']\]|([A-Za-z0-9+/=]))\s*=\s*([-+0-9()]+)/g;
-    let pm;
-    while ((pm = pairRe.exec(body)) !== null) {
-      let key = pm[1] || pm[2];
-      if (pm[1] && /\\[0-9]/.test(pm[1])) key = decodeNumEsc(pm[1]);
-      const val = evalInt(pm[3]);
-      if (key && key.length === 1 && val !== null && val >= 0 && val <= 63) pairs.push([key, val]);
-    }
-    if (pairs.length >= 50) {
-      alphabet = Object.create(null);
-      for (const [k, v] of pairs) alphabet[k] = v;
-      break;
-    }
-  }
-
-  // ── 4) Custom base64 decode (WeAreDevs / Prometheus style) ──
-  const customB64Decode = (str) => {
-    if (!str || typeof str !== "string") return str;
-    if (!alphabet) {
+  try {
+    const result = prometheusDeobf.deobfuscate(code, { name: "chunk" });
+    const out = (result && result.code) ? String(result.code) : "";
+    if (!out.trim()) throw new Error("deobfuscator returned empty code");
+    return out.endsWith("\n") ? out : out + "\n";
+  } catch (e) {
+    if (e && e.name === "NotPrometheusError") {
+      // retry with detect disabled in case of edge fork
       try {
-        if (/^[A-Za-z0-9+/]+=*$/.test(str) && str.length >= 4) {
-          return Buffer.from(str, "base64").toString("utf8");
-        }
+        const result = prometheusDeobf.deobfuscate(code, { name: "chunk", detect: false });
+        const out = (result && result.code) ? String(result.code) : "";
+        if (out.trim()) return out.endsWith("\n") ? out : out + "\n";
       } catch {}
-      return str;
+      throw new Error("not a supported Prometheus / WeAreDevs payload");
     }
-    try {
-      let i = 0, p = 0;
-      const out = [];
-      for (let X = 0; X < str.length; X++) {
-        const ch = str[X];
-        const m = alphabet[ch];
-        if (m !== undefined) {
-          i = i + m * Math.pow(64, 3 - p);
-          p++;
-          if (p === 4) {
-            p = 0;
-            const b1 = Math.floor(i / 65536) & 255;
-            const b2 = Math.floor((i % 65536) / 256) & 255;
-            const b3 = i % 256;
-            out.push(b1, b2, b3);
-            i = 0;
-          }
-        } else if (ch === "=") {
-          out.push(Math.floor(i / 65536) & 255);
-          if (X + 1 >= str.length || str[X + 1] !== "=") {
-            out.push(Math.floor((i % 65536) / 256) & 255);
-          }
-          break;
-        }
-      }
-      return Buffer.from(out).toString("utf8");
-    } catch {
-      return str;
-    }
-  };
-
-  const constants = [];
-  for (let idx = 0; idx < S.length; idx++) {
-    let decoded = customB64Decode(S[idx]);
-    // second pass if still looks like b64
-    if (decoded && /^[A-Za-z0-9+/]+=*$/.test(decoded) && decoded.length >= 8) {
-      const again = customB64Decode(decoded);
-      if (again && again.length) decoded = again;
-    }
-    constants.push(decoded == null ? "" : decoded);
+    throw e;
   }
-
-  // ── 5) Build readable output — prefer constants + reconstructed API calls ──
-  const lines = [];
-  lines.push("-- Deobfuscated via Prometheus static pipeline");
-  lines.push("-- === String Constants ===");
-  lines.push("local Constants = {");
-  for (let i = 0; i < constants.length; i++) {
-    let c = constants[i];
-    if (typeof c !== "string") c = String(c);
-    // sanitize invalid utf8 for display
-    c = c.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, ".");
-    lines.push("  [" + (i + 1) + "] = " + JSON.stringify(c.length > 500 ? c.slice(0, 500) + "…" : c) + ",");
-  }
-  lines.push("}");
-  lines.push("");
-
-  // High-value strings as likely API usage hints
-  const apis = constants.filter(c =>
-    typeof c === "string" && c.length >= 2 && c.length <= 80 &&
-    /^[A-Za-z_][\w]*$/.test(c) &&
-    /^(GetService|HttpGet|FireServer|InvokeServer|FindFirstChild|WaitForChild|Connect|loadstring|require|Players|Workspace|ReplicatedStorage|TweenService|UserInputService|RunService|ChangeState|JumpRequest|LocalPlayer|Character|Humanoid|RemoteEvent|RemoteFunction)$/i.test(c)
-  );
-  if (apis.length) {
-    lines.push("-- Recovered API / method names:");
-    for (const a of [...new Set(apis)]) lines.push("--  " + a);
-    lines.push("");
-  }
-
-  // Try to reconstruct simple GetService patterns from constant pairs
-  const getServiceIdx = constants.findIndex(c => c === "GetService");
-  const gameIdx = constants.findIndex(c => c === "game");
-  if (getServiceIdx >= 0) {
-    lines.push("-- Likely service calls (heuristic):");
-    for (const c of constants) {
-      if (typeof c === "string" && /Service$/.test(c) && c.length < 40) {
-        lines.push('-- game:GetService("' + c + '")');
-      }
-    }
-    lines.push("");
-  }
-
-  // Inline-decode remaining escapes in a cleaned slim source (strip VM bootstrap if huge)
-  let cleaned = code;
-  cleaned = cleaned.replace(/"((?:\\[0-9]{1,3}){2,})"/g, (full, body) => {
-    try {
-      const d = customB64Decode(decodeNumEsc(body));
-      if (typeof d === "string" && /^[\x09\x0a\x0d\x20-\x7e]*$/.test(d)) return JSON.stringify(d);
-    } catch {}
-    return full;
-  });
-  cleaned = cleaned.replace(/getfenv\s+and\s+getfenv\(\)\s*or\s*_ENV/gi, "_ENV");
-
-  // If constants recovered well, prefer constants-only output for readability
-  const readableCount = constants.filter(c => typeof c === "string" && /^[\x20-\x7e]{2,}$/.test(c)).length;
-  if (readableCount >= Math.max(5, constants.length * 0.3)) {
-    lines.push("-- Pipeline recovered " + readableCount + "/" + constants.length + " readable constants.");
-    lines.push("-- Original VM bootstrap omitted; use Constants[n] mapping for references.");
-  } else {
-    lines.push("-- Partially cleaned source:");
-    lines.push(cleaned.slice(0, 200000));
-  }
-  lines.push("");
-  return lines.join("\n");
 }
 
 function deobfuscateMoonveil(source) {
@@ -4790,7 +4601,7 @@ const helpPages = [
     .setDescription(
 `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.deob\`** Deobfuscate scripts (Prometheus / Moonveil panel).
+**\`.deob\`** Deobfuscate Prometheus / WeAreDevs scripts.
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.`
     ),
@@ -4842,7 +4653,7 @@ const helpSessions = new Map();
 const helpPageBodies = [
   { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.deob\`** Deobfuscate scripts (Prometheus / Moonveil panel).
+**\`.deob\`** Deobfuscate Prometheus / WeAreDevs scripts.
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.` },
   { color: 0x5865F2, text: `**\`.et\`** Extract files from zip archives.
@@ -5009,7 +4820,7 @@ client.on("interactionCreate", async interaction => {
     return;
   }
   // ─── DEOB BUTTONS ───
-  if (interaction.customId.startsWith("deob_prometheus_") || interaction.customId.startsWith("deob_moonveil_") || interaction.customId.startsWith("deob_faulmor_")) {
+  if (interaction.customId.startsWith("deob_prometheus_")) {
     const uid = interaction.customId.split("_").pop();
     if (interaction.user.id !== uid) {
       return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5018,10 +4829,7 @@ client.on("interactionCreate", async interaction => {
     if (!session || session.authorId !== interaction.user.id) {
       return interaction.reply({ content: "❌ panel expired — run `.deob` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
-    let mode = "moonveil";
-    if (interaction.customId.startsWith("deob_prometheus_")) mode = "prometheus";
-    else if (interaction.customId.startsWith("deob_faulmor_")) mode = "faulmor";
-    else if (interaction.customId.startsWith("deob_moonveil_")) mode = "moonveil";
+    const mode = "prometheus";
     const loadingPayload = {
       flags: IS_COMPONENTS_V2,
       components: [{
@@ -5039,10 +4847,7 @@ client.on("interactionCreate", async interaction => {
       } catch {}
     }
     try {
-      let out;
-      if (mode === "prometheus") out = deobfuscatePrometheus(session.source);
-      else if (mode === "faulmor") out = deobfuscateFaulmor(session.source);
-      else out = deobfuscateMoonveil(session.source);
+      const out = deobfuscatePrometheus(session.source);
       if (!out || !String(out).trim()) throw new Error("empty output");
       const previewLines = String(out).split("\n").slice(0, 5).join("\n");
       const body = ("### File Preview\n```lua\n" + previewLines.slice(0, 800) + "\n```").slice(0, 3900);
@@ -6752,9 +6557,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const pct = (typeof topPct === "number" ? topPct : 0).toFixed(2);
     const body = `**Detected: ${topName} (${pct}%)**\nClick one deobfuscator below:`;
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`deob_prometheus_${msg.author.id}`).setLabel("Prometheus").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`deob_moonveil_${msg.author.id}`).setLabel("Moonveil").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`deob_faulmor_${msg.author.id}`).setLabel("Faulmor").setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId(`deob_prometheus_${msg.author.id}`).setLabel("Prometheus").setStyle(ButtonStyle.Secondary)
     );
     try {
       const panelMsg = await replyComponentsV2(msg, {
