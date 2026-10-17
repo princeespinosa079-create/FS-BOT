@@ -28,83 +28,147 @@ let prometheusDeobf = null;
   function tryRequire(main) {
     try {
       if (!main || !fs.existsSync(main)) return null;
+      // clear cache so reloads work after extract
+      try { delete require.cache[require.resolve(main)]; } catch {}
       const mod = require(main);
       if (mod && typeof mod.deobfuscate === "function") return mod;
     } catch (e) {
-      console.warn("⚠️ prometheus load fail:", main, String(e.message || e).slice(0, 100));
+      console.warn("⚠️ prometheus load fail:", main, String(e.message || e).slice(0, 120));
     }
     return null;
   }
 
-  function walkFind(dir, depth, out) {
-    if (!dir || depth < 0 || out.length >= 30) return;
+  function looksLikePrometheusDir(dir) {
+    try {
+      const srcIndex = path.join(dir, "src", "index.js");
+      const pipeline = path.join(dir, "src", "pipeline.js");
+      const detect = path.join(dir, "src", "detect", "prometheus.js");
+      if (fs.existsSync(srcIndex) && (fs.existsSync(pipeline) || fs.existsSync(detect))) return srcIndex;
+      const pkgPath = path.join(dir, "package.json");
+      if (fs.existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+          if (pkg && /prometheus/i.test(String(pkg.name || ""))) {
+            if (fs.existsSync(srcIndex)) return srcIndex;
+          }
+        } catch {}
+      }
+      if (fs.existsSync(srcIndex) && /prometheus/i.test(dir)) return srcIndex;
+    } catch {}
+    return null;
+  }
+
+  function tryExtractZip(zipPath, destDir) {
+    try {
+      if (!fs.existsSync(zipPath)) return null;
+      fs.mkdirSync(destDir, { recursive: true });
+      const zip = new AdmZip(zipPath);
+      zip.extractAllTo(destDir, true);
+      // find extracted root
+      const hit = looksLikePrometheusDir(destDir);
+      if (hit) return hit;
+      const entries = fs.readdirSync(destDir);
+      for (const name of entries) {
+        const sub = path.join(destDir, name);
+        if (fs.statSync(sub).isDirectory()) {
+          const h = looksLikePrometheusDir(sub);
+          if (h) return h;
+        }
+      }
+    } catch (e) {
+      console.warn("⚠️ prometheus zip extract fail:", String(e.message || e).slice(0, 120));
+    }
+    return null;
+  }
+
+  function walk(dir, depth, out, zips) {
+    if (!dir || depth < 0 || out.length >= 40) return;
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const ent of entries) {
-      if (out.length >= 30) break;
+      if (out.length >= 40) break;
       const name = ent.name;
-      if (name === "node_modules" || name === ".git" || name === ".cache") continue;
+      if (name === "node_modules" || name === ".git" || name === ".cache" || name === ".npm") continue;
       const full = path.join(dir, name);
-      if (ent.isFile()) {
-        // package root package.json named prometheus*
-        if (name === "package.json") {
-          try {
-            const pkg = JSON.parse(fs.readFileSync(full, "utf8"));
-            if (pkg && /prometheus/i.test(String(pkg.name || ""))) {
-              const main = path.join(dir, "src", "index.js");
-              if (fs.existsSync(main)) out.push(main);
-              const alt = path.join(dir, "index.js");
-              if (fs.existsSync(alt)) out.push(alt);
+      try {
+        if (ent.isFile()) {
+          if (/\.zip$/i.test(name) && /prometheus/i.test(name)) zips.push(full);
+          if (name === "index.js") {
+            const parent = path.dirname(full);
+            // .../src/index.js
+            if (/[/\\]src$/i.test(parent)) {
+              const root = path.dirname(parent);
+              const hit = looksLikePrometheusDir(root);
+              if (hit) out.push(hit);
             }
-          } catch {}
-        }
-        // direct hit: .../src/index.js under a prometheus-ish folder
-        if (name === "index.js" && /[/\\]src$/i.test(dir) && /prometheus/i.test(dir)) {
-          out.push(full);
-        }
-      } else if (ent.isDirectory()) {
-        if (/prometheus/i.test(name)) {
-          const candidates = [
-            path.join(full, "src", "index.js"),
-            path.join(full, "index.js"),
-            path.join(full, "src", "pipeline.js"),
-          ];
-          for (const c of candidates) {
-            if (c.endsWith("index.js") && fs.existsSync(c)) out.push(c);
           }
+          if (name === "pipeline.js" && /[/\\]src$/i.test(path.dirname(full))) {
+            const root = path.dirname(path.dirname(full));
+            const hit = looksLikePrometheusDir(root);
+            if (hit) out.push(hit);
+          }
+          if (name === "package.json") {
+            try {
+              const pkg = JSON.parse(fs.readFileSync(full, "utf8"));
+              if (pkg && /prometheus/i.test(String(pkg.name || ""))) {
+                const hit = looksLikePrometheusDir(path.dirname(full));
+                if (hit) out.push(hit);
+              }
+            } catch {}
+          }
+        } else if (ent.isDirectory()) {
+          const hit = looksLikePrometheusDir(full);
+          if (hit) out.push(hit);
+          walk(full, depth - 1, out, zips);
         }
-        walkFind(full, depth - 1, out);
+      } catch {}
+    }
+  }
+
+  const seeds = new Set();
+  const addSeed = (d) => { if (d) try { seeds.add(path.resolve(d)); } catch {} };
+  addSeed(typeof __dirname !== "undefined" ? __dirname : null);
+  addSeed(process.cwd());
+  try { if (require.main && require.main.filename) addSeed(path.dirname(require.main.filename)); } catch {}
+  try { addSeed(path.dirname(process.argv[1] || "")); } catch {}
+  addSeed(path.join(process.cwd(), ".."));
+  addSeed(path.join(process.cwd(), "src"));
+  addSeed(path.join(process.cwd(), "bot"));
+  addSeed(path.join(process.cwd(), "data"));
+  addSeed(path.join(process.cwd(), "modules"));
+  addSeed(path.join(process.cwd(), "lib"));
+  if (process.env.PROMETHEUS_DEOBF_PATH) addSeed(process.env.PROMETHEUS_DEOBF_PATH);
+
+  // Fast explicit paths
+  const explicitFolders = [
+    "prometheus-deobfuscator",
+    "Prometheus-Deobfuscator-main",
+    "Prometheus-Deobfuscator",
+    "prometheus deobfuscator",
+    "prometheus_deobfuscator",
+    "pdeobf",
+    "Prometheus",
+  ];
+  for (const seed of seeds) {
+    for (const folder of explicitFolders) {
+      const hit = looksLikePrometheusDir(path.join(seed, folder));
+      if (hit) {
+        const mod = tryRequire(hit);
+        if (mod) {
+          prometheusDeobf = mod;
+          console.log("✅ prometheus deobfuscator loaded from:", hit);
+          return;
+        }
       }
     }
   }
 
-  const seeds = [
-    typeof __dirname !== "undefined" ? __dirname : null,
-    process.cwd(),
-    path.join(process.cwd(), ".."),
-    path.join(process.cwd(), "src"),
-    path.join(process.cwd(), "bot"),
-    path.join(process.cwd(), "data"),
-  ].filter(Boolean);
-
-  // Explicit common names first (fast path)
-  const explicit = [];
-  for (const seed of seeds) {
-    for (const folder of [
-      "prometheus-deobfuscator",
-      "Prometheus-Deobfuscator-main",
-      "Prometheus-Deobfuscator",
-      "prometheus deobfuscator",
-      "prometheus_deobfuscator",
-      "pdeobf",
-    ]) {
-      explicit.push(path.join(seed, folder, "src", "index.js"));
-      explicit.push(path.join(seed, folder, "index.js"));
-    }
-  }
-
+  // Deep recursive search
   const found = [];
-  for (const main of explicit) {
+  const zips = [];
+  for (const seed of seeds) walk(seed, 12, found, zips);
+
+  for (const main of [...new Set(found)]) {
     const mod = tryRequire(main);
     if (mod) {
       prometheusDeobf = mod;
@@ -113,23 +177,23 @@ let prometheusDeobf = null;
     }
   }
 
-  // Recursive search under seeds
-  for (const seed of seeds) {
-    walkFind(seed, 5, found);
-  }
-  // unique
-  const uniq = [...new Set(found)];
-  for (const main of uniq) {
-    const mod = tryRequire(main);
-    if (mod) {
-      prometheusDeobf = mod;
-      console.log("✅ prometheus deobfuscator loaded from:", main);
-      return;
+  // Auto-extract zip if present
+  for (const zipPath of [...new Set(zips)]) {
+    const dest = path.join(typeof __dirname !== "undefined" ? __dirname : process.cwd(), ".prometheus-deobf-extracted");
+    const hit = tryExtractZip(zipPath, dest);
+    if (hit) {
+      const mod = tryRequire(hit);
+      if (mod) {
+        prometheusDeobf = mod;
+        console.log("✅ prometheus deobfuscator extracted & loaded from:", hit);
+        return;
+      }
     }
   }
 
-  console.warn("⚠️ prometheus-deobfuscator not found under bot folder (searched recursively).");
-  console.warn("   Drop the folder anywhere near index.js — name can include 'prometheus'.");
+  console.warn("⚠️ prometheus-deobfuscator NOT FOUND.");
+  console.warn("   Searched seeds:", [...seeds].join(" | "));
+  console.warn("   Put the folder (with src/index.js) OR a *prometheus*.zip anywhere under the bot directory.");
 })();
 
 const OpenAI = require("openai");
