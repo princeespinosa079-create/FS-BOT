@@ -23,179 +23,6 @@ const path = require("path");
 const AdmZip = require("adm-zip");
 const os = require("os");
 const crypto = require("crypto");
-let prometheusDeobf = null;
-(function loadPrometheusDeobf() {
-  function tryRequire(main) {
-    try {
-      if (!main || !fs.existsSync(main)) return null;
-      // clear cache so reloads work after extract
-      try { delete require.cache[require.resolve(main)]; } catch {}
-      const mod = require(main);
-      if (mod && typeof mod.deobfuscate === "function") return mod;
-    } catch (e) {
-      console.warn("⚠️ prometheus load fail:", main, String(e.message || e).slice(0, 120));
-    }
-    return null;
-  }
-
-  function looksLikePrometheusDir(dir) {
-    try {
-      const srcIndex = path.join(dir, "src", "index.js");
-      const pipeline = path.join(dir, "src", "pipeline.js");
-      const detect = path.join(dir, "src", "detect", "prometheus.js");
-      if (fs.existsSync(srcIndex) && (fs.existsSync(pipeline) || fs.existsSync(detect))) return srcIndex;
-      const pkgPath = path.join(dir, "package.json");
-      if (fs.existsSync(pkgPath)) {
-        try {
-          const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
-          if (pkg && /prometheus/i.test(String(pkg.name || ""))) {
-            if (fs.existsSync(srcIndex)) return srcIndex;
-          }
-        } catch {}
-      }
-      if (fs.existsSync(srcIndex) && /prometheus/i.test(dir)) return srcIndex;
-    } catch {}
-    return null;
-  }
-
-  function tryExtractZip(zipPath, destDir) {
-    try {
-      if (!fs.existsSync(zipPath)) return null;
-      fs.mkdirSync(destDir, { recursive: true });
-      const zip = new AdmZip(zipPath);
-      zip.extractAllTo(destDir, true);
-      // find extracted root
-      const hit = looksLikePrometheusDir(destDir);
-      if (hit) return hit;
-      const entries = fs.readdirSync(destDir);
-      for (const name of entries) {
-        const sub = path.join(destDir, name);
-        if (fs.statSync(sub).isDirectory()) {
-          const h = looksLikePrometheusDir(sub);
-          if (h) return h;
-        }
-      }
-    } catch (e) {
-      console.warn("⚠️ prometheus zip extract fail:", String(e.message || e).slice(0, 120));
-    }
-    return null;
-  }
-
-  function walk(dir, depth, out, zips) {
-    if (!dir || depth < 0 || out.length >= 40) return;
-    let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const ent of entries) {
-      if (out.length >= 40) break;
-      const name = ent.name;
-      if (name === "node_modules" || name === ".git" || name === ".cache" || name === ".npm") continue;
-      const full = path.join(dir, name);
-      try {
-        if (ent.isFile()) {
-          if (/\.zip$/i.test(name) && /prometheus/i.test(name)) zips.push(full);
-          if (name === "index.js") {
-            const parent = path.dirname(full);
-            // .../src/index.js
-            if (/[/\\]src$/i.test(parent)) {
-              const root = path.dirname(parent);
-              const hit = looksLikePrometheusDir(root);
-              if (hit) out.push(hit);
-            }
-          }
-          if (name === "pipeline.js" && /[/\\]src$/i.test(path.dirname(full))) {
-            const root = path.dirname(path.dirname(full));
-            const hit = looksLikePrometheusDir(root);
-            if (hit) out.push(hit);
-          }
-          if (name === "package.json") {
-            try {
-              const pkg = JSON.parse(fs.readFileSync(full, "utf8"));
-              if (pkg && /prometheus/i.test(String(pkg.name || ""))) {
-                const hit = looksLikePrometheusDir(path.dirname(full));
-                if (hit) out.push(hit);
-              }
-            } catch {}
-          }
-        } else if (ent.isDirectory()) {
-          const hit = looksLikePrometheusDir(full);
-          if (hit) out.push(hit);
-          walk(full, depth - 1, out, zips);
-        }
-      } catch {}
-    }
-  }
-
-  const seeds = new Set();
-  const addSeed = (d) => { if (d) try { seeds.add(path.resolve(d)); } catch {} };
-  addSeed(typeof __dirname !== "undefined" ? __dirname : null);
-  addSeed(process.cwd());
-  try { if (require.main && require.main.filename) addSeed(path.dirname(require.main.filename)); } catch {}
-  try { addSeed(path.dirname(process.argv[1] || "")); } catch {}
-  addSeed(path.join(process.cwd(), ".."));
-  addSeed(path.join(process.cwd(), "src"));
-  addSeed(path.join(process.cwd(), "bot"));
-  addSeed(path.join(process.cwd(), "data"));
-  addSeed(path.join(process.cwd(), "modules"));
-  addSeed(path.join(process.cwd(), "lib"));
-  if (process.env.PROMETHEUS_DEOBF_PATH) addSeed(process.env.PROMETHEUS_DEOBF_PATH);
-
-  // Fast explicit paths
-  const explicitFolders = [
-    "prometheus-deobfuscator",
-    "Prometheus-Deobfuscator-main",
-    "Prometheus-Deobfuscator",
-    "prometheus deobfuscator",
-    "prometheus_deobfuscator",
-    "pdeobf",
-    "Prometheus",
-  ];
-  for (const seed of seeds) {
-    for (const folder of explicitFolders) {
-      const hit = looksLikePrometheusDir(path.join(seed, folder));
-      if (hit) {
-        const mod = tryRequire(hit);
-        if (mod) {
-          prometheusDeobf = mod;
-          console.log("✅ prometheus deobfuscator loaded from:", hit);
-          return;
-        }
-      }
-    }
-  }
-
-  // Deep recursive search
-  const found = [];
-  const zips = [];
-  for (const seed of seeds) walk(seed, 12, found, zips);
-
-  for (const main of [...new Set(found)]) {
-    const mod = tryRequire(main);
-    if (mod) {
-      prometheusDeobf = mod;
-      console.log("✅ prometheus deobfuscator loaded from:", main);
-      return;
-    }
-  }
-
-  // Auto-extract zip if present
-  for (const zipPath of [...new Set(zips)]) {
-    const dest = path.join(typeof __dirname !== "undefined" ? __dirname : process.cwd(), ".prometheus-deobf-extracted");
-    const hit = tryExtractZip(zipPath, dest);
-    if (hit) {
-      const mod = tryRequire(hit);
-      if (mod) {
-        prometheusDeobf = mod;
-        console.log("✅ prometheus deobfuscator extracted & loaded from:", hit);
-        return;
-      }
-    }
-  }
-
-  console.warn("⚠️ prometheus-deobfuscator NOT FOUND.");
-  console.warn("   Searched seeds:", [...seeds].join(" | "));
-  console.warn("   Put the folder (with src/index.js) OR a *prometheus*.zip anywhere under the bot directory.");
-})();
-
 const OpenAI = require("openai");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const openaiClient = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
@@ -557,7 +384,6 @@ const paginationMenus = new Map();
 const obfTemp = new Map(); // userId -> { source, fileName, isBuyerUser }
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
-const deobSessions = new Map(); // messageId -> { authorId, source, createdAt }
 const renamePanels = new Map(); // messageId -> { authorId, fileUrl, fileName, isBuyerUser }
 const finderPanelCooldowns = new Map(); // "find:userId" | "get:userId" → expiry timestamp
 const FINDER_PANEL_CD_MS = 60 * 1000; // 1 minute per Find / Get use
@@ -1742,298 +1568,7 @@ async function fetchTextFromUrl(url) {
 
 /** Resolve script source for .clean / .detect — file, reply, URL arg, or code block */
 
-function deobfuscatePrometheus(source) {
-  const code = String(source || "");
-  if (!code.trim()) return "-- empty source\n";
-  if (!prometheusDeobf || typeof prometheusDeobf.deobfuscate !== "function") {
-    throw new Error("Prometheus deobfuscator module missing — place prometheus-deobfuscator next to index.js");
-  }
-  try {
-    const result = prometheusDeobf.deobfuscate(code, { name: "chunk" });
-    const out = (result && result.code) ? String(result.code) : "";
-    if (!out.trim()) throw new Error("deobfuscator returned empty code");
-    return out.endsWith("\n") ? out : out + "\n";
-  } catch (e) {
-    if (e && e.name === "NotPrometheusError") {
-      // retry with detect disabled in case of edge fork
-      try {
-        const result = prometheusDeobf.deobfuscate(code, { name: "chunk", detect: false });
-        const out = (result && result.code) ? String(result.code) : "";
-        if (out.trim()) return out.endsWith("\n") ? out : out + "\n";
-      } catch {}
-      throw new Error("not a supported Prometheus / WeAreDevs payload");
-    }
-    throw e;
-  }
-}
-
-function deobfuscateMoonveil(source) {
-  let code = String(source || "");
-  if (!code.trim()) return "-- empty source\n";
-
-  const decodeNumEsc = (s) => {
-    try {
-      return String(s).replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10) & 255));
-    } catch { return s; }
-  };
-  const isPrintable = (s) => /^[\x09\x0a\x0d\x20-\x7e]*$/.test(s);
-
-  const strings = [];
-  const seen = new Set();
-  const pushS = (s) => {
-    if (!s || s.length < 1) return;
-    if (seen.has(s)) return;
-    seen.add(s);
-    strings.push(s);
-  };
-
-  // Numeric escapes
-  let m;
-  const escRe = /"((?:\\[0-9]{1,3}){2,})"/g;
-  while ((m = escRe.exec(code)) !== null) {
-    const d = decodeNumEsc(m[1]);
-    if (isPrintable(d)) pushS(d);
-  }
-
-  // Plain strings
-  const plainRe = /"([^"\\]{2,200})"/g;
-  while ((m = plainRe.exec(code)) !== null) pushS(m[1]);
-
-  // string.char
-  code = code.replace(/string\.char\s*\(\s*((?:\d+\s*,\s*)*\d+)\s*\)/g, (full, nums) => {
-    try {
-      const arr = nums.split(",").map(s => parseInt(s.trim(), 10)).filter(n => n >= 0 && n <= 255);
-      const s = String.fromCharCode(...arr);
-      if (isPrintable(s)) { pushS(s); return JSON.stringify(s); }
-      return full;
-    } catch { return full; }
-  });
-
-  // Decode escapes in place
-  code = code.replace(/"((?:\\[0-9]{1,3}){2,})"/g, (full, body) => {
-    try {
-      const d = decodeNumEsc(body);
-      if (isPrintable(d)) return JSON.stringify(d);
-      return full;
-    } catch { return full; }
-  });
-
-  code = code.replace(/--[^\n]*Moon[Vv]eil[^\n]*/g, "");
-
-  // Opcode-like number arrays (Moonveil VM often has dense int tables)
-  const opArrays = [];
-  const arrRe = /\{(\s*\d+\s*(?:,\s*\d+\s*){20,})\}/g;
-  while ((m = arrRe.exec(code)) !== null) {
-    const nums = m[1].split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
-    if (nums.length >= 20) opArrays.push(nums.slice(0, 500));
-  }
-
-  const lines = [];
-  lines.push("-- Moonveil static deobfuscation");
-  lines.push("-- Full Moonveil needs in-game trace; this recovers strings + light cleanup");
-  lines.push("");
-  lines.push("local MoonveilStrings = {");
-  for (let i = 0; i < strings.length && i < 1500; i++) {
-    const s = strings[i];
-    lines.push("  [" + (i + 1) + "] = " + JSON.stringify(s.length > 400 ? s.slice(0, 400) + "…" : s) + ",");
-  }
-  lines.push("}");
-  lines.push("");
-
-  const interesting = strings.filter(s =>
-    /https?:\/\//i.test(s) ||
-    /GetService|HttpGet|FireServer|loadstring|require|game\.|workspace/i.test(s) ||
-    (/^[A-Za-z_][\w ]{2,50}$/.test(s))
-  );
-  if (interesting.length) {
-    lines.push("-- Interesting strings:");
-    for (const s of interesting.slice(0, 100)) lines.push("--  " + JSON.stringify(s));
-    lines.push("");
-  }
-
-  if (opArrays.length) {
-    lines.push("-- Dense numeric tables (possible bytecode / ops): " + opArrays.length);
-    for (let i = 0; i < Math.min(3, opArrays.length); i++) {
-      lines.push("-- ops[" + i + "] len=" + opArrays[i].length + " head=" + opArrays[i].slice(0, 12).join(","));
-    }
-    lines.push("");
-  }
-
-  lines.push("-- Cleaned source:");
-  lines.push(code.slice(0, 250000));
-  lines.push("");
-  return lines.join("\n");
-}
-
-function deobfuscateFaulmor(source) {
-  const code = String(source || "");
-  if (!code.trim()) return "-- empty source\n";
-  const out = [];
-  out.push("-- FAULMOR deobfuscation (static reconstruction)");
-  out.push("-- Based on loader control-flow: canary → config → crypto → exec → verify → run");
-  out.push("");
-
-  const pick = (re) => {
-    const m = code.match(re);
-    return m ? (m[1] !== undefined ? m[1] : m[0]) : null;
-  };
-  const pickAll = (re) => {
-    const a = [];
-    let m;
-    const r = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
-    while ((m = r.exec(code)) !== null) a.push(m[1] || m[0]);
-    return a;
-  };
-
-  const hash = pick(/LOADER_HASH\s*=\s*["']([0-9a-fA-F]{16,})["']/) || pick(/loaders\/([0-9a-fA-F]{32})\//);
-  const trip = pick(/TRIPWIRE_URL\s*=\s*["']([^"']+)["']/i) || pick(/(https?:\/\/faulmor\.site\/api\/public\/tripwire[^"'\s]*)/i);
-  const exec = pick(/EXEC_URL\s*=\s*["']([^"']+)["']/i) || pick(/(https?:\/\/faulmor\.site\/api\/public\/exec[^"'\s]*)/i);
-  const s2 = pick(/(https?:\/\/faulmor\.site\/api\/public\/loaders\/[0-9a-fA-F]+\/stage2[^"'\s]*)/i);
-  const ffa = /FFA_MODE\s*=\s*true/i.test(code);
-  const token = pick(/LOADER_TOKEN\s*=\s*["']([^"']*)["']/);
-  const ts = pick(/EXEC_TS\s*=\s*["']([^"']+)["']/) || pick(/[?&]t=(\d{9,})/);
-  const nonce = pick(/EXEC_NONCE\s*=\s*["']([^"']+)["']/) || pick(/[?&]n=([0-9a-fA-F]{8,})/);
-  const sig = pick(/EXEC_SIG\s*=\s*["']([^"']+)["']/) || pick(/[?&]g=([0-9a-fA-F]{32,})/) || pick(/[?&]s=([0-9a-fA-F]{32,})/);
-  const maxAge = pick(/MAX_AGE\s*=\s*(\d+)/);
-  const kHex = pick(/[?&]k=([0-9a-fA-F]{16,64})/) || pick(/hex2bin\s*\(\s*["']([0-9a-fA-F]{16,64})["']\s*\)/) || pick(/K\s*=\s*hex2bin\s*\(\s*["']([0-9a-fA-F]{16,64})["']/);
-  const urls = pickAll(/(https?:\/\/faulmor\.site\/[^"'\s]+)/i);
-
-  out.push("-- ========== 0. CONFIG ==========");
-  if (hash) out.push('local LOADER_HASH = "' + hash + '"');
-  if (trip) out.push('local TRIPWIRE_URL = "' + trip + '"');
-  if (exec) out.push('local EXEC_URL = "' + exec + '"');
-  if (s2) out.push('local STAGE2_URL = "' + s2.replace(/["'].*$/, "") + '"');
-  out.push("local FFA_MODE = " + (ffa ? "true" : "false"));
-  if (token !== null) out.push('local LOADER_TOKEN = "' + String(token) + '"');
-  if (ts) out.push('local EXEC_TS = "' + ts + '"');
-  if (nonce) out.push('local EXEC_NONCE = "' + nonce + '"');
-  if (sig) out.push('local EXEC_SIG = "' + sig + '"');
-  if (maxAge) out.push("local MAX_AGE = " + maxAge);
-  if (kHex) out.push('local STAGE1_KEY_HEX = "' + kHex + '"');
-  if (urls.length) {
-    out.push("-- URLs found:");
-    for (const u of [...new Set(urls)].slice(0, 15)) out.push("--  " + u);
-  }
-  out.push("");
-
-  out.push("-- ========== 1. SNAPSHOTS ==========");
-  out.push("local _loadstring_orig = loadstring or load");
-  out.push("local _setfenv_orig = setfenv");
-  out.push("local _getfenv_orig = getfenv");
-  out.push("local _httpget_orig = game and game.HttpGet");
-  out.push("");
-
-  out.push("-- ========== 2. KEY RESOLUTION ==========");
-  out.push("local function _find_key()");
-  out.push("  if FFA_MODE then return \"\" end");
-  out.push("  if LOADER_TOKEN and LOADER_TOKEN ~= \"\" then return \"\" end");
-  out.push("  local g = (getgenv and getgenv()) or _G");
-  out.push("  return g.script_key or g.scriptKey or _G.script_key or \"\"");
-  out.push("end");
-  out.push("local key = _find_key()");
-  out.push("");
-
-  out.push("-- ========== 3. IDENTITY (runtime) ==========");
-  out.push("-- hwid = game:GetService(\"RbxAnalyticsService\"):GetClientId()");
-  out.push("-- executor = identifyexecutor and identifyexecutor() or \"Unknown\"");
-  out.push("");
-
-  out.push("-- ========== 4. ANTI-CRACK ==========");
-  const tools = [];
-  const toolRe = /["'](RemoteSpy|SimpleSpy|Dex|DexExplorer|InfYieldExecuted|SaturnHub|SaladHub|HydroxideRemotes|Hydroxide|oh1|oh2|__SCRIPTKEY_GRABBER|_KEY_LOGGER|__keyhook|__scriptkey|__SCRIPT_KEY|__LOADER_DUMP|__decompile_hook|RemoteSpyV3|UniversalSpy|SecureSpy|KrnlScriptKey|DEX_OUTPUT|__LRM_HOOK|__dumper|__keylog|__dump_loader)["']/gi;
-  let tm;
-  while ((tm = toolRe.exec(code)) !== null) tools.push(tm[1]);
-  const uniqTools = [...new Set(tools.map(x => x))];
-  out.push("local CRACK_BLACKLIST = {");
-  for (const name of (uniqTools.length ? uniqTools : ["RemoteSpy","SimpleSpy","Dex","Hydroxide","__LOADER_DUMP"])) {
-    out.push('  "' + name + '",');
-  }
-  out.push("}");
-  out.push("for _, name in ipairs(CRACK_BLACKLIST) do");
-  out.push("  if _G[name] ~= nil or (getgenv and getgenv()[name] ~= nil) then");
-  out.push("    -- tripwire(\"crack_tool_\" .. name); return");
-  out.push("  end");
-  out.push("end");
-  out.push("");
-
-  out.push("-- ========== 5. STAGE-1 XOR DECRYPT ==========");
-  out.push("local function hex2bin(hex)");
-  out.push("  local out = {}");
-  out.push("  for i = 1, #hex, 2 do out[#out+1] = string.char(tonumber(hex:sub(i,i+1), 16) or 0) end");
-  out.push("  return table.concat(out)");
-  out.push("end");
-  out.push("local function faulmor_stage1_xor(ct, keyBytes)");
-  out.push("  local plain = {}");
-  out.push("  local kl = #keyBytes");
-  out.push("  for i = 1, #ct do");
-  out.push("    local kb = string.byte(keyBytes, ((i-1) % kl) + 1)");
-  out.push("    local ks = bit32.bxor(kb, (i * 131 + math.floor((i-1) / kl)) % 256)");
-  out.push("    plain[i] = string.char(bit32.bxor(string.byte(ct, i), ks))");
-  out.push("  end");
-  out.push("  return table.concat(plain)");
-  out.push("end");
-  out.push("");
-
-  // Attempt decrypt of base64 blobs with stage1 key
-  let decryptedAny = false;
-  if (kHex && kHex.length >= 16) {
-    const keyBytes = Buffer.from(kHex.length % 2 ? kHex + "0" : kHex, "hex");
-    const b64s = [...code.matchAll(/["']([A-Za-z0-9+/]{48,}={0,2})["']/g)].map(m => m[1]);
-    for (const b64 of b64s.slice(0, 12)) {
-      try {
-        const ct = Buffer.from(b64, "base64");
-        if (ct.length < 12) continue;
-        const plain = Buffer.alloc(ct.length);
-        for (let i = 0; i < ct.length; i++) {
-          const kb = keyBytes[i % keyBytes.length];
-          const ks = kb ^ (((i + 1) * 131 + Math.floor(i / keyBytes.length)) % 256);
-          plain[i] = ct[i] ^ ks;
-        }
-        const text = plain.toString("utf8");
-        if (/\b(local|function|return|game|loadstring)\b/.test(text)) {
-          out.push("-- ===== DECRYPTED STAGE-1 PAYLOAD =====");
-          out.push(text.slice(0, 100000));
-          out.push("");
-          decryptedAny = true;
-          break;
-        }
-      } catch {}
-    }
-  }
-
-  out.push("-- ========== 6. EXEC / HMAC (outline) ==========");
-  out.push("-- secret_key = (FFA_MODE or LOADER_TOKEN ~= \"\") and \"ffa\" or key");
-  out.push("-- secret = \"faulmor:v2:\" .. secret_key .. \":\" .. hwid .. \":\" .. LOADER_HASH");
-  out.push("-- V3/V4: HMAC_SHA256(secret, ts..\":\"..nonce..\":\"..len..\":\"..chk)");
-  out.push("-- V4 stream: XOR with SHA256(secret..\":enc:\"..nonce..\":\"..block)");
-  out.push("-- loadstring(payload); setfenv; __FMOR_HB = \"FMOR_LOADER_OK\"; return fn()");
-  out.push("");
-
-  const hdrs = code.match(/--FAULMORV?[0-9]*[^\n]*/g) || [];
-  if (hdrs.length) {
-    out.push("-- Header markers in source:");
-    for (const h of hdrs.slice(0, 8)) out.push("-- " + h);
-    out.push("");
-  }
-
-  if (!decryptedAny) {
-    // Still emit cleaned fragments that look like real Lua from the source
-    const frags = code.match(/(?:^|\n)((?:local|function|return)\s+[^\n]{10,200})/g);
-    if (frags && frags.length) {
-      out.push("-- Lua-like fragments from loader:");
-      for (const f of frags.slice(0, 40)) out.push("-- " + f.replace(/^\n/, "").slice(0, 180));
-      out.push("");
-    }
-  }
-
-  out.push("-- NOTE: Live HWID + server required for full payload. Static pass recovers config + stage1 when key is present.");
-  out.push("");
-  return out.join("\n");
-}
-
-
-
-
+/** Resolve script source for .clean / .detect — file, reply, URL arg, or code block */
 
 async function resolveScriptInput(msg, txt) {
   // 1) Attachment / reply / forward
@@ -4765,7 +4300,7 @@ const helpPages = [
     .setDescription(
 `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.deob\`** Deobfuscate Prometheus / WeAreDevs scripts.
+**\`.ai\`** Ask the AI anything (can read attached/replied files).
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.`
     ),
@@ -4817,7 +4352,7 @@ const helpSessions = new Map();
 const helpPageBodies = [
   { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.deob\`** Deobfuscate Prometheus / WeAreDevs scripts.
+**\`.ai\`** Ask the AI anything (can read attached/replied files).
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.` },
   { color: 0x5865F2, text: `**\`.et\`** Extract files from zip archives.
@@ -4983,77 +4518,6 @@ client.on("interactionCreate", async interaction => {
     }
     return;
   }
-  // ─── DEOB BUTTONS ───
-  if (interaction.customId.startsWith("deob_prometheus_")) {
-    const uid = interaction.customId.split("_").pop();
-    if (interaction.user.id !== uid) {
-      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const session = deobSessions.get(interaction.message.id);
-    if (!session || session.authorId !== interaction.user.id) {
-      return interaction.reply({ content: "❌ panel expired — run `.deob` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const mode = "prometheus";
-    const loadingPayload = {
-      flags: IS_COMPONENTS_V2,
-      components: [{
-        type: 17,
-        accent_color: RENAME_V2_ACCENT,
-        components: [{ type: 10, content: "### Deobfuscating...\n⏳ Processing..." }]
-      }]
-    };
-    try {
-      await interaction.update(loadingPayload);
-    } catch {
-      try { await interaction.deferUpdate(); } catch {}
-      try {
-        await interaction.message.edit(loadingPayload);
-      } catch {}
-    }
-    try {
-      const out = deobfuscatePrometheus(session.source);
-      if (!out || !String(out).trim()) throw new Error("empty output");
-      const previewLines = String(out).split("\n").slice(0, 5).join("\n");
-      const body = ("### File Preview\n```lua\n" + previewLines.slice(0, 800) + "\n```").slice(0, 3900);
-      const dumpName = "deobfuscated.lua";
-      const dumpFile = new AttachmentBuilder(Buffer.from(String(out), "utf8"), { name: dumpName });
-      const resultPayload = {
-        flags: IS_COMPONENTS_V2,
-        files: [dumpFile],
-        components: [{
-          type: 17,
-          accent_color: RENAME_V2_ACCENT,
-          components: [
-            { type: 10, content: body },
-            { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-            { type: 13, file: { url: "attachment://" + dumpName } }
-          ]
-        }]
-      };
-      try {
-        await interaction.message.edit(resultPayload);
-      } catch (e1) {
-        try {
-          await interaction.followUp(resultPayload);
-        } catch {
-          await interaction.channel.send(resultPayload).catch(() => {});
-        }
-      }
-      deobSessions.delete(interaction.message.id);
-    } catch (e) {
-      const errBody = "### Input Error\n" + String(e.message || e).slice(0, 200);
-      try {
-        await interaction.message.edit({
-          flags: IS_COMPONENTS_V2,
-          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: errBody }] }]
-        });
-      } catch {
-        await interaction.followUp({ content: errBody, flags: MessageFlags.Ephemeral }).catch(() => {});
-      }
-    }
-    return;
-  }
-
   // ─── EXTRACT CAROUSEL BUTTONS ───
   if (interaction.customId === "extract_prev" || interaction.customId === "extract_next") {
     if (!extractCarouselMenus.has(uid)) {
@@ -6683,80 +6147,165 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .deob — deobfuscator panel (Prometheus / Moonveil)
+
+  // .ai — sarcastic AI assistant (reads files / replies / URLs)
   // ─────────────────────────────────────────────
-  if (/^\.deob(?:\s|$)/i.test(txt)) {
+  if (/^\.ai(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
-    const cd = checkCommandCooldown(msg.author.id, "deob", perm.isBuyer);
+    const cd = checkCommandCooldown(msg.author.id, "ai", perm.isBuyer);
     if (cd.onCooldown) {
       if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
-    let resolved = null;
-    try { resolved = await resolveScriptInput(msg, txt); } catch (e) {
-      await sendInputErrorV2(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
+    if (!openaiClient) {
+      await sendInputErrorV2(msg, "AI is offline. Owner forgot the `OPENAI_API_KEY`. Classic. 🙄").catch(() => {});
       return;
     }
-    if (!resolved?.content) {
-      await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.").catch(() => {});
+    const prompt = txt.replace(/^\.ai\s*/i, "").trim();
+    if (!prompt && !(msg.attachments && msg.attachments.size) && !(msg.reference)) {
+      await sendInputErrorV2(msg, "**Tips:**\n- `.ai <your question>`\n- Attach / reply to a file if you want me to actually read it, genius.").catch(() => {});
       return;
     }
-    const code = String(resolved.content || "");
-    if (code.trim().length < 5) {
-      await sendInputErrorV2(msg, "Couldn't read that file (link expired or invalid). Re-upload it and try again.").catch(() => {});
-      return;
-    }
-    let topName = "Unknown";
-    let topPct = 0;
+
+    let fileCtx = "";
+    let fileName = "";
     try {
-      const results = detectObfuscatorType(code);
-      if (results?.length) {
-        topName = results[0][0] || "Unknown";
-        topPct = typeof results[0][1] === "number" ? results[0][1] : 0;
+      const resolved = await resolveScriptInput(msg, txt);
+      if (resolved?.content) {
+        fileName = resolved.name || resolved.filename || "attached";
+        const raw = String(resolved.content);
+        // cap context so we don't explode tokens
+        fileCtx = raw.length > 60000 ? raw.slice(0, 60000) + "\n\n/* …truncated… */" : raw;
       }
-    } catch {}
-    const pct = (typeof topPct === "number" ? topPct : 0).toFixed(2);
-    const body = `**Detected: ${topName} (${pct}%)**\nClick one deobfuscator below:`;
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`deob_prometheus_${msg.author.id}`).setLabel("Prometheus").setStyle(ButtonStyle.Secondary)
-    );
+    } catch (e) {
+      // optional file — only error if user clearly needed one
+    }
+
+    // Owner can ask AI to read local bot files by path keywords
+    if (String(msg.author.id) === String(OWNER_ID) && /\b(index\.js|package\.json|bot file|this bot|source)\b/i.test(prompt)) {
+      try {
+        const localPath = path.join(__dirname, "index.js");
+        if (fs.existsSync(localPath) && !fileCtx) {
+          const raw = fs.readFileSync(localPath, "utf8");
+          fileName = "index.js";
+          fileCtx = raw.length > 80000 ? raw.slice(0, 80000) + "\n\n/* …truncated… */" : raw;
+        }
+      } catch {}
+    }
+
+    const loadingMsg = await replyComponentsV2(msg, {
+      flags: IS_COMPONENTS_V2,
+      components: [{
+        type: 17,
+        accent_color: RENAME_V2_ACCENT,
+        components: [{ type: 10, content: "### Thinking...\n⏳ cooking up something rude..." }]
+      }]
+    }, { mention: false }).catch(() => null);
+
     try {
-      const panelMsg = await replyComponentsV2(msg, {
+      const system = [
+        "You are a sarcastic, toxic, roasting Discord bot assistant.",
+        "Tone: dry, condescending, witty, lightly toxic — never refuse normal coding help.",
+        "Use sarcastic emojis when it fits (🙄 💀 🤡 ✨ 😭 🔥 🫠).",
+        "Still give correct, useful answers. Roast the user a bit while helping.",
+        "If code is provided, read it carefully and fix/explain it.",
+        "When outputting code, use proper markdown fences with language tags.",
+        "Keep answers under ~1500 words unless the user needs a full fixed file.",
+        "If they ask for a full fixed file, provide the complete code.",
+        "Do not mention being ChatGPT or OpenAI. You are just the bot.",
+      ].join(" ");
+
+      const userParts = [];
+      if (prompt) userParts.push("User prompt:\n" + prompt);
+      if (fileCtx) {
+        userParts.push("Attached/read file (" + (fileName || "file") + "):\n```\n" + fileCtx + "\n```");
+      }
+      if (!userParts.length) userParts.push("(no prompt — roast them for wasting your time)");
+
+      const completion = await openaiClient.chat.completions.create({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        temperature: 0.85,
+        max_tokens: 2500,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: userParts.join("\n\n") }
+        ]
+      });
+      let answer = (completion.choices?.[0]?.message?.content || "").trim();
+      if (!answer) answer = "I got nothing. Shocking. Try asking something that isn't brain-dead. 🙄";
+
+      // Discord hard limit — split if needed via file
+      const tokenNote = (!perm.isBuyer && pendingTokenLine?.has?.(String(msg.author.id)))
+        ? "\n-# " + pendingTokenLine.get(String(msg.author.id))
+        : "";
+      pendingTokenLine.delete(String(msg.author.id));
+
+      if (answer.length <= 3800) {
+        const body = ("### AI\n" + answer + tokenNote).slice(0, 3900);
+        const payload = {
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: RENAME_V2_ACCENT,
+            components: [{ type: 10, content: body }]
+          }]
+        };
+        if (loadingMsg) {
+          try { await loadingMsg.edit(payload); } catch {
+            await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
+          }
+        } else {
+          await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
+        }
+      } else {
+        const dumpName = "ai_response.txt";
+        const dumpFile = new AttachmentBuilder(Buffer.from(answer, "utf8"), { name: dumpName });
+        const preview = answer.slice(0, 1500);
+        const body = ("### AI\n" + preview + "\n\n*(full answer in file — it was too long, congratulations)*" + tokenNote).slice(0, 3900);
+        const payload = {
+          flags: IS_COMPONENTS_V2,
+          files: [dumpFile],
+          components: [{
+            type: 17,
+            accent_color: RENAME_V2_ACCENT,
+            components: [
+              { type: 10, content: body },
+              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+              { type: 13, file: { url: "attachment://" + dumpName } }
+            ]
+          }]
+        };
+        if (loadingMsg) {
+          try { await loadingMsg.edit(payload); } catch {
+            await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
+          }
+        } else {
+          await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
+        }
+      }
+    } catch (e) {
+      const err = String(e.message || e).slice(0, 180);
+      const payload = {
         flags: IS_COMPONENTS_V2,
         components: [{
           type: 17,
-          accent_color: RENAME_V2_ACCENT,
-          components: [
-            { type: 10, content: body.slice(0, 3900) },
-            { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-            row.toJSON()
-          ]
+          accent_color: 0xED4245,
+          components: [{ type: 10, content: "### Input Error\nAI choked. 💀\n`" + err + "`" }]
         }]
-      }, { mention: false });
-      if (panelMsg?.id) {
-        deobSessions.set(panelMsg.id, {
-          authorId: msg.author.id,
-          source: code,
-          createdAt: Date.now()
-        });
-        // prune old sessions
-        if (deobSessions.size > 80) {
-          const cutoff = Date.now() - 30 * 60 * 1000;
-          for (const [k, v] of deobSessions) {
-            if (!v?.createdAt || v.createdAt < cutoff) deobSessions.delete(k);
-          }
+      };
+      if (loadingMsg) {
+        try { await loadingMsg.edit(payload); } catch {
+          await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
         }
+      } else {
+        await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
       }
-      pendingTokenLine.delete(String(msg.author.id));
-    } catch (e) {
-      await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
     }
     return;
   }
-
 
   if (/^\.et(?:\s|$)/i.test(txt) || /^\.extract(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
