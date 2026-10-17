@@ -1571,202 +1571,445 @@ async function fetchTextFromUrl(url) {
 
 function deobfuscatePrometheus(source) {
   let code = String(source || "");
-  if (!code.trim()) return code;
-  // Decode string.char(n,n,...) packs
-  code = code.replace(/string\.char\s*\(\s*((?:\d+\s*,\s*)*\d+)\s*\)/g, (_, nums) => {
+  if (!code.trim()) return "-- empty source\n";
+
+  const evalInt = (expr) => {
+    try {
+      let e = String(expr).replace(/\s+/g, "");
+      if (!/^[-+0-9()]+$/.test(e)) return null;
+      // safe integer eval
+      const v = Function('"use strict"; return (' + e + ");")();
+      return typeof v === "number" && Number.isFinite(v) ? (v | 0) : null;
+    } catch { return null; }
+  };
+  const decodeNumEsc = (s) => {
+    try {
+      return String(s).replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10) & 255));
+    } catch { return s; }
+  };
+  const isPrintable = (s) => typeof s === "string" && /^[\x09\x0a\x0d\x20-\x7e]*$/.test(s);
+
+  // ── Pass 1: extract & decode primary string table ──
+  const tableMatch = code.match(/local\s+([A-Za-z_]\w*)\s*=\s*\{/);
+  const tableVar = tableMatch ? tableMatch[1] : null;
+  const rawEntries = [];
+  const escRe = /"((?:\\[0-9]{1,3})*)"/g;
+  let m;
+  // Prefer entries inside first big table
+  let searchRegion = code;
+  if (tableVar) {
+    const start = code.indexOf(tableMatch[0]);
+    const brace = code.indexOf("{", start);
+    let depth = 0, end = -1;
+    for (let k = brace; k < code.length && k < brace + 500000; k++) {
+      if (code[k] === "{") depth++;
+      else if (code[k] === "}") { depth--; if (depth === 0) { end = k; break; } }
+    }
+    if (end > brace) searchRegion = code.slice(brace, end + 1);
+  }
+  while ((m = escRe.exec(searchRegion)) !== null) {
+    rawEntries.push(decodeNumEsc(m[1]));
+  }
+
+  // ── Pass 2: find custom base64 alphabet map  B={ c=expr; ["1"]=expr; ... } ──
+  let alphabet = null; // index 0..63 -> char, or char -> value
+  const alphaMatch = code.match(/(?:local\s+)?([A-Za-z_]\w*)\s*=\s*\{([^}]{50,8000})\}/);
+  // search for map with many single-char keys / letter keys assigned ints 0-63
+  const mapCandidates = [...code.matchAll(/([A-Za-z_]\w*)\s*=\s*\{([\s\S]{80,12000}?)\}/g)];
+  for (const mc of mapCandidates) {
+    const body = mc[2];
+    const pairs = [];
+    // key=expr or ["x"]=expr
+    const pairRe = /(?:\[["']([^"']+)["']\]|([A-Za-z0-9+/=]))\s*=\s*([-+0-9()]+)/g;
+    let pm;
+    while ((pm = pairRe.exec(body)) !== null) {
+      const key = pm[1] || pm[2];
+      const val = evalInt(pm[3]);
+      if (key && val !== null && val >= 0 && val <= 63) pairs.push([key, val]);
+    }
+    if (pairs.length >= 40) {
+      alphabet = {};
+      for (const [k, v] of pairs) alphabet[k] = v;
+      break;
+    }
+  }
+
+  const customB64Decode = (str) => {
+    if (!alphabet || !str) return null;
+    try {
+      let s = String(str).replace(/\s+/g, "");
+      const vals = [];
+      for (const ch of s) {
+        if (ch === "=") continue;
+        if (alphabet[ch] === undefined) return null;
+        vals.push(alphabet[ch]);
+      }
+      const bytes = [];
+      for (let i = 0; i + 3 < vals.length; i += 4) {
+        const n = (vals[i] << 18) | (vals[i + 1] << 12) | ((vals[i + 2] || 0) << 6) | (vals[i + 3] || 0);
+        bytes.push((n >> 16) & 255);
+        if (i + 2 < vals.length) bytes.push((n >> 8) & 255);
+        if (i + 3 < vals.length) bytes.push(n & 255);
+      }
+      // handle remainder loosely
+      if (vals.length % 4 === 2) {
+        const n = (vals[vals.length - 2] << 2) | (vals[vals.length - 1] >> 4);
+        bytes.push(n & 255);
+      }
+      const out = Buffer.from(bytes).toString("utf8");
+      return out;
+    } catch { return null; }
+  };
+
+  // Apply table shuffle if present: for pairs in ipairs({{a,b},{c,d}}) do while swap
+  // We approximate by just decoding entries; shuffle is index permutation
+
+  const constants = [];
+  const seen = new Set();
+  for (const raw of rawEntries) {
+    let final = raw;
+    const c1 = customB64Decode(raw);
+    if (c1 && isPrintable(c1) && c1.length >= 1) final = c1;
+    else {
+      try {
+        if (/^[A-Za-z0-9+/]+=*$/.test(raw) && raw.length >= 4) {
+          const t = Buffer.from(raw, "base64").toString("utf8");
+          if (isPrintable(t) && /[A-Za-z]/.test(t)) final = t;
+        }
+      } catch {}
+    }
+    if (!seen.has(final)) { seen.add(final); constants.push(final); }
+  }
+
+  // string.char + escape decode on full source
+  code = code.replace(/string\.char\s*\(\s*((?:\d+\s*,\s*)*\d+)\s*\)/g, (full, nums) => {
     try {
       const arr = nums.split(",").map(s => parseInt(s.trim(), 10)).filter(n => n >= 0 && n <= 255);
-      if (arr.length < 2) return _;
       const s = String.fromCharCode(...arr);
-      if (!/^[\x09\x0a\x0d\x20-\x7e]*$/.test(s)) return _;
+      if (!isPrintable(s)) return full;
+      if (!seen.has(s)) { seen.add(s); constants.push(s); }
       return JSON.stringify(s);
-    } catch { return _; }
-  });
-  // Decode numeric-escape strings "\065\066..."
-  code = code.replace(/"((?:\\[0-9]{1,3}){4,})"/g, (full, body) => {
-    try {
-      const decoded = body.replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
-      if (!/^[\x09\x0a\x0d\x20-\x7e]*$/.test(decoded)) return full;
-      return JSON.stringify(decoded);
     } catch { return full; }
   });
-  // Soft unwrap: comment env probe line
+  code = code.replace(/"((?:\\[0-9]{1,3}){2,})"/g, (full, body) => {
+    try {
+      let d = decodeNumEsc(body);
+      const c = customB64Decode(d);
+      if (c && isPrintable(c)) d = c;
+      if (!isPrintable(d)) return full;
+      return JSON.stringify(d);
+    } catch { return full; }
+  });
   code = code.replace(/getfenv\s+and\s+getfenv\(\)\s*or\s*_ENV/gi, "_ENV");
-  // Remove wearedevs banner comments
   code = code.replace(/--[^\n]*wearedevs[^\n]*/gi, "");
-  code = code.replace(/\/\*[^*]*wearedevs[^*]*\*\//gi, "");
-  return code.trim() + "\n";
+
+  // Replace S[n] or tableVar[n] with constant if index maps 1-based
+  if (tableVar && constants.length) {
+    const reIdx = new RegExp("\\b" + tableVar.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\[\\s*(\\d+)\\s*\\]", "g");
+    code = code.replace(reIdx, (full, idx) => {
+      const i = parseInt(idx, 10) - 1;
+      if (i >= 0 && i < constants.length && isPrintable(constants[i])) return JSON.stringify(constants[i]);
+      return full;
+    });
+  }
+
+  const lines = [];
+  lines.push("-- Prometheus / WeAreDevs deobfuscation (enhanced)");
+  lines.push("-- String table + custom alphabet base64 + inline decode");
+  lines.push("");
+  if (alphabet) lines.push("-- Custom alphabet map recovered (" + Object.keys(alphabet).length + " entries)");
+  if (tableVar) lines.push("-- String table variable: " + tableVar + " (" + constants.length + " entries)");
+  lines.push("");
+  lines.push("local Constants = {");
+  for (let i = 0; i < constants.length && i < 3000; i++) {
+    const c = constants[i];
+    lines.push("  [" + (i + 1) + "] = " + JSON.stringify(c.length > 800 ? c.slice(0, 800) + "…" : c) + ",");
+  }
+  lines.push("}");
+  lines.push("");
+  const useful = constants.filter(c =>
+    c.length >= 2 && (
+      /https?:\/\//i.test(c) ||
+      /GetService|HttpGet|FireServer|loadstring|require|game|workspace|Players/i.test(c) ||
+      (/^[A-Za-z_][\w .:]{1,60}$/.test(c))
+    )
+  );
+  if (useful.length) {
+    lines.push("-- High-value recovered strings:");
+    for (const u of useful.slice(0, 120)) lines.push("--  " + JSON.stringify(u));
+    lines.push("");
+  }
+  lines.push("-- Cleaned / partially decoded source:");
+  lines.push(code.slice(0, 280000));
+  lines.push("");
+  return lines.join("\n");
 }
 
 function deobfuscateMoonveil(source) {
   let code = String(source || "");
-  if (!code.trim()) return code;
-  // Moonveil static pass: decode char packs + escapes, strip common VM noise markers
-  code = code.replace(/string\.char\s*\(\s*((?:\d+\s*,\s*)*\d+)\s*\)/g, (_, nums) => {
+  if (!code.trim()) return "-- empty source\n";
+
+  const decodeNumEsc = (s) => {
+    try {
+      return String(s).replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10) & 255));
+    } catch { return s; }
+  };
+  const isPrintable = (s) => /^[\x09\x0a\x0d\x20-\x7e]*$/.test(s);
+
+  const strings = [];
+  const seen = new Set();
+  const pushS = (s) => {
+    if (!s || s.length < 1) return;
+    if (seen.has(s)) return;
+    seen.add(s);
+    strings.push(s);
+  };
+
+  // Numeric escapes
+  let m;
+  const escRe = /"((?:\\[0-9]{1,3}){2,})"/g;
+  while ((m = escRe.exec(code)) !== null) {
+    const d = decodeNumEsc(m[1]);
+    if (isPrintable(d)) pushS(d);
+  }
+
+  // Plain strings
+  const plainRe = /"([^"\\]{2,200})"/g;
+  while ((m = plainRe.exec(code)) !== null) pushS(m[1]);
+
+  // string.char
+  code = code.replace(/string\.char\s*\(\s*((?:\d+\s*,\s*)*\d+)\s*\)/g, (full, nums) => {
     try {
       const arr = nums.split(",").map(s => parseInt(s.trim(), 10)).filter(n => n >= 0 && n <= 255);
-      if (arr.length < 2) return _;
       const s = String.fromCharCode(...arr);
-      if (!/^[\x09\x0a\x0d\x20-\x7e]*$/.test(s)) return _;
-      return JSON.stringify(s);
-    } catch { return _; }
-  });
-  code = code.replace(/"((?:\\[0-9]{1,3}){4,})"/g, (full, body) => {
-    try {
-      const decoded = body.replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
-      if (!/^[\x09\x0a\x0d\x20-\x7e]*$/.test(decoded)) return full;
-      return JSON.stringify(decoded);
+      if (isPrintable(s)) { pushS(s); return JSON.stringify(s); }
+      return full;
     } catch { return full; }
   });
-  // Strip Moonveil header markers if present
-  code = code.replace(/--[^\n]*MoonVeil[^\n]*/gi, "");
-  code = code.replace(/--[^\n]*Moonveil[^\n]*/gi, "");
-  // If still pure VM with no readable gain, try extract concatenated long strings
-  const longStrs = [...code.matchAll(/"([^"\\]{20,500})"/g)].map(m => m[1]);
-  if (longStrs.length >= 3 && !/\blocal\s+function\s+[a-zA-Z_]{3,}/.test(code)) {
-    // keep original but with decodes applied
+
+  // Decode escapes in place
+  code = code.replace(/"((?:\\[0-9]{1,3}){2,})"/g, (full, body) => {
+    try {
+      const d = decodeNumEsc(body);
+      if (isPrintable(d)) return JSON.stringify(d);
+      return full;
+    } catch { return full; }
+  });
+
+  code = code.replace(/--[^\n]*Moon[Vv]eil[^\n]*/g, "");
+
+  // Opcode-like number arrays (Moonveil VM often has dense int tables)
+  const opArrays = [];
+  const arrRe = /\{(\s*\d+\s*(?:,\s*\d+\s*){20,})\}/g;
+  while ((m = arrRe.exec(code)) !== null) {
+    const nums = m[1].split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+    if (nums.length >= 20) opArrays.push(nums.slice(0, 500));
   }
-  return code.trim() + "\n";
+
+  const lines = [];
+  lines.push("-- Moonveil static deobfuscation");
+  lines.push("-- Full Moonveil needs in-game trace; this recovers strings + light cleanup");
+  lines.push("");
+  lines.push("local MoonveilStrings = {");
+  for (let i = 0; i < strings.length && i < 1500; i++) {
+    const s = strings[i];
+    lines.push("  [" + (i + 1) + "] = " + JSON.stringify(s.length > 400 ? s.slice(0, 400) + "…" : s) + ",");
+  }
+  lines.push("}");
+  lines.push("");
+
+  const interesting = strings.filter(s =>
+    /https?:\/\//i.test(s) ||
+    /GetService|HttpGet|FireServer|loadstring|require|game\.|workspace/i.test(s) ||
+    (/^[A-Za-z_][\w ]{2,50}$/.test(s))
+  );
+  if (interesting.length) {
+    lines.push("-- Interesting strings:");
+    for (const s of interesting.slice(0, 100)) lines.push("--  " + JSON.stringify(s));
+    lines.push("");
+  }
+
+  if (opArrays.length) {
+    lines.push("-- Dense numeric tables (possible bytecode / ops): " + opArrays.length);
+    for (let i = 0; i < Math.min(3, opArrays.length); i++) {
+      lines.push("-- ops[" + i + "] len=" + opArrays[i].length + " head=" + opArrays[i].slice(0, 12).join(","));
+    }
+    lines.push("");
+  }
+
+  lines.push("-- Cleaned source:");
+  lines.push(code.slice(0, 250000));
+  lines.push("");
+  return lines.join("\n");
 }
 
 function deobfuscateFaulmor(source) {
   const code = String(source || "");
-  if (!code.trim()) return code;
+  if (!code.trim()) return "-- empty source\n";
   const out = [];
-  out.push("-- FAULMOR static deobfuscation (best-effort)");
-  out.push("-- Reconstructs baked constants + control-flow outline from loader.");
+  out.push("-- FAULMOR deobfuscation (static reconstruction)");
+  out.push("-- Based on loader control-flow: canary → config → crypto → exec → verify → run");
   out.push("");
 
   const pick = (re) => {
     const m = code.match(re);
-    return m ? (m[1] || m[0]) : null;
+    return m ? (m[1] !== undefined ? m[1] : m[0]) : null;
   };
-  const hash = pick(/LOADER_HASH\s*=\s*["']([0-9a-fA-F]{16,})["']/);
+  const pickAll = (re) => {
+    const a = [];
+    let m;
+    const r = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+    while ((m = r.exec(code)) !== null) a.push(m[1] || m[0]);
+    return a;
+  };
+
+  const hash = pick(/LOADER_HASH\s*=\s*["']([0-9a-fA-F]{16,})["']/) || pick(/loaders\/([0-9a-fA-F]{32})\//);
   const trip = pick(/TRIPWIRE_URL\s*=\s*["']([^"']+)["']/i) || pick(/(https?:\/\/faulmor\.site\/api\/public\/tripwire[^"'\s]*)/i);
   const exec = pick(/EXEC_URL\s*=\s*["']([^"']+)["']/i) || pick(/(https?:\/\/faulmor\.site\/api\/public\/exec[^"'\s]*)/i);
   const s2 = pick(/(https?:\/\/faulmor\.site\/api\/public\/loaders\/[0-9a-fA-F]+\/stage2[^"'\s]*)/i);
   const ffa = /FFA_MODE\s*=\s*true/i.test(code);
   const token = pick(/LOADER_TOKEN\s*=\s*["']([^"']*)["']/);
-  const ts = pick(/EXEC_TS\s*=\s*["']([^"']+)["']/);
-  const nonce = pick(/EXEC_NONCE\s*=\s*["']([^"']+)["']/);
-  const sig = pick(/EXEC_SIG\s*=\s*["']([^"']+)["']/);
+  const ts = pick(/EXEC_TS\s*=\s*["']([^"']+)["']/) || pick(/[?&]t=(\d{9,})/);
+  const nonce = pick(/EXEC_NONCE\s*=\s*["']([^"']+)["']/) || pick(/[?&]n=([0-9a-fA-F]{8,})/);
+  const sig = pick(/EXEC_SIG\s*=\s*["']([^"']+)["']/) || pick(/[?&]g=([0-9a-fA-F]{32,})/) || pick(/[?&]s=([0-9a-fA-F]{32,})/);
   const maxAge = pick(/MAX_AGE\s*=\s*(\d+)/);
-  const kHex = pick(/[?&]k=([0-9a-fA-F]{16,64})/) || pick(/hex2bin\s*\(\s*["']([0-9a-fA-F]{16,64})["']\s*\)/);
-  const nVal = pick(/\bN\s*=\s*["']([0-9a-fA-F]{8,})["']/) || pick(/[?&]n=([0-9a-fA-F]{8,})/);
+  const kHex = pick(/[?&]k=([0-9a-fA-F]{16,64})/) || pick(/hex2bin\s*\(\s*["']([0-9a-fA-F]{16,64})["']\s*\)/) || pick(/K\s*=\s*hex2bin\s*\(\s*["']([0-9a-fA-F]{16,64})["']/);
+  const urls = pickAll(/(https?:\/\/faulmor\.site\/[^"'\s]+)/i);
 
-  out.push("-- ========== BAKED CONFIG ==========");
+  out.push("-- ========== 0. CONFIG ==========");
   if (hash) out.push('local LOADER_HASH = "' + hash + '"');
   if (trip) out.push('local TRIPWIRE_URL = "' + trip + '"');
   if (exec) out.push('local EXEC_URL = "' + exec + '"');
-  if (s2) out.push('local STAGE2_URL = "' + s2.split('"')[0] + '"');
+  if (s2) out.push('local STAGE2_URL = "' + s2.replace(/["'].*$/, "") + '"');
   out.push("local FFA_MODE = " + (ffa ? "true" : "false"));
-  if (token !== null) out.push('local LOADER_TOKEN = "' + token + '"');
+  if (token !== null) out.push('local LOADER_TOKEN = "' + String(token) + '"');
   if (ts) out.push('local EXEC_TS = "' + ts + '"');
   if (nonce) out.push('local EXEC_NONCE = "' + nonce + '"');
   if (sig) out.push('local EXEC_SIG = "' + sig + '"');
   if (maxAge) out.push("local MAX_AGE = " + maxAge);
   if (kHex) out.push('local STAGE1_KEY_HEX = "' + kHex + '"');
-  if (nVal) out.push('local STAGE1_NONCE = "' + nVal + '"');
-  out.push("");
-
-  out.push("-- ========== SNAPSHOTS ==========");
-  out.push("local _loadstring_orig = loadstring or load");
-  out.push("local _setfenv_orig = setfenv");
-  out.push("local _getfenv_orig = getfenv");
-  out.push("");
-
-  out.push("-- ========== KEY RESOLUTION ==========");
-  out.push("local function _find_key()");
-  out.push("  if FFA_MODE then return \"\" end");
-  out.push("  if LOADER_TOKEN and LOADER_TOKEN ~= \"\" then return \"\" end");
-  out.push("  local k = (getgenv and getgenv().script_key) or _G.script_key");
-  out.push("  return k or \"\"");
-  out.push("end");
-  out.push("");
-
-  out.push("-- ========== IDENTITY ==========");
-  out.push("-- hwid = RbxAnalyticsService:GetClientId()");
-  out.push("-- executor / user / place / job collected at runtime");
-  out.push("");
-
-  out.push("-- ========== ANTI-CRACK (blacklist globals) ==========");
-  const tools = [];
-  const toolRe = /["'](RemoteSpy|SimpleSpy|Dex|DexExplorer|InfYieldExecuted|SaturnHub|SaladHub|Hydroxide|UniversalSpy|SecureSpy|__SCRIPTKEY_GRABBER|_KEY_LOGGER|__keyhook|__LOADER_DUMP|__decompile_hook)["']/g;
-  let tm;
-  while ((tm = toolRe.exec(code)) !== null) tools.push(tm[1]);
-  const uniqTools = [...new Set(tools)];
-  if (uniqTools.length) {
-    out.push("local CRACK_BLACKLIST = {");
-    for (const name of uniqTools) out.push('  "' + name + '",');
-    out.push("}");
-  } else {
-    out.push("local CRACK_BLACKLIST = { \"RemoteSpy\", \"SimpleSpy\", \"Dex\", \"Hydroxide\", \"__LOADER_DUMP\" }");
+  if (urls.length) {
+    out.push("-- URLs found:");
+    for (const u of [...new Set(urls)].slice(0, 15)) out.push("--  " + u);
   }
   out.push("");
 
-  out.push("-- ========== EXEC REQUEST (outline) ==========");
-  out.push("-- POST EXEC_URL JSON: k,p,h,l,e,u,r,pi,j,t,n,s");
-  out.push("-- Response header: --FAULMORV4|--FAULMORV3|--FAULMOR + ts nonce len chk sig");
-  out.push("-- HMAC secret = \"faulmor:v2:\" .. secret_key .. \":\" .. hwid .. \":\" .. LOADER_HASH");
-  out.push("-- V4 payload may be stream-XOR decrypted with SHA256(secret..\":enc:\"..nonce..\":\"..block)");
+  out.push("-- ========== 1. SNAPSHOTS ==========");
+  out.push("local _loadstring_orig = loadstring or load");
+  out.push("local _setfenv_orig = setfenv");
+  out.push("local _getfenv_orig = getfenv");
+  out.push("local _httpget_orig = game and game.HttpGet");
   out.push("");
 
-  out.push("-- ========== STAGE-1 XOR (if key present) ==========");
+  out.push("-- ========== 2. KEY RESOLUTION ==========");
+  out.push("local function _find_key()");
+  out.push("  if FFA_MODE then return \"\" end");
+  out.push("  if LOADER_TOKEN and LOADER_TOKEN ~= \"\" then return \"\" end");
+  out.push("  local g = (getgenv and getgenv()) or _G");
+  out.push("  return g.script_key or g.scriptKey or _G.script_key or \"\"");
+  out.push("end");
+  out.push("local key = _find_key()");
+  out.push("");
+
+  out.push("-- ========== 3. IDENTITY (runtime) ==========");
+  out.push("-- hwid = game:GetService(\"RbxAnalyticsService\"):GetClientId()");
+  out.push("-- executor = identifyexecutor and identifyexecutor() or \"Unknown\"");
+  out.push("");
+
+  out.push("-- ========== 4. ANTI-CRACK ==========");
+  const tools = [];
+  const toolRe = /["'](RemoteSpy|SimpleSpy|Dex|DexExplorer|InfYieldExecuted|SaturnHub|SaladHub|HydroxideRemotes|Hydroxide|oh1|oh2|__SCRIPTKEY_GRABBER|_KEY_LOGGER|__keyhook|__scriptkey|__SCRIPT_KEY|__LOADER_DUMP|__decompile_hook|RemoteSpyV3|UniversalSpy|SecureSpy|KrnlScriptKey|DEX_OUTPUT|__LRM_HOOK|__dumper|__keylog|__dump_loader)["']/gi;
+  let tm;
+  while ((tm = toolRe.exec(code)) !== null) tools.push(tm[1]);
+  const uniqTools = [...new Set(tools.map(x => x))];
+  out.push("local CRACK_BLACKLIST = {");
+  for (const name of (uniqTools.length ? uniqTools : ["RemoteSpy","SimpleSpy","Dex","Hydroxide","__LOADER_DUMP"])) {
+    out.push('  "' + name + '",');
+  }
+  out.push("}");
+  out.push("for _, name in ipairs(CRACK_BLACKLIST) do");
+  out.push("  if _G[name] ~= nil or (getgenv and getgenv()[name] ~= nil) then");
+  out.push("    -- tripwire(\"crack_tool_\" .. name); return");
+  out.push("  end");
+  out.push("end");
+  out.push("");
+
+  out.push("-- ========== 5. STAGE-1 XOR DECRYPT ==========");
+  out.push("local function hex2bin(hex)");
+  out.push("  local out = {}");
+  out.push("  for i = 1, #hex, 2 do out[#out+1] = string.char(tonumber(hex:sub(i,i+1), 16) or 0) end");
+  out.push("  return table.concat(out)");
+  out.push("end");
   out.push("local function faulmor_stage1_xor(ct, keyBytes)");
   out.push("  local plain = {}");
+  out.push("  local kl = #keyBytes");
   out.push("  for i = 1, #ct do");
-  out.push("    local ks = bit32.bxor(keyBytes[((i-1) % #keyBytes)+1], (i*131 + math.floor((i-1)/#keyBytes)) % 256)");
+  out.push("    local kb = string.byte(keyBytes, ((i-1) % kl) + 1)");
+  out.push("    local ks = bit32.bxor(kb, (i * 131 + math.floor((i-1) / kl)) % 256)");
   out.push("    plain[i] = string.char(bit32.bxor(string.byte(ct, i), ks))");
   out.push("  end");
   out.push("  return table.concat(plain)");
   out.push("end");
   out.push("");
 
-  // Try decrypt embedded base64 with discovered key
+  // Attempt decrypt of base64 blobs with stage1 key
+  let decryptedAny = false;
   if (kHex && kHex.length >= 16) {
-    const keyBytes = [];
-    for (let i = 0; i + 1 < kHex.length; i += 2) keyBytes.push(parseInt(kHex.slice(i, i + 2), 16));
-    const b64s = [...code.matchAll(/["']([A-Za-z0-9+/]{64,}={0,2})["']/g)].map(m => m[1]).slice(0, 5);
-    for (const b64 of b64s) {
+    const keyBytes = Buffer.from(kHex.length % 2 ? kHex + "0" : kHex, "hex");
+    const b64s = [...code.matchAll(/["']([A-Za-z0-9+/]{48,}={0,2})["']/g)].map(m => m[1]);
+    for (const b64 of b64s.slice(0, 12)) {
       try {
         const ct = Buffer.from(b64, "base64");
-        if (ct.length < 16) continue;
+        if (ct.length < 12) continue;
         const plain = Buffer.alloc(ct.length);
         for (let i = 0; i < ct.length; i++) {
-          const ks = keyBytes[i % keyBytes.length] ^ (( (i + 1) * 131 + Math.floor(i / keyBytes.length) ) % 256);
+          const kb = keyBytes[i % keyBytes.length];
+          const ks = kb ^ (((i + 1) * 131 + Math.floor(i / keyBytes.length)) % 256);
           plain[i] = ct[i] ^ ks;
         }
         const text = plain.toString("utf8");
-        if (/\b(local|function|return|game)\b/.test(text) && text.length > 20) {
-          out.push("-- decrypted blob (stage1 xor attempt):");
-          out.push("--[[" );
-          out.push(text.slice(0, 8000));
-          out.push("--]]");
+        if (/\b(local|function|return|game|loadstring)\b/.test(text)) {
+          out.push("-- ===== DECRYPTED STAGE-1 PAYLOAD =====");
+          out.push(text.slice(0, 100000));
           out.push("");
+          decryptedAny = true;
           break;
         }
       } catch {}
     }
   }
 
-  // Extract faulmor header lines from source
+  out.push("-- ========== 6. EXEC / HMAC (outline) ==========");
+  out.push("-- secret_key = (FFA_MODE or LOADER_TOKEN ~= \"\") and \"ffa\" or key");
+  out.push("-- secret = \"faulmor:v2:\" .. secret_key .. \":\" .. hwid .. \":\" .. LOADER_HASH");
+  out.push("-- V3/V4: HMAC_SHA256(secret, ts..\":\"..nonce..\":\"..len..\":\"..chk)");
+  out.push("-- V4 stream: XOR with SHA256(secret..\":enc:\"..nonce..\":\"..block)");
+  out.push("-- loadstring(payload); setfenv; __FMOR_HB = \"FMOR_LOADER_OK\"; return fn()");
+  out.push("");
+
   const hdrs = code.match(/--FAULMORV?[0-9]*[^\n]*/g) || [];
   if (hdrs.length) {
-    out.push("-- response header markers found in source:");
-    for (const h of hdrs.slice(0, 5)) out.push("-- " + h);
+    out.push("-- Header markers in source:");
+    for (const h of hdrs.slice(0, 8)) out.push("-- " + h);
     out.push("");
   }
 
-  out.push("-- ========== EXECUTE ==========");
-  out.push("-- fn = _loadstring_orig(payload)");
-  out.push("-- setfenv / newcclosure optional");
-  out.push("-- env.__FMOR_HB = \"FMOR_LOADER_OK\"");
-  out.push("-- return fn()");
-  out.push("");
-  out.push("-- NOTE: Full runtime path needs live HWID + server. This file is static reconstruction only.");
+  if (!decryptedAny) {
+    // Still emit cleaned fragments that look like real Lua from the source
+    const frags = code.match(/(?:^|\n)((?:local|function|return)\s+[^\n]{10,200})/g);
+    if (frags && frags.length) {
+      out.push("-- Lua-like fragments from loader:");
+      for (const f of frags.slice(0, 40)) out.push("-- " + f.replace(/^\n/, "").slice(0, 180));
+      out.push("");
+    }
+  }
+
+  out.push("-- NOTE: Live HWID + server required for full payload. Static pass recovers config + stage1 when key is present.");
   out.push("");
   return out.join("\n");
 }
+
+
 
 
 
