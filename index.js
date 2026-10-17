@@ -4387,7 +4387,7 @@ const helpPages = [
 `**\`.coinflip\`** Flip a coin — win or lose **1 token**.
 
 Regular users start with **10 tokens**/day. Most commands cost **1 token**.
-`.help` · `.find` are free.`
+\`.help\` · \`.find\` are free.`
     ),
   // Yellow premium page — always last
   new EmbedBuilder()
@@ -4422,7 +4422,7 @@ const helpPageBodies = [
   { color: 0x5865F2, text: `**\`.coinflip\`** Flip a coin — win or lose **1 token**.
 
 Regular users start with **10 tokens**/day. Most commands cost **1 token**.
-`.help` · `.find` are free.` },
+\`.help\` · \`.find\` are free.` },
   { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
 
 **\`.redeem\`** [\`.red\`] - Redeem a premium key.
