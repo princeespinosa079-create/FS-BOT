@@ -2802,33 +2802,32 @@ function extractFilesFromHtml(htmlBuffer, sourceName) {
   };
   const decodeEntities = (s) => String(s || "")
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'");
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(parseInt(d, 10)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 
-  // <script> blocks
   try {
     const re = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
     let m;
     while ((m = re.exec(html))) {
       const body = decodeEntities(m[1]).trim();
       if (body.length < 5) continue;
-      const isLua = /\b(local|function|game|workspace|Instance|task\.|FireServer)\b/.test(body);
+      const isLua = /\b(local|function|game|workspace|Instance|task\.|FireServer|getgenv|loadstring)\b/.test(body);
       push(`script_${n + 1}.${isLua ? "lua" : "js"}`, body);
     }
   } catch {}
 
-  // <pre> / <code> / <textarea>
   try {
     const re = /<(pre|code|textarea)\b[^>]*>([\s\S]*?)<\/\1>/gi;
     let m;
     while ((m = re.exec(html))) {
       const body = decodeEntities(m[2]).trim();
       if (body.length < 8) continue;
-      const isLua = /\b(local|function|game|workspace)\b/.test(body);
+      const isLua = /\b(local|function|game|workspace|loadstring)\b/.test(body);
       push(`block_${n + 1}.${isLua ? "lua" : "txt"}`, body);
     }
   } catch {}
 
-  // data-* / inline base64 payloads
   try {
     const re = /(?:data:text\/(?:plain|lua|javascript);base64,|base64[:=]\s*["']?)([A-Za-z0-9+/]{48,}={0,2})/gi;
     let m;
@@ -2843,7 +2842,6 @@ function extractFilesFromHtml(htmlBuffer, sourceName) {
     }
   } catch {}
 
-  // ```lua fences sometimes inside HTML text
   try {
     const re = /```(?:lua|luau)?\s*([\s\S]*?)```/gi;
     let m;
@@ -2854,7 +2852,6 @@ function extractFilesFromHtml(htmlBuffer, sourceName) {
     }
   } catch {}
 
-  // loadstring(...) blobs as standalone files
   try {
     const re = /loadstring\s*\(\s*([`'"])([\s\S]*?)\1\s*\)\s*\(\s*\)/gi;
     let m;
@@ -2865,15 +2862,31 @@ function extractFilesFromHtml(htmlBuffer, sourceName) {
     }
   } catch {}
 
-  // Always keep original HTML too so nothing is lost
+  // href / src pointing at script-like assets (recorded as link list file)
+  try {
+    const links = new Set();
+    const re = /(?:href|src)\s*=\s*["']([^"']+\.(?:lua|luau|txt|js|json)(?:\?[^"']*)?)["']/gi;
+    let m;
+    while ((m = re.exec(html))) links.add(m[1]);
+    const re2 = /https?:\/\/[^\s"'<>]+\.(?:lua|luau|txt)(?:\?[^\s"'<>]*)?/gi;
+    while ((m = re2.exec(html))) links.add(m[0]);
+    if (links.size) {
+      push("links.txt", [...links].join("\n"));
+    }
+  } catch {}
+
+  // Plain text that looks like full Lua page (no tags)
+  if (!/<html[\s>]/i.test(html) && /\b(local|function)\b/.test(html) && html.length > 40) {
+    push("page.lua", html);
+  }
+
   const base = (sourceName && String(sourceName).replace(/[^\w.\-]+/g, "_")) || "export.html";
   push(base.endsWith(".html") || base.endsWith(".htm") ? base : base + ".html", Buffer.from(html, "utf8"));
 
-  // Dedupe by content hash (simple length+prefix)
   const seen = new Set();
   const unique = [];
   for (const f of files) {
-    const key = `${f.data.length}:${f.data.slice(0, 64).toString("hex")}`;
+    const key = f.name + ":" + f.data.length;
     if (seen.has(key)) continue;
     seen.add(key);
     unique.push(f);
@@ -2881,9 +2894,7 @@ function extractFilesFromHtml(htmlBuffer, sourceName) {
   return unique.length ? unique : [{ name: base, data: Buffer.from(html, "utf8") }];
 }
 
-// ============================================================
-// VARIABLE RENAMER — readable renamer (renames only generic/ambiguous names)
-// ============================================================
+
 function renameVariables(source) {
   if (!source || typeof source !== "string") return source;
   const reserved = new Set(["string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber","loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error","warn","print","select","unpack","require","game","workspace","script","bit","bit32","true","false","nil","and","or","not","if","then","else","elseif","end","for","while","do","repeat","until","return","function","local","in","break","self"]);
@@ -4268,7 +4279,7 @@ const helpPages = [
     .setDescription(
 `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.l\`** Luraph Info Dumper — extract seeds, IK dict, function map.
+**\`.l\`** Obfuscator dumper — Luraph + Prometheus / WeAreDevs info.
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.`
     ),
@@ -4320,7 +4331,7 @@ const helpSessions = new Map();
 const helpPageBodies = [
   { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.l\`** Luraph Info Dumper — extract seeds, IK dict, function map.
+**\`.l\`** Obfuscator dumper — Luraph + Prometheus / WeAreDevs info.
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.` },
   { color: 0x5865F2, text: `**\`.et\`** Extract files from zip archives.
@@ -4428,10 +4439,7 @@ client.on("interactionCreate", async interaction => {
         if (!finalOutput || !finalOutput.trim()) throw new Error("Processing returned empty output — try the other rename mode, bro");
         const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
         
-        const randChars = "abcdefghijklmnopqrstuvwxyz";
-        let outputName = "";
-        for (let i = 0; i < 20; i++) outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
-        outputName += ".lua";
+        const outputName = "clean.lua";
         
         // AUTO-REMOVE script loaders & IP loggers
         const uniqueUrls = [...new Set(foundUrls)];
@@ -6118,7 +6126,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .l — Luraph Info Dumper
+  // .l — Obfuscator Info Dumper (Luraph + Prometheus / WeAreDevs)
   // ─────────────────────────────────────────────
   if (/^\.l(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
@@ -6147,92 +6155,167 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     try {
       const code = String(resolved.content || "");
       const isLuraph = /LPH:|_bsdata0\s*=|Luraph|LPH\|/i.test(code) || /\bLPH_[A-Z0-9_]+/.test(code);
-      if (!isLuraph) {
+      const isPrometheus = /getfenv\s+and\s+getfenv\(\)\s*or\s*_ENV/i.test(code)
+        || /return\s*\(\s*function\s*\(\s*\.\.\.\s*\)\s*local\s+\w\s*=\s*\{/i.test(code)
+        || /wearedevs\.net\/obfuscator/i.test(code)
+        || /Prometheus/i.test(code)
+        || (/\b\d{4,7}-\(-?\d{4,7}\)/.test(code) && /string\.char/.test(code) && /bit32\./.test(code));
+
+      if (!isLuraph && !isPrometheus) {
         if (loadingMsg) await loadingMsg.delete().catch(() => {});
         await replyComponentsV2(msg, {
           flags: IS_COMPONENTS_V2,
-          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: "❌ not detected as luraph obfuscator (V2)" }] }]
+          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: "❌ not detected as luraph or prometheus obfuscator" }] }]
         }, { mention: false }).catch(() => {});
         return;
       }
+
       const lines = [];
-      lines.push("### Luraph Info Dump");
+      const kind = isLuraph && isPrometheus ? "Luraph + Prometheus" : isLuraph ? "Luraph" : "Prometheus / WeAreDevs";
+      lines.push("### Obfuscator Info Dump");
+      lines.push(`**Detected:** \`${kind}\``);
       lines.push(`**Size:** \`${code.length}\` bytes`);
 
-      // _bsdata0 blob + seeds
-      const bsMatch = code.match(/_bsdata0\s*=\s*\{\s*"((?:\\[0-9]{1,3}|[^"\\])*)"\s*,\s*(\d+)\s*,\s*(\d+)/);
-      if (bsMatch) {
-        let blobLen = 0;
-        try {
-          const raw = bsMatch[1].replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
-          blobLen = raw.length;
-        } catch { blobLen = Math.floor(bsMatch[1].length / 2); }
-        const s1 = Number(bsMatch[2]);
-        const s2 = Number(bsMatch[3]);
-        lines.push("\n**`_bsdata0` blob**");
-        lines.push(`- length: \`${blobLen}\` bytes`);
-        lines.push(`- seed #1: \`${s1}\` (\`0x${(s1 >>> 0).toString(16).toUpperCase()}\`)`);
-        lines.push(`- seed #2: \`${s2}\` (\`0x${(s2 >>> 0).toString(16).toUpperCase()}\`)`);
-      } else {
-        lines.push("\n**`_bsdata0`:** not found as classic `{blob, seed1, seed2}`");
-      }
-
-      // IK dictionary
-      const ikBlock = code.match(/\bIK\s*=\s*\{([\s\S]{0,4000}?)\}/);
-      if (ikBlock) {
-        const pairs = [...ikBlock[1].matchAll(/\[["']([^"']+)["']\]\s*=\s*["']([^"']*)["']/g)].slice(0, 20);
-        if (pairs.length) {
-          lines.push("\n**String dict (`IK`)**");
-          for (const p of pairs) lines.push(`- \`[${p[1]}]\` → \`${p[2].slice(0, 40)}\``);
-          if (pairs.length >= 20) lines.push("- …");
+      if (isLuraph) {
+        lines.push("\n## Luraph");
+        const bsMatch = code.match(/_bsdata0\s*=\s*\{\s*"((?:\\[0-9]{1,3}|[^"\\])*)"\s*,\s*(\d+)\s*,\s*(\d+)/);
+        if (bsMatch) {
+          let blobLen = 0;
+          try {
+            const raw = bsMatch[1].replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+            blobLen = raw.length;
+          } catch { blobLen = Math.floor(bsMatch[1].length / 2); }
+          const s1 = Number(bsMatch[2]);
+          const s2 = Number(bsMatch[3]);
+          lines.push("**`_bsdata0` blob**");
+          lines.push(`- length: \`${blobLen}\` bytes`);
+          lines.push(`- seed #1: \`${s1}\` (\`0x${(s1 >>> 0).toString(16).toUpperCase()}\`)`);
+          lines.push(`- seed #2: \`${s2}\` (\`0x${(s2 >>> 0).toString(16).toUpperCase()}\`)`);
+        } else {
+          lines.push("**`_bsdata0`:** not found as classic `{blob, seed1, seed2}`");
+        }
+        const ikBlock = code.match(/\bIK\s*=\s*\{([\s\S]{0,4000}?)\}/);
+        if (ikBlock) {
+          const pairs = [...ikBlock[1].matchAll(/\[["']([^"']+)["']\]\s*=\s*["']([^"']*)["']/g)].slice(0, 20);
+          if (pairs.length) {
+            lines.push("**String dict (`IK`)**");
+            for (const pr of pairs) lines.push(`- \`[${pr[1]}]\` → \`${pr[2].slice(0, 40)}\``);
+          }
+        }
+        const fmap = new Map();
+        const reMap = /\[(\d+)\]\s*=\s*([a-zA-Z_][\w.]*(?:\.[a-zA-Z_][\w]*)*)/g;
+        let mm;
+        while ((mm = reMap.exec(code)) !== null) {
+          const idx = mm[1], name = mm[2];
+          if (/^(string|bit32|buffer|table|coroutine|math|utf8|UDim|UDim2|Color3|Vector2|Vector3|Rect|CFrame|Instance|task|debug)\b/.test(name) || name.includes(".")) {
+            if (!fmap.has(idx)) fmap.set(idx, name);
+          }
+          if (fmap.size >= 40) break;
+        }
+        if (fmap.size) {
+          lines.push("**Function map**");
+          for (const [idx, name] of [...fmap.entries()].slice(0, 25)) lines.push(`- \`[${idx}]\` = \`${name}\``);
         }
       }
 
-      // Function mapping [n]=name
-      const fmap = new Map();
-      const reMap = /\[(\d+)\]\s*=\s*([a-zA-Z_][\w.]*(?:\.[a-zA-Z_][\w]*)*)/g;
-      let mm;
-      while ((mm = reMap.exec(code)) !== null) {
-        const idx = mm[1];
-        const name = mm[2];
-        if (/^(string|bit32|buffer|table|coroutine|math|utf8|UDim|UDim2|Color3|Vector2|Vector3|Rect|CFrame|Instance|task|debug)\b/.test(name) || name.includes(".")) {
-          if (!fmap.has(idx)) fmap.set(idx, name);
+      if (isPrometheus) {
+        lines.push("\n## Prometheus / WeAreDevs");
+        if (/wearedevs\.net\/obfuscator/i.test(code)) lines.push("- marker: `wearedevs.net/obfuscator`");
+        if (/getfenv\s+and\s+getfenv\(\)\s*or\s*_ENV/i.test(code)) lines.push("- env hook: `getfenv and getfenv() or _ENV`");
+        if (/return\s*\(\s*function\s*\(\s*\.\.\.\s*\)/i.test(code)) lines.push("- wrapper: `return (function(...)`");
+        // constant / string table candidates
+        const tableMatches = [...code.matchAll(/\blocal\s+([A-Za-z_]\w*)\s*=\s*\{/g)].slice(0, 30);
+        const bigTables = [];
+        for (const tm of tableMatches) {
+          const name = tm[1];
+          const start = code.indexOf("{", tm.index);
+          if (start < 0) continue;
+          let depth = 0, end = -1;
+          for (let k = start; k < Math.min(code.length, start + 120000); k++) {
+            const ch = code[k];
+            if (ch === "{") depth++;
+            else if (ch === "}") {
+              depth--;
+              if (depth === 0) { end = k; break; }
+            }
+          }
+          if (end < 0) continue;
+          const slice = code.slice(start, end + 1);
+          if (slice.length < 80) continue;
+          const strCount = (slice.match(/"[^"]{3,}"/g) || []).length;
+          const numesc = (slice.match(/\\[0-9]{2,3}/g) || []).length;
+          if (strCount >= 5 || numesc >= 20 || slice.length > 500) {
+            bigTables.push({ name, len: slice.length, strCount, numesc });
+          }
         }
-        if (fmap.size >= 40) break;
-      }
-      if (fmap.size) {
-        lines.push("\n**Function map**");
-        for (const [idx, name] of [...fmap.entries()].slice(0, 30)) {
-          lines.push(`- \`[${idx}]\` = \`${name}\``);
+        bigTables.sort((a, b) => b.len - a.len);
+        if (bigTables.length) {
+          lines.push("**Constant / string tables**");
+          for (const bt of bigTables.slice(0, 8)) {
+            lines.push(`- \`${bt.name}\` — ${bt.len} chars, ~${bt.strCount} strings, ~${bt.numesc} numeric escapes`);
+          }
         }
-        if (fmap.size > 30) lines.push("- …");
+        // string.char packs
+        const charPacks = [...code.matchAll(/string\.char\s*\(\s*((?:\d+\s*,\s*){4,}\d+)\s*\)/g)].slice(0, 15);
+        if (charPacks.length) {
+          lines.push("**`string.char` packs**");
+          for (const cp of charPacks) {
+            try {
+              const nums = cp[1].split(",").map(s => parseInt(s.trim(), 10)).filter(n => n >= 0 && n <= 255);
+              const decoded = String.fromCharCode(...nums);
+              if (/[\x20-\x7e]{4,}/.test(decoded)) lines.push(`- \`${decoded.slice(0, 60).replace(/`/g, "'")}\``);
+            } catch {}
+          }
+        }
+        // numeric-escape strings
+        const escStrs = [...code.matchAll(/"((?:\\[0-9]{2,3}){6,})"/g)].slice(0, 12);
+        if (escStrs.length) {
+          lines.push("**Numeric-escape strings**");
+          for (const es of escStrs) {
+            try {
+              const decoded = es[1].replace(/\\([0-9]{2,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+              const printable = decoded.replace(/[^\x20-\x7e]/g, ".");
+              if (printable.replace(/\./g, "").length >= 3) lines.push(`- \`${printable.slice(0, 70)}\``);
+            } catch {}
+          }
+        }
+        // readable plain strings
+        const plain = new Set();
+        const reStr = /"([^"\\]{4,60})"/g;
+        let sm;
+        while ((sm = reStr.exec(code)) !== null) {
+          const s = sm[1];
+          if (/[a-zA-Z]{3,}/.test(s) && !/^\\[0-9]/.test(s)) plain.add(s);
+          if (plain.size >= 12) break;
+        }
+        if (plain.size) {
+          lines.push("**Readable strings**");
+          for (const s of [...plain].slice(0, 10)) lines.push(`- \`${s.replace(/`/g, "'")}\``);
+        }
       }
 
-      // readable strings
-      const strs = new Set();
-      const reStr = /"([^"\\]{4,80})"/g;
-      let sm;
-      while ((sm = reStr.exec(code)) !== null) {
-        const s = sm[1];
-        if (/[a-zA-Z]{3,}/.test(s) && !/^\\[0-9]/.test(s) && s.length < 80) strs.add(s);
-        if (strs.size >= 15) break;
-      }
-      if (strs.size) {
-        lines.push("\n**Readable strings**");
-        for (const s of [...strs].slice(0, 12)) lines.push(`- \`${s.replace(/`/g, "'")}\``);
-      }
-
-      lines.push("\n⚠️ This is NOT a full deobfuscator — only extracts readable info. Luraph requires VM emulation to fully decrypt.");
+      lines.push("\n⚠️ This is NOT a full deobfuscator — only extracts readable info. Full decrypt needs VM / trace emulation.");
 
       const previewLines = code.split("\n").slice(0, 5).join("\n");
       let body = "### File Preview\n```lua\n" + previewLines.slice(0, 800) + "\n```\n\n" + lines.join("\n");
       body = body.slice(0, 3900);
+      const dumpName = "dump.lua";
+      const dumpFile = new AttachmentBuilder(Buffer.from(lines.join("\n"), "utf8"), { name: dumpName });
 
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       pendingTokenLine.delete(String(msg.author.id));
       await replyComponentsV2(msg, {
         flags: IS_COMPONENTS_V2,
-        components: [{ type: 17, accent_color: RENAME_V2_ACCENT, components: [{ type: 10, content: body }] }]
+        files: [dumpFile],
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [
+            { type: 10, content: body },
+            { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+            { type: 13, file: { url: "attachment://" + dumpName } }
+          ]
+        }]
       }, { mention: false }).catch(() => {});
     } catch (e) {
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
@@ -6247,7 +6330,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   // ─────────────────────────────────────────────
 
   // .et — carousel mode
-  if (/^\.et(?:\s|$)/i.test(txt)) {
+  if (/^\.et(?:\s|$)/i.test(txt) || /^\.extract(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
@@ -6258,38 +6341,66 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     if (isDM && !perm.isBuyer) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
+
+    const argUrl = (txt.split(/\s+/)[1] || "").trim();
     let attachments = await attachmentsFromMsgOrReply(msg, a => isZipFile(a.name || a.filename, a.contentType) || isHtmlFile(a.name || a.filename, a.contentType));
     if (!attachments.length && msg.reference?.messageId) {
       const any = await attachmentsFromMsgOrReply(msg, null);
       attachments = any.filter(a => isZipFile(a.name || a.filename, a.contentType) || isHtmlFile(a.name || a.filename, a.contentType));
     }
-    if (!attachments.length) {
-      replyUser(msg, "❌ upload a .zip or .html file or reply to one, dumbass.").catch(() => {});
-      return;
-    }
-    const sourceFile = attachments[0];
-    if (isZipFile(sourceFile.name, sourceFile.contentType) && !isOwner(msg.author.id)) {
-      replyUser(msg, "❌ .zip is owner only, dumbass.").catch(() => {});
-      return;
-    }
-    const maxInfo = getMaxFileSize(msg.guild);
-    if (sourceFile.size > maxInfo.size) {
-      replyUser(msg, `❌ max file is ${maxInfo.label}, lol.`).catch(() => {});
-      return;
-    }
+
     const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
     try {
-      const buf = await downloadURL(sourceFile.url);
-      let files;
-      if (isHtmlFile(sourceFile.name, sourceFile.contentType)) {
-        // Standalone HTML — extract ALL embedded scripts / code / base64 + original
-        files = extractFilesFromHtml(buf, sourceFile.name);
+      let files = [];
+      // URL → fetch page HTML and extract embedded scripts / links
+      if (!attachments.length && /^https?:\/\//i.test(argUrl)) {
+        const res = await fetch(argUrl, {
+          headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html,application/xhtml+xml,*/*" },
+          redirect: "follow"
+        });
+        if (!res.ok) throw new Error("failed to fetch URL (" + res.status + ")");
+        const ct = String(res.headers.get("content-type") || "").toLowerCase();
+        const buf = Buffer.from(await res.arrayBuffer());
+        const nameGuess = argUrl.split("/").pop()?.split("?")[0] || "page.html";
+        if (ct.includes("zip") || /\.zip$/i.test(nameGuess)) {
+          if (!isOwner(msg.author.id)) throw new Error(".zip is owner only");
+          files = extractFilesFromZip(buf);
+        } else {
+          files = extractFilesFromHtml(buf, nameGuess.endsWith(".html") || nameGuess.endsWith(".htm") ? nameGuess : "page.html");
+        }
+      } else if (attachments.length) {
+        const sourceFile = attachments[0];
+        if (isZipFile(sourceFile.name, sourceFile.contentType) && !isOwner(msg.author.id)) {
+          throw new Error(".zip is owner only");
+        }
+        const maxInfo = getMaxFileSize(msg.guild);
+        if (sourceFile.size > maxInfo.size) throw new Error("max file is " + maxInfo.label);
+        const buf = await downloadURL(sourceFile.url);
+        if (isHtmlFile(sourceFile.name, sourceFile.contentType)) {
+          files = extractFilesFromHtml(buf, sourceFile.name);
+        } else {
+          files = extractFilesFromZip(buf);
+        }
       } else {
-        files = extractFilesFromZip(buf);
+        // Reply text that looks like HTML
+        let htmlText = null;
+        if (msg.reference?.messageId) {
+          try {
+            const ref = await msg.channel.messages.fetch(msg.reference.messageId).catch(() => null);
+            if (ref?.content && /<\/?[a-z][\s\S]*>/i.test(ref.content)) htmlText = ref.content;
+          } catch {}
+        }
+        if (!htmlText && /<\/?[a-z][\s\S]*>/i.test(msg.content || "")) {
+          htmlText = msg.content.replace(/^\.et(?:\s|$)/i, "").replace(/^\.extract(?:\s|$)/i, "").trim();
+        }
+        if (htmlText && htmlText.length > 20) {
+          files = extractFilesFromHtml(Buffer.from(htmlText, "utf8"), "message.html");
+        }
       }
+
       if (!files.length) {
         if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, "❌ file is empty or has no extractable content, bro.").catch(() => {});
+        replyUser(msg, "❌ upload a .zip / .html file, reply to one, or use `.et <url>` for a website page.").catch(() => {});
         return;
       }
       if (sentMsg) await sentMsg.delete().catch(() => {});
@@ -6304,16 +6415,17 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
       if (carouselMsg) {
         extractCarouselMenus.set(msg.author.id, {
-          files, index: 0, sourceType: "zip",
+          files, index: 0, zipType: "zip",
           messageId: carouselMsg.id, authorId: msg.author.id, createdAt: Date.now()
         });
       }
     } catch (e) {
       if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ error: ${e.message}`).catch(() => {});
+      replyUser(msg, `❌ error: ${String(e.message || e).slice(0, 150)}`).catch(() => {});
     }
     return;
   }
+
   // .clean / .cl — clean comments/loaders/IP loggers
   if (/^\.(?:clean|cl)$/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
@@ -6362,10 +6474,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (!finalOutput || !finalOutput.trim()) throw new Error("empty output after clean");
 
       const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
-      const randChars = "abcdefghijklmnopqrstuvwxyz";
-      let outputName = "";
-      for (let i = 0; i < 20; i++) outputName += randChars.charAt(Math.floor(Math.random() * randChars.length));
-      outputName += ".lua";
+      const outputName = "clean.lua";
 
       const uniqueUrls = [...new Set(foundUrls)];
       const previewText = buildPreviewText(finalOutput);
