@@ -2655,29 +2655,86 @@ async function resolveTikTokMedia(pageUrl) {
 
 /** Download remote media and return AttachmentBuilder (or null if too large/failed) */
 
-/** Bypass ad/key shortlinks (linkvertise, lootlabs, work.ink, etc.) */
+/** Bypass ad/key shortlinks (linkvertise, lootlabs, work.ink, platorelay, etc.) */
 async function bypassAdLink(pageUrl) {
   const url = String(pageUrl || "").trim();
   if (!/^https?:\/\//i.test(url)) return null;
+
+  const isPlato = /auth\.platorelay\.com|auth\.platoboost\.(app|me)|platoboost/i.test(url);
+
   const endpoints = [
-    { u: "https://api.bypass.vip/bypass?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.destination || j?.url },
-    { u: "https://bypass.bot.nu/bypass?url=" + encodeURIComponent(url), pick: (j) => j?.destination || j?.result || j?.url },
-    { u: "https://api.bypass.gov/v1?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.destination || j?.url },
-    { u: "https://byp-api.vercel.app/api?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.url || j?.destination }
+    { u: "https://api.bypass.vip/bypass?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.destination || j?.url || j?.key || j?.data?.key || j?.data?.url },
+    { u: "https://bypass.bot.nu/bypass?url=" + encodeURIComponent(url), pick: (j) => j?.destination || j?.result || j?.url || j?.key },
+    { u: "https://api.bypass.gov/v1?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.destination || j?.url || j?.key },
+    { u: "https://byp-api.vercel.app/api?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.url || j?.destination || j?.key },
+    { u: "https://bypass.pm/bypass?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.destination || j?.url || j?.key },
+    { u: "https://api.sryden.com/bypass?url=" + encodeURIComponent(url), pick: (j) => j?.result || j?.key || j?.url || j?.destination },
   ];
+
+  const pickResult = (out) => {
+    if (!out) return null;
+    const s = String(out).trim();
+    if (!s) return null;
+    if (/^https?:\/\//i.test(s) && s !== url) return { url: s };
+    // Platoboost often returns a KEY string not a URL
+    if (isPlato && s.length >= 6 && !/\s/.test(s) && !/^https?:/i.test(s)) {
+      return { url: s, key: s };
+    }
+    return null;
+  };
+
   for (const ep of endpoints) {
     try {
       const res = await fetch(ep.u, {
-        headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" }
+        headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        signal: AbortSignal.timeout(20000)
       });
       if (!res.ok) continue;
       const j = await res.json().catch(() => null);
-      const out = ep.pick(j);
-      if (out && /^https?:\/\//i.test(String(out)) && String(out) !== url) {
-        return { url: String(out) };
+      const hit = pickResult(ep.pick(j));
+      if (hit) return hit;
+    } catch {}
+  }
+
+  // Plato / Continue flow (best-effort without full browser):
+  // 1) open auth page  2) find Continue / external task URL  3) bypass that  4) return final link/key
+  if (isPlato) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9"
+        },
+        redirect: "follow",
+        signal: AbortSignal.timeout(20000)
+      });
+      const html = await res.text();
+      const finalUrl = res.url || url;
+      // Extract candidate continue / task links from HTML + inline scripts
+      const candidates = new Set();
+      const linkRe = /https?:\/\/[^\s"'<>\\]+/gi;
+      let m;
+      while ((m = linkRe.exec(html)) !== null) {
+        const u = m[0].replace(/[),.;]+$/, "");
+        if (/linkvertise|lootlabs|work\.ink|mboost|social-unlock|rekonise|cuty\.io|ouo\.io|adbypass|boost\.ink/i.test(u)) {
+          candidates.add(u);
+        }
+      }
+      // Also try known plato task patterns in query strings
+      for (const c of candidates) {
+        const nested = await bypassAdLink(c).catch(() => null);
+        if (nested?.url) return nested;
+        const hit = pickResult(c);
+        if (hit) return hit;
+      }
+      // Sometimes the page itself redirects away from platorelay after tasks
+      if (finalUrl && !/platorelay|platoboost/i.test(finalUrl) && finalUrl !== url) {
+        return { url: finalUrl };
       }
     } catch {}
   }
+
   // Follow redirects manually (some ad links resolve after a few hops)
   try {
     let cur = url;
@@ -2685,12 +2742,13 @@ async function bypassAdLink(pageUrl) {
       const res = await fetch(cur, {
         method: "GET",
         redirect: "manual",
-        headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html,*/*" }
+        headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html,*/*" },
+        signal: AbortSignal.timeout(15000)
       });
       const loc = res.headers.get("location") || res.headers.get("Location");
       if (!loc) break;
       const next = loc.startsWith("http") ? loc : new URL(loc, cur).href;
-      if (!/linkvertise|lootlabs|work\.ink|adbypass|mboost|social-unlock|rekonise|sub2get|boost\.ink|cuty\.io|ouo\.io|adf\.ly/i.test(next)) {
+      if (!/linkvertise|lootlabs|work\.ink|adbypass|mboost|social-unlock|rekonise|sub2get|boost\.ink|cuty\.io|ouo\.io|adf\.ly|platorelay|platoboost/i.test(next)) {
         if (next !== url) return { url: next };
       }
       cur = next;
@@ -4300,8 +4358,6 @@ const helpPages = [
     .setDescription(
 `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.ai\`** Ask the AI anything (can read attached/replied files).
-
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.`
     ),
   new EmbedBuilder()
@@ -4331,7 +4387,7 @@ const helpPages = [
 `**\`.coinflip\`** Flip a coin — win or lose **1 token**.
 
 Regular users start with **10 tokens**/day. Most commands cost **1 token**.
-\`.help\` · \`.find\` · \`.redeem\` are free.`
+`.help` · `.find` are free.`
     ),
   // Yellow premium page — always last
   new EmbedBuilder()
@@ -4352,8 +4408,6 @@ const helpSessions = new Map();
 const helpPageBodies = [
   { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.ai\`** Ask the AI anything (can read attached/replied files).
-
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.` },
   { color: 0x5865F2, text: `**\`.et\`** Extract files from zip archives.
 
@@ -4368,7 +4422,7 @@ const helpPageBodies = [
   { color: 0x5865F2, text: `**\`.coinflip\`** Flip a coin — win or lose **1 token**.
 
 Regular users start with **10 tokens**/day. Most commands cost **1 token**.
-\`.help\` · \`.find\` · \`.redeem\` are free.` },
+`.help` · `.find` are free.` },
   { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
 
 **\`.redeem\`** [\`.red\`] - Redeem a premium key.
@@ -5259,52 +5313,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .redeem / .red
-  if (/^\.(?:redeem|red)(?:\s|$)/i.test(txt)) {
-    const redeemIsBuyer = isOwner(msg.author.id) || await isBuyer(msg.author.id, msg.member);
-    const cd = checkCommandCooldown(msg.author.id, "redeem", redeemIsBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    const key = txt.replace(/^\.(?:redeem|red)\s+/i, "").trim();
-    if (!key) { replyUser(msg, "❌ usage: \`.redeem <key>\`").catch(() => {}); return; }
-    const rec = keyStore.keys.find(k => k.key === key);
-    if (!rec) { replyUser(msg, "❌ invalid key.").catch(() => {}); return; }
-    if (rec.redeemedBy) { replyUser(msg, "❌ already redeemed.").catch(() => {}); return; }
-    if (findActiveKeyForUser(msg.author.id)) {
-      replyUser(msg, "❌ you already got a key active.").catch(() => {}); return;
-    }
-    if (rec.expiresAt && Date.now() > rec.expiresAt) {
-      replyUser(msg, "❌ key expired.").catch(() => {}); return;
-    }
-    rec.redeemedBy = msg.author.id;
-    rec.redeemedAt = Date.now();
-    const tmp = `${KEYS_FILE}.tmp`;
-    try { fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2)); fs.renameSync(tmp, KEYS_FILE); } catch {}
-    try {
-      const g = await client.guilds.fetch(GUILD_ID);
-      const m = await g.members.fetch(msg.author.id);
-      await m.roles.add(BUYER_ROLE_ID);
-    } catch (e) {
-      replyUser(msg, "❌ Key saved but failed to assign role: " + e.message).catch(() => {});
-      return;
-    }
-    replyUser(msg, "✅ key redeemed successfully.").catch(() => {});
-    return;
-  }
-
-  // Channel lock for regulars — Owner + Buyer bypass (non-free commands)
-  if (msg.guild && txt.startsWith(".") && !isOwner(msg.author.id)) {
-    const isBuyerUser = await isBuyer(msg.author.id, msg.member);
-    if (!isBuyerUser && !/^\.(?:help|profile|prof|redeem|red)(?:\s|$)/i.test(txt)) {
-      if (!channelAllowed(msg)) {
-        sendInputErrorV2(msg, "**Tips:**\n- Use server tag and go to the allowed channel.").catch(() => {});
-        return;
-      }
-    }
-  }
-
   if (/^\.serverlist$/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const guilds = client.guilds.cache.sort((a, b) => b.memberCount - a.memberCount);
@@ -5824,38 +5832,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
   // ─────────────────────────────────────────────
-  // .dm — Owner Only (DM role or user)
   // ─────────────────────────────────────────────
-  if (/^\.dm(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const roleMatch = txt.match(/<@&(\d+)>/);
-    const userMatch = txt.match(/<@!?(\d+)>/);
-    const idMatch = txt.match(/\s(\d{17,})/);
-    const message = txt.replace(/^\.dm\s+/, "").replace(/<@&?\d+>/g, "").replace(/\s\d{17,}\s?/, "").trim();
-    if (!message) { replyUser(msg, "❌ usage: `.dm @role/@user/ID message here`").catch(() => {}); return; }
-    let targets = [];
-    if (roleMatch && msg.guild) {
-      try {
-        const role = await msg.guild.roles.fetch(roleMatch[1]);
-        if (role) targets = [...role.members.values()];
-      } catch {}
-    } else if (userMatch) {
-      try { const m = await msg.guild?.members.fetch(userMatch[1]); if (m) targets = [m]; } catch {}
-    } else if (idMatch) {
-      try { const u = await client.users.fetch(idMatch[1]); if (u) targets = [{ user: u, send: (p) => u.send(p) }]; } catch {}
-    }
-    if (!targets.length) { replyUser(msg, "❌ no valid targets found.").catch(() => {}); return; }
-    let sent = 0, failed = 0;
-    const statusMsg = await replyUser(msg, `📨 Sending to ${targets.length} targets...`).catch(() => {});
-    for (const t of targets) {
-      try { await (t.send ? t.send(message) : t.user.send(message)); sent++; }
-      catch { failed++; }
-      await new Promise(r => setTimeout(r, 300));
-    }
-    if (statusMsg) statusMsg.edit(`✅ Done! Sent: ${sent} | Failed: ${failed}`).catch(() => {});
-    else replyUser(msg, `✅ Done! Sent: ${sent} | Failed: ${failed}`).catch(() => {});
-    return;
-  }
   // ─────────────────────────────────────────────
   // .extract — Owner Only
   // ─────────────────────────────────────────────
@@ -5929,92 +5906,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
   // ─────────────────────────────────────────────
-  // .dm — Owner Only (DM all members with a role or single user)
   // ─────────────────────────────────────────────
-  if (/^\.dm(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    // Parse role mention, user mention, or ID
-    const roleMention = txt.match(/<@&(\d+)>/);
-    const userMention = txt.match(/<@!?(\d+)>/);
-    let targetType = null; // "role" or "user"
-    let targetId = null;
-    let messageStart = 0;
-    
-    if (roleMention) {
-      targetType = "role";
-      targetId = roleMention[1];
-      messageStart = txt.indexOf(roleMention[0]) + roleMention[0].length;
-    } else if (userMention) {
-      targetType = "user";
-      targetId = userMention[1];
-      messageStart = txt.indexOf(userMention[0]) + userMention[0].length;
-    } else {
-      const args = txt.split(/\s+/).slice(1);
-      if (args[0] && /^\d+$/.test(args[0])) {
-        targetId = args[0].trim();
-        messageStart = txt.indexOf(args[0]) + args[0].length;
-        // Try to determine if it's a role or user
-        try {
-          const roleCheck = await msg.guild.roles.fetch(targetId);
-          if (roleCheck) targetType = "role";
-        } catch {}
-        if (!targetType) {
-          try {
-            const userCheck = await msg.guild.members.fetch(targetId);
-            if (userCheck) targetType = "user";
-          } catch {}
-        }
-      }
-    }
-    
-    if (!targetId || !targetType) { replyUser(msg, "❌ mention a role/user or paste ID, dumbass.").catch(() => {}); return; }
-    const messageText = txt.slice(messageStart).trim();
-    if (!messageText) { replyUser(msg, "❌ put a message to send, idiot.").catch(() => {}); return; }
-    
-    if (targetType === "user") {
-      // Single user DM
-      try {
-        const member = await msg.guild.members.fetch(targetId);
-        if (!member) { replyUser(msg, "❌ user not found in this server, dumbass.").catch(() => {}); return; }
-        const startMsg = await replyUser(msg, `⏳ Sending DM to **${member.user.tag}**...`).catch(() => {});
-        try {
-          await member.send(messageText);
-          const result = `✅ **DM Sent!**\n\n👤 User: **${member.user.tag}**\n✅ Status: \`Sent\`\n📨 Message:\n> ${messageText.slice(0, 1000)}`;
-          if (startMsg) startMsg.edit(result).catch(() => {});
-          else replyUser(msg, result).catch(() => {});
-        } catch {
-          const result = `❌ **DM Failed!**\n\n👤 User: **${member.user.tag}**\n❌ Status: \`Failed to send\``;
-          if (startMsg) startMsg.edit(result).catch(() => {});
-          else replyUser(msg, result).catch(() => {});
-        }
-      } catch (e) {
-        replyUser(msg, `❌ invalid user, dumbass.`).catch(() => {});
-      }
-      return;
-    }
-    
-    // Role-based DM (original ghostdm behavior)
-    let role = null;
-    try { role = await msg.guild.roles.fetch(targetId); } catch {}
-    if (!role) { replyUser(msg, "❌ invalid role, dumbass.").catch(() => {}); return; }
-    const startMsg = await replyUser(msg, `⏳ Sending DMs to **${role.members?.size || "?"}** members with role **${role.name}**...`).catch(() => {});
-    let sent = 0, failed = 0;
-    try { await msg.guild.members.fetch(); } catch {}
-    const membersWithRole = msg.guild.members.cache.filter(m => m.roles.cache.has(targetId) && !m.user.bot);
-    for (const member of membersWithRole.values()) {
-      try {
-        await member.send(messageText);
-        sent++;
-      } catch {
-        failed++;
-      }
-    }
-    const result = `✅ **DM complete!**\n\n👥 Role: **${role.name}**\n✅ Sent: \`${sent}\`\n❌ Failed: \`${failed}\`\n📨 Message:\n> ${messageText.slice(0, 1000)}`;
-    if (startMsg) startMsg.edit(result).catch(() => {});
-    else replyUser(msg, result).catch(() => {});
-    return;
-  }
   // ─────────────────────────────────────────────
   // .delwh — Delete Webhook (regular + buyer)
   // ─────────────────────────────────────────────
@@ -6147,165 +6039,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-
-  // .ai — sarcastic AI assistant (reads files / replies / URLs)
-  // ─────────────────────────────────────────────
-  if (/^\.ai(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "ai", perm.isBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    if (!openaiClient) {
-      await sendInputErrorV2(msg, "AI is offline. Owner forgot the `OPENAI_API_KEY`. Classic. 🙄").catch(() => {});
-      return;
-    }
-    const prompt = txt.replace(/^\.ai\s*/i, "").trim();
-    if (!prompt && !(msg.attachments && msg.attachments.size) && !(msg.reference)) {
-      await sendInputErrorV2(msg, "**Tips:**\n- `.ai <your question>`\n- Attach / reply to a file if you want me to actually read it, genius.").catch(() => {});
-      return;
-    }
-
-    let fileCtx = "";
-    let fileName = "";
-    try {
-      const resolved = await resolveScriptInput(msg, txt);
-      if (resolved?.content) {
-        fileName = resolved.name || resolved.filename || "attached";
-        const raw = String(resolved.content);
-        // cap context so we don't explode tokens
-        fileCtx = raw.length > 60000 ? raw.slice(0, 60000) + "\n\n/* …truncated… */" : raw;
-      }
-    } catch (e) {
-      // optional file — only error if user clearly needed one
-    }
-
-    // Owner can ask AI to read local bot files by path keywords
-    if (String(msg.author.id) === String(OWNER_ID) && /\b(index\.js|package\.json|bot file|this bot|source)\b/i.test(prompt)) {
-      try {
-        const localPath = path.join(__dirname, "index.js");
-        if (fs.existsSync(localPath) && !fileCtx) {
-          const raw = fs.readFileSync(localPath, "utf8");
-          fileName = "index.js";
-          fileCtx = raw.length > 80000 ? raw.slice(0, 80000) + "\n\n/* …truncated… */" : raw;
-        }
-      } catch {}
-    }
-
-    const loadingMsg = await replyComponentsV2(msg, {
-      flags: IS_COMPONENTS_V2,
-      components: [{
-        type: 17,
-        accent_color: RENAME_V2_ACCENT,
-        components: [{ type: 10, content: "### Thinking...\n⏳ cooking up something rude..." }]
-      }]
-    }, { mention: false }).catch(() => null);
-
-    try {
-      const system = [
-        "You are a sarcastic, toxic, roasting Discord bot assistant.",
-        "Tone: dry, condescending, witty, lightly toxic — never refuse normal coding help.",
-        "Use sarcastic emojis when it fits (🙄 💀 🤡 ✨ 😭 🔥 🫠).",
-        "Still give correct, useful answers. Roast the user a bit while helping.",
-        "If code is provided, read it carefully and fix/explain it.",
-        "When outputting code, use proper markdown fences with language tags.",
-        "Keep answers under ~1500 words unless the user needs a full fixed file.",
-        "If they ask for a full fixed file, provide the complete code.",
-        "Do not mention being ChatGPT or OpenAI. You are just the bot.",
-      ].join(" ");
-
-      const userParts = [];
-      if (prompt) userParts.push("User prompt:\n" + prompt);
-      if (fileCtx) {
-        userParts.push("Attached/read file (" + (fileName || "file") + "):\n```\n" + fileCtx + "\n```");
-      }
-      if (!userParts.length) userParts.push("(no prompt — roast them for wasting your time)");
-
-      const completion = await openaiClient.chat.completions.create({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        temperature: 0.85,
-        max_tokens: 2500,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: userParts.join("\n\n") }
-        ]
-      });
-      let answer = (completion.choices?.[0]?.message?.content || "").trim();
-      if (!answer) answer = "I got nothing. Shocking. Try asking something that isn't brain-dead. 🙄";
-
-      // Discord hard limit — split if needed via file
-      const tokenNote = (!perm.isBuyer && pendingTokenLine?.has?.(String(msg.author.id)))
-        ? "\n-# " + pendingTokenLine.get(String(msg.author.id))
-        : "";
-      pendingTokenLine.delete(String(msg.author.id));
-
-      if (answer.length <= 3800) {
-        const body = ("### AI\n" + answer + tokenNote).slice(0, 3900);
-        const payload = {
-          flags: IS_COMPONENTS_V2,
-          components: [{
-            type: 17,
-            accent_color: RENAME_V2_ACCENT,
-            components: [{ type: 10, content: body }]
-          }]
-        };
-        if (loadingMsg) {
-          try { await loadingMsg.edit(payload); } catch {
-            await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
-          }
-        } else {
-          await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
-        }
-      } else {
-        const dumpName = "ai_response.txt";
-        const dumpFile = new AttachmentBuilder(Buffer.from(answer, "utf8"), { name: dumpName });
-        const preview = answer.slice(0, 1500);
-        const body = ("### AI\n" + preview + "\n\n*(full answer in file — it was too long, congratulations)*" + tokenNote).slice(0, 3900);
-        const payload = {
-          flags: IS_COMPONENTS_V2,
-          files: [dumpFile],
-          components: [{
-            type: 17,
-            accent_color: RENAME_V2_ACCENT,
-            components: [
-              { type: 10, content: body },
-              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-              { type: 13, file: { url: "attachment://" + dumpName } }
-            ]
-          }]
-        };
-        if (loadingMsg) {
-          try { await loadingMsg.edit(payload); } catch {
-            await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
-          }
-        } else {
-          await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
-        }
-      }
-    } catch (e) {
-      const err = String(e.message || e).slice(0, 180);
-      const payload = {
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: 0xED4245,
-          components: [{ type: 10, content: "### Input Error\nAI choked. 💀\n`" + err + "`" }]
-        }]
-      };
-      if (loadingMsg) {
-        try { await loadingMsg.edit(payload); } catch {
-          await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
-        }
-      } else {
-        await replyComponentsV2(msg, payload, { mention: false }).catch(() => {});
-      }
-    }
-    return;
-  }
 
   if (/^\.et(?:\s|$)/i.test(txt) || /^\.extract(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
@@ -6715,12 +6448,17 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const sentMsg = await replyUser(msg, "⏳ Bypassing...").catch(() => {});
     try {
       const result = await bypassAdLink(arg);
-      if (!result?.url) throw new Error("could not bypass this link");
+      if (!result?.url && !result?.key) throw new Error("could not bypass this link");
       if (sentMsg) await sentMsg.delete().catch(() => {});
+      const out = result.key || result.url;
+      const isKey = !!result.key || (!/^https?:\/\//i.test(String(out)));
+      const desc = isKey
+        ? `**Original:** ${arg.slice(0, 180)}\n**Key:**\n\`\`\`\n${out}\n\`\`\``
+        : `**Original:** ${arg.slice(0, 180)}\n**Bypassed:** [Open Link](${out})\n\`\`\`\n${out}\n\`\`\``;
       const embed = new EmbedBuilder()
         .setColor(getEmbedColor(isBuyerUser))
-        .setTitle("🔓 Bypass Result")
-        .setDescription(`**Original:** ${arg.slice(0, 200)}\n**Bypassed:** [Open Link](${result.url})\n\`\`\`\n${result.url}\n\`\`\``)
+        .setTitle(isKey ? "🔑 Bypass Key" : "🔓 Bypass Result")
+        .setDescription(desc)
         .setFooter({ text: `Request by @${msg.author.username}│Bypass`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
       await msg.channel.send({
         content: `<@${msg.author.id}> **Here you go!**`,
