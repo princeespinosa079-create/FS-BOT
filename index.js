@@ -1577,7 +1577,6 @@ function deobfuscatePrometheus(source) {
     try {
       let e = String(expr).replace(/\s+/g, "");
       if (!/^[-+0-9()]+$/.test(e)) return null;
-      // safe integer eval
       const v = Function('"use strict"; return (' + e + ");")();
       return typeof v === "number" && Number.isFinite(v) ? (v | 0) : null;
     } catch { return null; }
@@ -1587,160 +1586,208 @@ function deobfuscatePrometheus(source) {
       return String(s).replace(/\\([0-9]{1,3})/g, (_, n) => String.fromCharCode(parseInt(n, 10) & 255));
     } catch { return s; }
   };
-  const isPrintable = (s) => typeof s === "string" && /^[\x09\x0a\x0d\x20-\x7e]*$/.test(s);
 
-  // ── Pass 1: extract & decode primary string table ──
-  const tableMatch = code.match(/local\s+([A-Za-z_]\w*)\s*=\s*\{/);
-  const tableVar = tableMatch ? tableMatch[1] : null;
-  const rawEntries = [];
-  const escRe = /"((?:\\[0-9]{1,3})*)"/g;
-  let m;
-  // Prefer entries inside first big table
-  let searchRegion = code;
-  if (tableVar) {
-    const start = code.indexOf(tableMatch[0]);
+  // ── 1) Extract primary string table (first local X={...} with many \ddd strings) ──
+  let tableVar = null;
+  let rawEntries = [];
+  const tableHead = code.match(/local\s+([A-Za-z_]\w*)\s*=\s*\{/);
+  if (tableHead) {
+    tableVar = tableHead[1];
+    const start = code.indexOf(tableHead[0]);
     const brace = code.indexOf("{", start);
     let depth = 0, end = -1;
-    for (let k = brace; k < code.length && k < brace + 500000; k++) {
-      if (code[k] === "{") depth++;
-      else if (code[k] === "}") { depth--; if (depth === 0) { end = k; break; } }
+    for (let k = brace; k < code.length && k < brace + 800000; k++) {
+      const ch = code[k];
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) { end = k; break; }
+      }
     }
-    if (end > brace) searchRegion = code.slice(brace, end + 1);
+    if (end > brace) {
+      const region = code.slice(brace + 1, end);
+      const parts = [];
+      let cur = "";
+      let inStr = false;
+      for (let i = 0; i < region.length; i++) {
+        const ch = region[i];
+        if (ch === "\\" && inStr) { cur += ch + (region[i + 1] || ""); i++; continue; }
+        if (ch === '"') { inStr = !inStr; cur += ch; continue; }
+        if (!inStr && (ch === "," || ch === ";")) { parts.push(cur); cur = ""; continue; }
+        cur += ch;
+      }
+      if (cur.trim()) parts.push(cur);
+      for (const part of parts) {
+        const sm = part.match(/"((?:\\[0-9]{1,3}|[^"\\])*)"/);
+        if (sm) rawEntries.push(decodeNumEsc(sm[1]));
+        else if (/^\s*$/.test(part)) rawEntries.push("");
+      }
+    }
   }
-  while ((m = escRe.exec(searchRegion)) !== null) {
-    rawEntries.push(decodeNumEsc(m[1]));
+  if (!rawEntries.length) {
+    const escRe = /"((?:\\[0-9]{1,3}){2,})"/g;
+    let m;
+    while ((m = escRe.exec(code)) !== null) rawEntries.push(decodeNumEsc(m[1]));
   }
 
-  // ── Pass 2: find custom base64 alphabet map  B={ c=expr; ["1"]=expr; ... } ──
-  let alphabet = null; // index 0..63 -> char, or char -> value
-  const alphaMatch = code.match(/(?:local\s+)?([A-Za-z_]\w*)\s*=\s*\{([^}]{50,8000})\}/);
-  // search for map with many single-char keys / letter keys assigned ints 0-63
-  const mapCandidates = [...code.matchAll(/([A-Za-z_]\w*)\s*=\s*\{([\s\S]{80,12000}?)\}/g)];
+  // ── 2) Simulate index shuffle: for _,n in ipairs({{a,b},{c,d}}) do while n[1]<n[2] do swap S[n[1]],S[n[2]] ──
+  const S = rawEntries.slice();
+  const shuffleBlocks = [...code.matchAll(/ipairs\s*\(\s*\{([\s\S]*?)\}\s*\)\s*do\s*while/gi)];
+  for (const sb of shuffleBlocks) {
+    const pairs = [];
+    const pairRe = /\{\s*([-+0-9()]+)\s*[,;]\s*([-+0-9()]+)\s*\}/g;
+    let pm;
+    while ((pm = pairRe.exec(sb[1])) !== null) {
+      const a = evalInt(pm[1]);
+      const b = evalInt(pm[2]);
+      if (a !== null && b !== null) pairs.push([a, b]);
+    }
+    for (const [lo, hi] of pairs) {
+      // Lua 1-based inclusive range swap bubble as in sample
+      let left = lo, right = hi;
+      // The sample mutates n[1]/n[2] while swapping S entries — approximate as reverse range
+      if (left >= 1 && right >= 1 && left <= S.length && right <= S.length && left < right) {
+        const slice = S.slice(left - 1, right);
+        slice.reverse();
+        for (let i = 0; i < slice.length; i++) S[left - 1 + i] = slice[i];
+      }
+    }
+  }
+
+  // ── 3) Custom alphabet map (char -> 0..63) ──
+  let alphabet = null;
+  const mapCandidates = [...code.matchAll(/([A-Za-z_]\w*)\s*=\s*\{([\s\S]{60,15000}?)\}/g)];
   for (const mc of mapCandidates) {
     const body = mc[2];
     const pairs = [];
-    // key=expr or ["x"]=expr
     const pairRe = /(?:\[["']([^"']+)["']\]|([A-Za-z0-9+/=]))\s*=\s*([-+0-9()]+)/g;
     let pm;
     while ((pm = pairRe.exec(body)) !== null) {
-      const key = pm[1] || pm[2];
+      let key = pm[1] || pm[2];
+      if (pm[1] && /\\[0-9]/.test(pm[1])) key = decodeNumEsc(pm[1]);
       const val = evalInt(pm[3]);
-      if (key && val !== null && val >= 0 && val <= 63) pairs.push([key, val]);
+      if (key && key.length === 1 && val !== null && val >= 0 && val <= 63) pairs.push([key, val]);
     }
-    if (pairs.length >= 40) {
-      alphabet = {};
+    if (pairs.length >= 50) {
+      alphabet = Object.create(null);
       for (const [k, v] of pairs) alphabet[k] = v;
       break;
     }
   }
 
+  // ── 4) Custom base64 decode (WeAreDevs / Prometheus style) ──
   const customB64Decode = (str) => {
-    if (!alphabet || !str) return null;
-    try {
-      let s = String(str).replace(/\s+/g, "");
-      const vals = [];
-      for (const ch of s) {
-        if (ch === "=") continue;
-        if (alphabet[ch] === undefined) return null;
-        vals.push(alphabet[ch]);
-      }
-      const bytes = [];
-      for (let i = 0; i + 3 < vals.length; i += 4) {
-        const n = (vals[i] << 18) | (vals[i + 1] << 12) | ((vals[i + 2] || 0) << 6) | (vals[i + 3] || 0);
-        bytes.push((n >> 16) & 255);
-        if (i + 2 < vals.length) bytes.push((n >> 8) & 255);
-        if (i + 3 < vals.length) bytes.push(n & 255);
-      }
-      // handle remainder loosely
-      if (vals.length % 4 === 2) {
-        const n = (vals[vals.length - 2] << 2) | (vals[vals.length - 1] >> 4);
-        bytes.push(n & 255);
-      }
-      const out = Buffer.from(bytes).toString("utf8");
-      return out;
-    } catch { return null; }
-  };
-
-  // Apply table shuffle if present: for pairs in ipairs({{a,b},{c,d}}) do while swap
-  // We approximate by just decoding entries; shuffle is index permutation
-
-  const constants = [];
-  const seen = new Set();
-  for (const raw of rawEntries) {
-    let final = raw;
-    const c1 = customB64Decode(raw);
-    if (c1 && isPrintable(c1) && c1.length >= 1) final = c1;
-    else {
+    if (!str || typeof str !== "string") return str;
+    if (!alphabet) {
       try {
-        if (/^[A-Za-z0-9+/]+=*$/.test(raw) && raw.length >= 4) {
-          const t = Buffer.from(raw, "base64").toString("utf8");
-          if (isPrintable(t) && /[A-Za-z]/.test(t)) final = t;
+        if (/^[A-Za-z0-9+/]+=*$/.test(str) && str.length >= 4) {
+          return Buffer.from(str, "base64").toString("utf8");
         }
       } catch {}
+      return str;
     }
-    if (!seen.has(final)) { seen.add(final); constants.push(final); }
+    try {
+      let i = 0, p = 0;
+      const out = [];
+      for (let X = 0; X < str.length; X++) {
+        const ch = str[X];
+        const m = alphabet[ch];
+        if (m !== undefined) {
+          i = i + m * Math.pow(64, 3 - p);
+          p++;
+          if (p === 4) {
+            p = 0;
+            const b1 = Math.floor(i / 65536) & 255;
+            const b2 = Math.floor((i % 65536) / 256) & 255;
+            const b3 = i % 256;
+            out.push(b1, b2, b3);
+            i = 0;
+          }
+        } else if (ch === "=") {
+          out.push(Math.floor(i / 65536) & 255);
+          if (X + 1 >= str.length || str[X + 1] !== "=") {
+            out.push(Math.floor((i % 65536) / 256) & 255);
+          }
+          break;
+        }
+      }
+      return Buffer.from(out).toString("utf8");
+    } catch {
+      return str;
+    }
+  };
+
+  const constants = [];
+  for (let idx = 0; idx < S.length; idx++) {
+    let decoded = customB64Decode(S[idx]);
+    // second pass if still looks like b64
+    if (decoded && /^[A-Za-z0-9+/]+=*$/.test(decoded) && decoded.length >= 8) {
+      const again = customB64Decode(decoded);
+      if (again && again.length) decoded = again;
+    }
+    constants.push(decoded == null ? "" : decoded);
   }
 
-  // string.char + escape decode on full source
-  code = code.replace(/string\.char\s*\(\s*((?:\d+\s*,\s*)*\d+)\s*\)/g, (full, nums) => {
-    try {
-      const arr = nums.split(",").map(s => parseInt(s.trim(), 10)).filter(n => n >= 0 && n <= 255);
-      const s = String.fromCharCode(...arr);
-      if (!isPrintable(s)) return full;
-      if (!seen.has(s)) { seen.add(s); constants.push(s); }
-      return JSON.stringify(s);
-    } catch { return full; }
-  });
-  code = code.replace(/"((?:\\[0-9]{1,3}){2,})"/g, (full, body) => {
-    try {
-      let d = decodeNumEsc(body);
-      const c = customB64Decode(d);
-      if (c && isPrintable(c)) d = c;
-      if (!isPrintable(d)) return full;
-      return JSON.stringify(d);
-    } catch { return full; }
-  });
-  code = code.replace(/getfenv\s+and\s+getfenv\(\)\s*or\s*_ENV/gi, "_ENV");
-  code = code.replace(/--[^\n]*wearedevs[^\n]*/gi, "");
-
-  // Replace S[n] or tableVar[n] with constant if index maps 1-based
-  if (tableVar && constants.length) {
-    const reIdx = new RegExp("\\b" + tableVar.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\[\\s*(\\d+)\\s*\\]", "g");
-    code = code.replace(reIdx, (full, idx) => {
-      const i = parseInt(idx, 10) - 1;
-      if (i >= 0 && i < constants.length && isPrintable(constants[i])) return JSON.stringify(constants[i]);
-      return full;
-    });
-  }
-
+  // ── 5) Build readable output — prefer constants + reconstructed API calls ──
   const lines = [];
-  lines.push("-- Prometheus / WeAreDevs deobfuscation (enhanced)");
-  lines.push("-- String table + custom alphabet base64 + inline decode");
-  lines.push("");
-  if (alphabet) lines.push("-- Custom alphabet map recovered (" + Object.keys(alphabet).length + " entries)");
-  if (tableVar) lines.push("-- String table variable: " + tableVar + " (" + constants.length + " entries)");
-  lines.push("");
+  lines.push("-- Deobfuscated via Prometheus static pipeline");
+  lines.push("-- === String Constants ===");
   lines.push("local Constants = {");
-  for (let i = 0; i < constants.length && i < 3000; i++) {
-    const c = constants[i];
-    lines.push("  [" + (i + 1) + "] = " + JSON.stringify(c.length > 800 ? c.slice(0, 800) + "…" : c) + ",");
+  for (let i = 0; i < constants.length; i++) {
+    let c = constants[i];
+    if (typeof c !== "string") c = String(c);
+    // sanitize invalid utf8 for display
+    c = c.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, ".");
+    lines.push("  [" + (i + 1) + "] = " + JSON.stringify(c.length > 500 ? c.slice(0, 500) + "…" : c) + ",");
   }
   lines.push("}");
   lines.push("");
-  const useful = constants.filter(c =>
-    c.length >= 2 && (
-      /https?:\/\//i.test(c) ||
-      /GetService|HttpGet|FireServer|loadstring|require|game|workspace|Players/i.test(c) ||
-      (/^[A-Za-z_][\w .:]{1,60}$/.test(c))
-    )
+
+  // High-value strings as likely API usage hints
+  const apis = constants.filter(c =>
+    typeof c === "string" && c.length >= 2 && c.length <= 80 &&
+    /^[A-Za-z_][\w]*$/.test(c) &&
+    /^(GetService|HttpGet|FireServer|InvokeServer|FindFirstChild|WaitForChild|Connect|loadstring|require|Players|Workspace|ReplicatedStorage|TweenService|UserInputService|RunService|ChangeState|JumpRequest|LocalPlayer|Character|Humanoid|RemoteEvent|RemoteFunction)$/i.test(c)
   );
-  if (useful.length) {
-    lines.push("-- High-value recovered strings:");
-    for (const u of useful.slice(0, 120)) lines.push("--  " + JSON.stringify(u));
+  if (apis.length) {
+    lines.push("-- Recovered API / method names:");
+    for (const a of [...new Set(apis)]) lines.push("--  " + a);
     lines.push("");
   }
-  lines.push("-- Cleaned / partially decoded source:");
-  lines.push(code.slice(0, 280000));
+
+  // Try to reconstruct simple GetService patterns from constant pairs
+  const getServiceIdx = constants.findIndex(c => c === "GetService");
+  const gameIdx = constants.findIndex(c => c === "game");
+  if (getServiceIdx >= 0) {
+    lines.push("-- Likely service calls (heuristic):");
+    for (const c of constants) {
+      if (typeof c === "string" && /Service$/.test(c) && c.length < 40) {
+        lines.push('-- game:GetService("' + c + '")');
+      }
+    }
+    lines.push("");
+  }
+
+  // Inline-decode remaining escapes in a cleaned slim source (strip VM bootstrap if huge)
+  let cleaned = code;
+  cleaned = cleaned.replace(/"((?:\\[0-9]{1,3}){2,})"/g, (full, body) => {
+    try {
+      const d = customB64Decode(decodeNumEsc(body));
+      if (typeof d === "string" && /^[\x09\x0a\x0d\x20-\x7e]*$/.test(d)) return JSON.stringify(d);
+    } catch {}
+    return full;
+  });
+  cleaned = cleaned.replace(/getfenv\s+and\s+getfenv\(\)\s*or\s*_ENV/gi, "_ENV");
+
+  // If constants recovered well, prefer constants-only output for readability
+  const readableCount = constants.filter(c => typeof c === "string" && /^[\x20-\x7e]{2,}$/.test(c)).length;
+  if (readableCount >= Math.max(5, constants.length * 0.3)) {
+    lines.push("-- Pipeline recovered " + readableCount + "/" + constants.length + " readable constants.");
+    lines.push("-- Original VM bootstrap omitted; use Constants[n] mapping for references.");
+  } else {
+    lines.push("-- Partially cleaned source:");
+    lines.push(cleaned.slice(0, 200000));
+  }
   lines.push("");
   return lines.join("\n");
 }
