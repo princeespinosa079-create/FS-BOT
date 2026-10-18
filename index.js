@@ -4346,29 +4346,6 @@ const commands = [
     .setDescription("Post Finder Source Panel — Owner Only.")
     .toJSON(),
   new SlashCommandBuilder()
-    .setName("update")
-    .setDescription("Update protected script (Pastefy URL / file) — Owner Only.")
-    .addAttachmentOption(opt =>
-      opt.setName("file")
-        .setDescription("Upload Lua/txt source file to protect")
-        .setRequired(false)
-    )
-    .addStringOption(opt =>
-      opt.setName("pastefy-url")
-        .setDescription("Pastefy URL from .upload / .obf")
-        .setRequired(false)
-    )
-    .addStringOption(opt =>
-      opt.setName("delete")
-        .setDescription("Delete stored Pastefy URL? yes / no")
-        .setRequired(false)
-        .addChoices(
-          { name: "yes", value: "yes" },
-          { name: "no", value: "no" }
-        )
-    )
-    .toJSON(),
-  new SlashCommandBuilder()
     .setName("blacklist")
     .setDescription("Manage command blacklist — Owner Only.")
     .addStringOption(o => o
@@ -4409,18 +4386,18 @@ async function registerCommands() {
     try {
       const globalCmds = await rest.get(Routes.applicationCommands(CLIENT_ID));
       for (const cmd of globalCmds || []) {
-        if (String(cmd.name).toLowerCase() === "upload") {
+        if (String(cmd.name).toLowerCase() === "upload" || String(cmd.name).toLowerCase() === "update") {
           await rest.delete(Routes.applicationCommand(CLIENT_ID, cmd.id)).catch(() => {});
-          console.log("🗑️ Removed stale global /upload");
+          console.log("🗑️ Removed stale global /${cmd.name}");
         }
       }
     } catch {}
     try {
       const guildCmds = await rest.get(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID));
       for (const cmd of guildCmds || []) {
-        if (String(cmd.name).toLowerCase() === "upload") {
+        if (String(cmd.name).toLowerCase() === "upload" || String(cmd.name).toLowerCase() === "update") {
           await rest.delete(Routes.applicationGuildCommand(CLIENT_ID, GUILD_ID, cmd.id)).catch(() => {});
-          console.log("🗑️ Removed stale guild /upload");
+          console.log("🗑️ Removed stale guild /" + cmd.name);
         }
       }
     } catch {}
@@ -4519,10 +4496,7 @@ const helpPages = [
 
 **\`.delwh\`** Delete a webhook using its URL.
 
-**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).
-
-Regular users start with **10 tokens**/day. Most commands cost **1 token**.
-\`.help\` · \`.find\` are free.`
+**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).`
     ),
   // Yellow premium page — always last
   new EmbedBuilder()
@@ -4553,10 +4527,7 @@ const helpPageBodies = [
 
 **\`.delwh\`** Delete a webhook using its URL.
 
-**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).
-
-Regular users start with **10 tokens**/day. Most commands cost **1 token**.
-\`.help\` · \`.find\` are free.` },
+**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).` },
   { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
 
 > Premium users can use all commands in DMs.
@@ -5168,134 +5139,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
     
-    if (interaction.commandName === "update") {
-      if (!isOwner(interaction.user.id)) {
-        await interaction.editReply({ content: "❌ owner only, dumbass." });
-        return;
-      }
-      const fileAtt = interaction.options.getAttachment("file");
-      const urlRaw = (interaction.options.getString("pastefy-url") || "").trim();
-      const delRaw = (interaction.options.getString("delete") || "").trim().toLowerCase();
-
-      const loadingPayload = {
-        flags: IS_COMPONENTS_V2,
-        embeds: [],
-        components: [{
-          type: 17,
-          accent_color: FINDER_V2_ACCENT,
-          components: [{ type: 10, content: "### Updating...\n⏳ Processing..." }]
-        }]
-      };
-      try {
-        await interaction.editReply(loadingPayload);
-      } catch {
-        await interaction.editReply({ content: "### Updating...\n⏳ Processing..." }).catch(() => {});
-      }
-
-      try {
-        // Delete URL only
-        if (delRaw === "yes" || delRaw === "y") {
-          scripanelStore.url = "";
-          scripanelStore.updatedAt = Date.now();
-          scripanelStore.updatedBy = interaction.user.id;
-          saveScripanel();
-          const urlLine = scripanelStore.url ? String(scripanelStore.url).slice(0, 200) : "*(none)*";
-          const lastLine = scripanelStore.updatedAt
-            ? "<t:" + Math.floor(Number(scripanelStore.updatedAt) / 1000) + ":F>"
-            : "*(never)*";
-          const resultBody = "**URL:** " + urlLine + "\n**Last Updated:** " + lastLine;
-          await interaction.editReply({
-            flags: IS_COMPONENTS_V2,
-            embeds: [],
-            components: [{
-              type: 17,
-              accent_color: FINDER_V2_ACCENT,
-              components: [{ type: 10, content: resultBody.slice(0, 3900) }]
-            }]
-          });
-          return;
-        }
-
-        if (urlRaw && !isPastefyUrl(urlRaw)) {
-          await interaction.editReply({
-            flags: IS_COMPONENTS_V2,
-            embeds: [],
-            components: [{
-              type: 17,
-              accent_color: 0xED4245,
-              components: [{ type: 10, content: "### Input Error\nURL must be a **Pastefy** link from `.upload` or `.obf` (pastefy.app)." }]
-            }]
-          });
-          return;
-        }
-
-        let source = null;
-        if (fileAtt?.url) {
-          const res = await fetch(fileAtt.url, {
-            headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" },
-            redirect: "follow"
-          });
-          if (res.ok) source = await res.text();
-        }
-        if (!source && urlRaw) {
-          source = await fetchTextFromUrl(urlRaw);
-        }
-        if (!source || !String(source).trim()) {
-          await interaction.editReply({
-            flags: IS_COMPONENTS_V2,
-            embeds: [],
-            components: [{
-              type: 17,
-              accent_color: 0xED4245,
-              components: [{ type: 10, content: "### Input Error\nProvide **file** and/or **pastefy-url** (or delete: yes)." }]
-            }]
-          });
-          return;
-        }
-
-        const protectedScript = obfuscateLua(source);
-        if (urlRaw) scripanelStore.url = urlRaw;
-        scripanelStore.script = protectedScript;
-        scripanelStore.updatedAt = Date.now();
-        scripanelStore.updatedBy = interaction.user.id;
-        saveScripanel();
-
-        const urlLine = scripanelStore.url ? String(scripanelStore.url).slice(0, 200) : "*(none)*";
-        const lastLine = scripanelStore.updatedAt
-          ? "<t:" + Math.floor(Number(scripanelStore.updatedAt) / 1000) + ":F>"
-          : "*(never)*";
-        const resultBody = "**URL:** " + urlLine + "\n**Last Updated:** " + lastLine;
-        const outName = "obfuscated.lua";
-        const outFile = new AttachmentBuilder(Buffer.from(protectedScript, "utf8"), { name: outName });
-        await interaction.editReply({
-          flags: IS_COMPONENTS_V2,
-          embeds: [],
-          files: [outFile],
-          components: [{
-            type: 17,
-            accent_color: FINDER_V2_ACCENT,
-            components: [
-              { type: 10, content: resultBody.slice(0, 3900) },
-              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-              { type: 13, file: { url: "attachment://" + outName } }
-            ]
-          }]
-        });
-      } catch (err) {
-        console.error("❌ /update:", err?.message || err);
-        await interaction.editReply({
-          flags: IS_COMPONENTS_V2,
-          embeds: [],
-          components: [{
-            type: 17,
-            accent_color: 0xED4245,
-            components: [{ type: 10, content: "### Input Error\n" + String(err?.message || err).slice(0, 200) }]
-          }]
-        }).catch(() => {});
-      }
-      return;
-    }
-
     if (interaction.commandName === "blacklist") {
       const mode = (interaction.options.getString("mode") || "").toLowerCase();
       const targetUser = interaction.options.getUser("user");
@@ -6430,7 +6273,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
     }
     if (!filesToSend.length) {
-      replyUser(msg, "❌ your id is wrong, try find working id, dumbass.\n-# .zip IDs are owner only.").catch(() => {});
+      await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.").catch(() => {});
       return;
     }
     // Send in batches of 10 (Discord file limit per message)
