@@ -331,6 +331,7 @@ function formatCooldown(remainingSec) {
  * onCooldown=true only when out of tokens (wait for daily refill).
  */
 const pendingTokenLine = new Map(); // userId -> "-# You have XX Tokens left." (regular only — never premium)
+const pendingTagRetry = new Map(); // userId -> { content, channelId, guildId, messageId, at }
 /** Token line for message TEXT only (never embed). Empty for premium. */
 function tokensResultSuffix(isBuyerUser, tokensLeft) {
   if (isBuyerUser || tokensLeft === null || tokensLeft === undefined) return "";
@@ -629,7 +630,35 @@ async function checkRegularPermission(msg, needsFileReply = false) {
   // Server Tag requirement — regular users MUST adopt this server's Server Tag
   const hasTag = await hasPrinceStatus(msg.author.id);
   if (!hasTag) {
-    sendInputErrorV2(msg, "**Tips:**\n- Go on your profile, click `Edit Profile` then scroll down, you’ll see the `Select a Server Tag` click it then use our Server Tag.").catch(() => {});
+    try {
+      pendingTagRetry.set(String(msg.author.id), {
+        content: String(msg.content || ""),
+        channelId: String(msg.channelId || msg.channel?.id || ""),
+        guildId: String(msg.guildId || msg.guild?.id || ""),
+        messageId: String(msg.id || ""),
+        at: Date.now()
+      });
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("tagcheck_" + msg.author.id)
+          .setLabel("Check again")
+          .setStyle(ButtonStyle.Success)
+      );
+      await replyComponentsV2(msg, {
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: 0xED4245,
+          components: [
+            { type: 10, content: "## Server tag required\nWear the `FS` server tag, then click check again." },
+            { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+            row.toJSON()
+          ]
+        }]
+      }, { mention: false }).catch(() => {});
+    } catch (e) {
+      console.warn("⚠️ tag gate send:", e.message);
+    }
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
   // Channel lock — Components V2 Input Error
@@ -4562,6 +4591,66 @@ function buildHelpV2(page, userId) {
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
   const uid = interaction.user.id;
+  // ─── SERVER TAG CHECK AGAIN ───
+  if (interaction.customId.startsWith("tagcheck_")) {
+    const uid = interaction.customId.slice("tagcheck_".length);
+    if (interaction.user.id !== uid) {
+      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const pending = pendingTagRetry.get(uid);
+    if (!pending || (Date.now() - (pending.at || 0)) > 15 * 60 * 1000) {
+      pendingTagRetry.delete(uid);
+      return interaction.reply({ content: "❌ expired — run the command again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const hasTag = await hasPrinceStatus(uid);
+    if (!hasTag) {
+      return interaction.reply({
+        content: "❌ still no **FS** server tag — put it on, then click again.",
+        flags: MessageFlags.Ephemeral
+      }).catch(() => {});
+    }
+    pendingTagRetry.delete(uid);
+    try {
+      await interaction.update({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: 0x57F287,
+          components: [{ type: 10, content: "## Server tag detected\n✅ Tag found — running your command..." }]
+        }]
+      });
+    } catch {
+      try { await interaction.deferUpdate(); } catch {}
+    }
+    try {
+      const ch = await client.channels.fetch(pending.channelId).catch(() => null);
+      if (!ch) {
+        await interaction.followUp({ content: "❌ channel gone — run the command again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        return;
+      }
+      let origMsg = null;
+      if (pending.messageId) {
+        try { origMsg = await ch.messages.fetch(pending.messageId); } catch {}
+      }
+      if (origMsg) {
+        // Re-run the original command message through the bot pipeline
+        client.emit("messageCreate", origMsg);
+      } else {
+        await interaction.followUp({
+          content: "❌ original message not found — run the command again.",
+          flags: MessageFlags.Ephemeral
+        }).catch(() => {});
+      }
+    } catch (e) {
+      console.warn("⚠️ tagcheck retry:", e.message);
+      await interaction.followUp({
+        content: "❌ retry failed — run the command again.",
+        flags: MessageFlags.Ephemeral
+      }).catch(() => {});
+    }
+    return;
+  }
+
   // ─── RENAME MODE BUTTONS ───
   if (interaction.customId?.startsWith("rename_")) {
     const parts = interaction.customId.split("_");
@@ -6254,7 +6343,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const args = txt.split(/\s+/).slice(1).filter(Boolean);
-    if (!args.length) { replyUser(msg, "❌ put id of file, idiot.").catch(() => {}); return; }
+    if (!args.length) { await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.").catch(() => {}); return; }
     const maxGetIds = isBuyerUser ? 10 : 1;
     if (args.length > maxGetIds) {
       replyUser(msg, isBuyerUser ? "❌ max 10 id only, dumbass." : "❌ buy premium if you want multiple id.").catch(() => {});
@@ -6273,7 +6362,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
     }
     if (!filesToSend.length) {
-      await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.").catch(() => {});
+      await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.").catch(() => {});
       return;
     }
     // Send in batches of 10 (Discord file limit per message)
