@@ -2209,13 +2209,80 @@ function idForFile() {
   } while (library.files.some(file => file.id === id));
   return id;
 }
+
+/** Always remove Discord "content no longer available" placeholders (36-byte) from library */
+function purgeUnavailableFromLibrary() {
+  const before = library.files.length;
+  library.files = library.files.filter(file => Number(file.size || 0) !== 36);
+  if (library.files.length !== before) {
+    saveLibrary();
+    console.log(`🗑️ Purged ${before - library.files.length} unavailable 36-byte file(s) from library`);
+    return before - library.files.length;
+  }
+  return 0;
+}
+
+/** Search live-scan channels for a fresh copy of filename and index it */
+async function rescanLibraryNameInLiveChannels(filename) {
+  const wantBase = normalizeBase(filename);
+  const wantFull = normalize(filename);
+  if (!wantBase && !wantFull) return null;
+  const liveIds = (config.liveScanChannelIds || []).map(String);
+  if (!liveIds.length) return null;
+  for (const chId of liveIds) {
+    try {
+      const ch = await client.channels.fetch(chId).catch(() => null);
+      if (!ch?.isTextBased?.() || !ch.messages) continue;
+      let before = null;
+      for (let page = 0; page < 15; page++) {
+        const batch = await fetchMessages(ch, before);
+        if (!batch?.size) break;
+        for (const msg of batch.values()) {
+          for (const item of attachmentsOf(msg)) {
+            const a = item.attachment;
+            const fname = a.name || "unknown_file";
+            const baseName = normalizeBase(fname);
+            const fullName = normalize(fname);
+            const fileSize = Number(a.size || 0);
+            const url = a.url || a.proxyURL || a.proxy_url;
+            if (!url || fileSize === 36) continue;
+            if (baseName !== wantBase && fullName !== wantFull) continue;
+            // remove any dead entries with this name first
+            library.files = library.files.filter(f => normalizeBase(f.filename) !== wantBase && normalize(f.filename) !== wantFull);
+            const entry = {
+              id: idForFile(), filename: fname, url, size: fileSize,
+              contentType: a.contentType || null, channelId: msg.channelId,
+              messageId: msg.id, attachmentId: String(a.id), forwarded: item.forwarded,
+              createdTimestamp: msg.createdTimestamp || Date.now(), scannedAt: Date.now()
+            };
+            library.files.push(entry);
+            library.files.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
+            saveLibrary();
+            console.log(`📡 Re-scanned available "${fname}" from live #${ch.name || chId}`);
+            return entry;
+          }
+        }
+        const oldest = batch.last();
+        if (!oldest || batch.size < 100) break;
+        before = oldest.id;
+      }
+    } catch (e) {
+      console.warn("⚠️ rescanLibraryNameInLiveChannels:", e.message?.slice?.(0, 100) || e);
+    }
+  }
+  return null;
+}
+
 function getFile(id) {
+  purgeUnavailableFromLibrary();
   const f = library.files.find(file => file.id === String(id || "").trim()) || null;
   if (f && Number(f.size || 0) === 36) {
-    // Unavailable/expired (36-byte Discord placeholder) — delete from library permanently
+    const name = f.filename;
     library.files = library.files.filter(file => file.id !== f.id);
     saveLibrary();
-    console.log(`🗑️ Deleted unavailable 36-byte file: ${f.filename} (${f.id})`);
+    console.log(`🗑️ Deleted unavailable 36-byte file: ${name} (${f.id})`);
+    // fire-and-forget live rescan by name
+    rescanLibraryNameInLiveChannels(name).catch(() => {});
     return null;
   }
   return f;
@@ -2232,16 +2299,38 @@ async function getFreshUrl(file) {
       }
     }
     if (fresh?.url) {
+      const sz = Number(fresh.size || file.size || 0);
+      // Discord unavailable placeholder
+      if (sz === 36) {
+        const name = file.filename;
+        library.files = library.files.filter(f => f.id !== file.id);
+        saveLibrary();
+        console.log(`🗑️ Deleted 36-byte unavailable: ${name} (${file.id})`);
+        const rescued = await rescanLibraryNameInLiveChannels(name).catch(() => null);
+        return rescued?.url || null;
+      }
       file.url = fresh.url;
+      file.size = sz || file.size;
       saveLibrary();
       return fresh.url;
     }
-    // Message exists but attachment is gone → file expired/unavailable — delete from library
+    // Message exists but attachment is gone → delete + try live rescan by name
+    const name = file.filename;
     library.files = library.files.filter(f => f.id !== file.id);
     saveLibrary();
-    console.log(`🗑️ Deleted expired/unavailable file (attachment gone): ${file.filename} (${file.id})`);
+    console.log(`🗑️ Deleted expired/unavailable file (attachment gone): ${name} (${file.id})`);
+    const rescued = await rescanLibraryNameInLiveChannels(name).catch(() => null);
+    return rescued?.url || null;
   } catch (e) {
     console.warn(`⚠️ Could not refresh URL for ${file.filename}:`, e.message);
+    // try live rescan anyway
+    try {
+      const name = file.filename;
+      library.files = library.files.filter(f => f.id !== file.id);
+      saveLibrary();
+      const rescued = await rescanLibraryNameInLiveChannels(name).catch(() => null);
+      return rescued?.url || null;
+    } catch {}
   }
   return null;
 }
@@ -2250,13 +2339,7 @@ function findFiles(query) {
   if (!query) return [];
   const tokens = query.split(" ").filter(Boolean);
   const seenNames = new Set();
-  // Purge unavailable/expired files (36-byte Discord placeholder) from library permanently
-  const beforePurge = library.files.length;
-  library.files = library.files.filter(file => Number(file.size || 0) !== 36);
-  if (library.files.length !== beforePurge) {
-    saveLibrary();
-    console.log(`🗑️ Purged ${beforePurge - library.files.length} unavailable 36-byte file(s) from library`);
-  }
+  purgeUnavailableFromLibrary();
   return library.files
     .map(file => {
     const name = normalize(file.filename);
@@ -2401,8 +2484,19 @@ async function scanChannel(channel) {
           const isDupBase = existingBases.has(baseName);
           const isDupFull = existingFullNames.has(fullName);
           if (isDupBase || isDupFull) {
-            skippedDup++;
-            continue;
+            // If existing entry is unavailable (36 bytes), replace with this available one
+            const dead = library.files.filter(f =>
+              (normalizeBase(f.filename) === baseName || normalize(f.filename) === fullName) &&
+              Number(f.size || 0) === 36
+            );
+            if (dead.length) {
+              library.files = library.files.filter(f => !dead.includes(f));
+              replacedDup++;
+              // fall through to add the new available file
+            } else {
+              skippedDup++;
+              continue;
+            }
           }
           existingBases.add(baseName);
           existingFullNames.add(fullName);
@@ -2442,7 +2536,16 @@ function indexMessageFiles(msg) {
     const url = a.url || a.proxyURL || a.proxy_url;
     if (!baseName || !url) continue;
     if (fileSize === 36) continue;
-    if (existingBases.has(baseName) || existingFullNames.has(fullName)) continue;
+    if (existingBases.has(baseName) || existingFullNames.has(fullName)) {
+      // replace unavailable 36-byte entry with this available upload
+      const before = library.files.length;
+      library.files = library.files.filter(f => {
+        const same = normalizeBase(f.filename) === baseName || normalize(f.filename) === fullName;
+        if (same && Number(f.size || 0) === 36) return false;
+        return true;
+      });
+      if (library.files.length === before) continue; // real dup still available — skip
+    }
     existingBases.add(baseName);
     existingFullNames.add(fullName);
     found.push({
@@ -4288,14 +4391,49 @@ async function registerCommands() {
   registering = true;
   const rest = new REST({ version: "10", timeout: 15000 }).setToken(TOKEN);
   try {
+    // Clear main guild + global completely so stale /upload cannot linger
     console.log("🧹 Clearing old guild commands...");
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] });
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] }).catch(() => {});
     console.log("🧹 Clearing old global commands...");
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] }).catch(() => {});
+
+    // Also wipe slash commands on every other guild the bot is in (stale /upload etc.)
+    try {
+      for (const g of client.guilds.cache.values()) {
+        if (String(g.id) === String(GUILD_ID)) continue;
+        await rest.put(Routes.applicationGuildCommands(CLIENT_ID, g.id), { body: [] }).catch(() => {});
+      }
+    } catch {}
+
+    // Explicitly delete any leftover "upload" command by id if Discord still lists it
+    try {
+      const globalCmds = await rest.get(Routes.applicationCommands(CLIENT_ID));
+      for (const cmd of globalCmds || []) {
+        if (String(cmd.name).toLowerCase() === "upload") {
+          await rest.delete(Routes.applicationCommand(CLIENT_ID, cmd.id)).catch(() => {});
+          console.log("🗑️ Removed stale global /upload");
+        }
+      }
+    } catch {}
+    try {
+      const guildCmds = await rest.get(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID));
+      for (const cmd of guildCmds || []) {
+        if (String(cmd.name).toLowerCase() === "upload") {
+          await rest.delete(Routes.applicationGuildCommand(CLIENT_ID, GUILD_ID, cmd.id)).catch(() => {});
+          console.log("🗑️ Removed stale guild /upload");
+        }
+      }
+    } catch {}
+
     console.log("🧩 Registering global slash commands...");
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    console.log("✅ Commands registered (global).");
-  } catch (e) { registering = false; console.error("❌ Register fail:", e.message); }
+    const names = (commands || []).map(c => c.name).join(", ");
+    console.log("✅ Commands registered (global):", names || "(none)");
+    registering = false;
+  } catch (e) {
+    registering = false;
+    console.error("❌ Register fail:", e.message);
+  }
 }
 // ============================================================
 // READY
@@ -4307,6 +4445,7 @@ client.once("ready", async () => {
   console.log(`🏠 Guilds: ${client.guilds.cache.size}`);
   console.log(`📚 Files: ${library.files.length}`);
   const liveN = Array.isArray(config.liveScanChannelIds) ? config.liveScanChannelIds.length : 0;
+  try { purgeUnavailableFromLibrary(); } catch {}
   console.log(`📡 LiveScan channels: ${liveN}${liveN ? " → " + config.liveScanChannelIds.map(String).join(", ") : ""}`);
   console.log("⚡ Bot ready!");
   console.log("==========================================");
@@ -4358,7 +4497,9 @@ const helpPages = [
     .setDescription(
 `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.`
+**\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.
+
+**\`.coinflip\`** Flip a coin — win or lose **1 token**.`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
@@ -4378,13 +4519,7 @@ const helpPages = [
 
 **\`.delwh\`** Delete a webhook using its URL.
 
-**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).`
-    ),
-  new EmbedBuilder()
-    .setTitle("🤖 Bot Commands")
-    .setColor(BLURPLE)
-    .setDescription(
-`**\`.coinflip\`** Flip a coin — win or lose **1 token**.
+**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).
 
 Regular users start with **10 tokens**/day. Most commands cost **1 token**.
 \`.help\` · \`.find\` are free.`
@@ -4396,8 +4531,6 @@ Regular users start with **10 tokens**/day. Most commands cost **1 token**.
     .setDescription(
 `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
 
-**\`.redeem\`** [\`.red\`] - Redeem a premium key.
-
 > Premium users can use all commands in DMs.
 > Premium users have unlimited tokens.`
     )
@@ -4408,7 +4541,9 @@ const helpSessions = new Map();
 const helpPageBodies = [
   { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
 
-**\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.` },
+**\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.
+
+**\`.coinflip\`** Flip a coin — win or lose **1 token**.` },
   { color: 0x5865F2, text: `**\`.et\`** Extract files from zip archives.
 
 **\`.upload\`** Turn your file into Script Loader.
@@ -4418,14 +4553,11 @@ const helpPageBodies = [
 
 **\`.delwh\`** Delete a webhook using its URL.
 
-**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).` },
-  { color: 0x5865F2, text: `**\`.coinflip\`** Flip a coin — win or lose **1 token**.
+**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).
 
 Regular users start with **10 tokens**/day. Most commands cost **1 token**.
 \`.help\` · \`.find\` are free.` },
   { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
-
-**\`.redeem\`** [\`.red\`] - Redeem a premium key.
 
 > Premium users can use all commands in DMs.
 > Premium users have unlimited tokens.` }
@@ -6622,32 +6754,60 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .renew — Owner Only: silent fast clone (same name/perms/position), delete old — no messages
+  // .renew — Owner Only: silent fast clone at the SAME position under the same category
   if (/^\.renew(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) return;
     if (!msg.guild || !msg.channel || msg.channel.isDMBased?.()) return;
     const ch = msg.channel;
     if (!ch.isTextBased?.() || ch.isThread?.()) return;
     try {
-      const position = ch.rawPosition ?? ch.position;
+      const parentId = ch.parentId || null;
+      // position among siblings (what Discord uses for channel order)
+      const siblings = [...msg.guild.channels.cache.values()]
+        .filter(c => !c.isThread?.() && (c.parentId || null) === parentId)
+        .sort((a, b) => (a.rawPosition ?? a.position ?? 0) - (b.rawPosition ?? b.position ?? 0));
+      const siblingIndex = Math.max(0, siblings.findIndex(c => c.id === ch.id));
+      const savedPosition = ch.position ?? ch.rawPosition ?? siblingIndex;
+      const savedRaw = ch.rawPosition ?? ch.position ?? siblingIndex;
+
+      const overwrites = [...(ch.permissionOverwrites?.cache?.values?.() || [])].map(po => ({
+        id: po.id,
+        type: po.type,
+        allow: po.allow?.bitfield ?? po.allow,
+        deny: po.deny?.bitfield ?? po.deny
+      }));
+
       const cloned = await ch.clone({
         name: ch.name,
-        reason: `renew:${msg.author.id}`,
+        reason: `renew:${msg.author.id}`
       });
-      // Parallel-ish: position then delete old ASAP
-      await Promise.all([
-        cloned.setPosition(position).catch(() => {}),
-        (async () => {
-          try {
-            const edit = {};
-            if (ch.topic != null) edit.topic = ch.topic;
-            if (typeof ch.nsfw === "boolean") edit.nsfw = ch.nsfw;
-            if (typeof ch.rateLimitPerUser === "number") edit.rateLimitPerUser = ch.rateLimitPerUser;
-            if (Object.keys(edit).length) await cloned.edit(edit).catch(() => {});
-          } catch {}
-        })()
-      ]);
+
+      // Restore parent + metadata before deleting the old channel
+      try {
+        const edit = {};
+        if (parentId) edit.parent = parentId;
+        if (ch.topic != null) edit.topic = ch.topic;
+        if (typeof ch.nsfw === "boolean") edit.nsfw = ch.nsfw;
+        if (typeof ch.rateLimitPerUser === "number") edit.rateLimitPerUser = ch.rateLimitPerUser;
+        if (overwrites.length) edit.permissionOverwrites = overwrites;
+        if (Object.keys(edit).length) await cloned.edit(edit).catch(() => {});
+      } catch {}
+
+      // Delete old first so the slot is free, then snap clone into exact order
       await ch.delete(`renew:${msg.author.id}`).catch(() => {});
+
+      // setPosition uses relative order among channels under the same parent
+      try {
+        await cloned.setPosition(savedPosition, { reason: `renew-pos:${msg.author.id}` });
+      } catch {
+        try {
+          await cloned.setPosition(savedRaw, { reason: `renew-pos:${msg.author.id}` });
+        } catch {
+          try {
+            await cloned.setPosition(siblingIndex, { reason: `renew-pos:${msg.author.id}` });
+          } catch {}
+        }
+      }
     } catch (e) {
       console.warn("⚠️ renew:", e.message);
     }
