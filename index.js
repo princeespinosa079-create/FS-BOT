@@ -317,7 +317,7 @@ setInterval(cleanupExpiredKeys, 10 * 1000);
 const commandCooldowns = new Map(); // legacy — unused (tokens replace cooldowns)
 const COOLDOWNS = {}; // all timed cooldowns removed — token system used instead
 /** Free commands (no token cost): redeem, help, find (prefix). Finder panel Find button DOES cost. */
-const TOKEN_FREE_CMDS = new Set(["redeem", "help", "find"]);
+const TOKEN_FREE_CMDS = new Set(["redeem", "help", "find", "leaderboard", "lb"]);
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
   const s = remainingSec % 60;
@@ -397,6 +397,25 @@ let reconnecting = false;
 // BASIC HELPERS
 // ============================================================
 const saveLibrary = () => writeJSON(LIBRARY_FILE, library);
+
+const USAGE_FILE = path.join(DATA_DIR, "command-usage.json");
+let usageStore = readJSON(USAGE_FILE, { users: {} });
+if (!usageStore || typeof usageStore !== "object") usageStore = { users: {} };
+if (!usageStore.users || typeof usageStore.users !== "object") usageStore.users = {};
+const saveUsage = () => writeJSON(USAGE_FILE, usageStore);
+function trackCommandUse(user) {
+  try {
+    if (!user?.id) return;
+    const id = String(user.id);
+    const prev = usageStore.users[id] || { username: user.username || "unknown", count: 0 };
+    prev.username = user.username || prev.username || "unknown";
+    prev.count = (Number(prev.count) || 0) + 1;
+    usageStore.users[id] = prev;
+    saveUsage();
+  } catch {}
+}
+
+
 const saveConfig = () => writeJSON(CONFIG_FILE, config);
 function isOwner(userId) {
   return userId === OWNER_ID;
@@ -4501,7 +4520,9 @@ const helpPages = [
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
+`**\`.detect\`** [\`.dt\`] Detect IP logger / script loader / webhook / safe.
+
+**\`.leaderboard\`** [\`.lb\`] Top command users.
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.
 
@@ -4542,7 +4563,9 @@ const helpSessions = new Map();
 
 /** Help page bodies for Components V2 */
 const helpPageBodies = [
-  { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect which obfuscator protected a script.
+  { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect IP logger / script loader / webhook / safe.
+
+**\`.leaderboard\`** [\`.lb\`] Top command users.
 
 **\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.
 
@@ -4616,7 +4639,7 @@ client.on("interactionCreate", async interaction => {
         components: [{
           type: 17,
           accent_color: 0x57F287,
-          components: [{ type: 10, content: "## Server tag detected\n✅ Tag found — running your command..." }]
+          components: [{ type: 10, content: "## Access granted\nYour `FS` server tag is verified." }]
         }]
       });
     } catch {
@@ -5282,6 +5305,11 @@ client.on("messageCreate", async msg => {
     const raw = String(msg.content || "");
     const txt = raw.trim();
     if (!txt.startsWith(".")) return;
+    // count prefix command uses for leaderboard (username snapshot)
+    try {
+      const cmdName = (txt.slice(1).split(/\s+/)[0] || "").toLowerCase();
+      if (cmdName && cmdName !== "leaderboard" && cmdName !== "lb") trackCommandUse(msg.author);
+    } catch {}
 
     const isDM = !msg.guild;
 
@@ -6273,7 +6301,81 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .detect / .dt — detect obfuscator used on a script
+
+/** Threat scan: Script Loader / IP Logger / Discord Webhook / Safe */
+function detectThreatAnalysis(code) {
+  const s = String(code || "");
+  const lower = s.toLowerCase();
+
+  const IP_DOMAINS = [
+    "iplogger", "grabify", "blasze", "ipgrabber", "ip-logger", "ipify.org",
+    "ipinfo.io", "ip-api.com", "icanhazip", "ifconfig.me", "checkip.amazonaws",
+    "wtfismyip", "ipgeolocation", "freegeoip", "api.ip", "myip.com", "whatismyip"
+  ];
+  const hasIpLogger = IP_DOMAINS.some(d => lower.includes(d)) ||
+    /https?:\/\/[^\s"'`]*?(?:ip\s*log|grabify|blasze|iplog)/i.test(s);
+
+  const webhookRe = /https?:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i;
+  const hasWebhook = webhookRe.test(s);
+  const stealHints = /cookie|token|password|pass\b|account|session|robloxsecurity|\.roblosecurity|authorization|steal|exfil|webhook.*send|request.*webhook/i.test(s);
+  const webhookMalicious = hasWebhook && stealHints;
+  const webhookBenign = hasWebhook && !stealHints;
+
+  const loaderPatterns = [
+    /loadstring\s*\(\s*(?:game:GetService\s*\(\s*["']HttpService["']\s*\)\s*:)?HttpGet/i,
+    /loadstring\s*\(\s*(?:syn|http|fluxus|request)?[\s\S]{0,40}HttpGet/i,
+    /(?:loadstring|load)\s*\(\s*(?:game:HttpGet|http(?:s)?\.get|request\s*\()/i,
+    /HttpGet\s*\(\s*["']https?:\/\//i,
+    /syn\.request\s*\(\s*\{[\s\S]*?Url\s*=\s*["']https?:\/\//i,
+    /(?:getgenv|getrenv|getfenv).*loadstring/i,
+  ];
+  const hasLoader = loaderPatterns.some(re => re.test(s));
+  const loaderCritical = hasLoader && (hasWebhook || hasIpLogger || /malware|backdoor|steal|keylog/i.test(s));
+
+  // Priority: IP Logger > malicious webhook > critical loader > high loader > benign webhook > safe
+  if (hasIpLogger) {
+    return {
+      title: "IP Logger",
+      color: 0xED4245,
+      description: "What it does:\n\nA link/URL that steals the target’s IP address, location, device info, and ISP when clicked. Used for doxxing, DDoS attacks, or harassment. Common in Discord DMs, fake \"free nitro\" links, or Roblox game \"asset links\"."
+    };
+  }
+  if (webhookMalicious) {
+    return {
+      title: "Discord Webhook",
+      color: 0xF26522,
+      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
+    };
+  }
+  if (loaderCritical) {
+    return {
+      title: "Script Loader",
+      color: 0xED4245,
+      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
+    };
+  }
+  if (hasLoader) {
+    return {
+      title: "Script Loader",
+      color: 0xF26522,
+      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
+    };
+  }
+  if (webhookBenign) {
+    return {
+      title: "Discord Webhook",
+      color: 0x5865F2,
+      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
+    };
+  }
+  return {
+    title: "Safe",
+    color: 0x57F287,
+    description: "A clean file with no Script Loader, no IP Logger, no stealing Webhook. It will not download hidden malware, log your IP/location, or steal your Roblox cookie, account, or private data."
+  };
+}
+
+  // .detect / .dt — threat scan (IP logger / script loader / webhook / safe)
   if (/^\.(?:detect|dt)(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
@@ -6292,8 +6394,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
     if (!resolved?.content) {
-      await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.").catch(() => {});
+      await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply / forward a sample.").catch(() => {});
       return;
+    }
+    // optional extension hint
+    const fname = String(resolved.name || resolved.filename || "").toLowerCase();
+    if (fname && !/\.(lua|luau|txt)$/i.test(fname) && !resolved.fromCodeBlock) {
+      // still allow if content looks like text
     }
     const loadingPayload = {
       flags: IS_COMPONENTS_V2,
@@ -6305,24 +6412,23 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     };
     const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
     try {
-      let code = resolved.content;
-      if (!code || !code.trim()) throw new Error("could not read file");
-
-      const results = detectObfuscatorType(code);
-      const [topName, topPct] = results?.[0] || ["Custom / Unknown", 0];
-      const pct = (typeof topPct === "number" ? topPct : 0).toFixed(2);
-      const body = `**Detected: ${topName} (${pct}%)**`;
+      const code = String(resolved.content || "");
+      if (!code.trim()) throw new Error("could not read file");
+      const result = detectThreatAnalysis(code);
+      const body =
+        `## Detected: ${result.title}\n` +
+        `-# What it does:\n\n` +
+        "```" + result.description + "```";
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       pendingTokenLine.delete(String(msg.author.id));
-      const resultPayload = {
+      await replyComponentsV2(msg, {
         flags: IS_COMPONENTS_V2,
         components: [{
           type: 17,
-          accent_color: RENAME_V2_ACCENT,
-          components: [{ type: 10, content: body }]
+          accent_color: result.color,
+          components: [{ type: 10, content: body.slice(0, 3900) }]
         }]
-      };
-      await replyComponentsV2(msg, resultPayload, { mention: false }).catch(() => {});
+      }, { mention: false }).catch(() => {});
     } catch (e) {
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
       await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
@@ -6745,6 +6851,43 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
+  // .leaderboard / .lb — top command users
+  if (/^\.(?:leaderboard|lb)(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    // free
+    const entries = Object.entries(usageStore.users || {})
+      .map(([id, v]) => ({ id, username: v.username || "unknown", count: Number(v.count) || 0 }))
+      .filter(e => e.count > 0)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+    if (!entries.length) {
+      await replyComponentsV2(msg, {
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: "### The Leaderboard\nNo command uses recorded yet." }]
+        }]
+      }, { mention: false }).catch(() => {});
+      return;
+    }
+    const lines = entries.map((e, i) =>
+      `> **${i + 1}.** \`${String(e.username).replace(/[`]/g, "")}\` -> **${e.count}** use.`
+    ).join("\n");
+    await replyComponentsV2(msg, {
+      flags: IS_COMPONENTS_V2,
+      components: [{
+        type: 17,
+        accent_color: RENAME_V2_ACCENT,
+        components: [{ type: 10, content: ("### The Leaderboard\n" + lines).slice(0, 3900) }]
+      }]
+    }, { mention: false }).catch(() => {});
+    return;
+  }
+
   // .coinflip — win or lose 1 token (regular users)
   if (/^\.coinflip(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
