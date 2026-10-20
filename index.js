@@ -332,6 +332,7 @@ function formatCooldown(remainingSec) {
  */
 const pendingTokenLine = new Map(); // userId -> "-# You have XX Tokens left." (regular only — never premium)
 const pendingTagRetry = new Map(); // userId -> { content, channelId, guildId, messageId, at }
+const cleanSessions = new Map(); // messageId -> { authorId, content, at }
 /** Token line for message TEXT only (never embed). Empty for premium. */
 function tokensResultSuffix(isBuyerUser, tokensLeft) {
   if (isBuyerUser || tokensLeft === null || tokensLeft === undefined) return "";
@@ -634,7 +635,7 @@ async function checkRegularPermission(msg, needsFileReply = false) {
 
   // Regular user in DMs → premium required
   if (isDM) {
-    sendInputErrorV2(msg, "Buy a Premium on https://discord.com/channels/1509484518766018711/1539090234354962505 — to use this command or use command in DMs.").catch(() => {});
+    sendInputErrorV2(msg, "Buy a Premium on https://discord.com/channels/1509484518766018711/1561710834344923247 — to use this command or use command in DMs.").catch(() => {});
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
 
@@ -3273,6 +3274,60 @@ function renameVariables(source) {
 // LUA SCRIPT CLEANER
 // ============================================================
 /** Rename cleaner: ONLY comments + script loaders + IP loggers. Never touch print or Discord invites. */
+
+/** Clean V2: same strip as V1 + fix dead/deob leftovers that break Luau syntax so script can execute */
+function cleanLuaV2(text) {
+  let out = cleanLuaForRename(String(text || ""));
+  try {
+    // strip nulls / BOM
+    out = out.replace(/^\uFEFF/, "").replace(/\0/g, "");
+    // remove lines that are only broken VM leftovers / orphan labels
+    out = out.split("\n").filter(line => {
+      const t = line.trim();
+      if (!t) return true;
+      if (/^--\s*MISSING:/i.test(t)) return false;
+      if (/^goto\s+\w+\s*$/i.test(t) && !/\b::\w+::/.test(out)) return false;
+      // pure expression statements that are just numbers/strings alone (dead const dumps)
+      if (/^["'].*["']\s*$/.test(t) && t.length < 3) return false;
+      return true;
+    }).join("\n");
+    // collapse excessive blank lines
+    out = out.replace(/\n{3,}/g, "\n\n");
+    // fix ",," and trailing commas in table-ish lines lightly
+    out = out.replace(/,\s*,/g, ",");
+    out = out.replace(/,\s*([}\])])/g, "$1");
+    // remove empty do/end blocks
+    out = out.replace(/\bdo\s*end\b/g, "");
+    // remove empty then end
+    out = out.replace(/\bthen\s*end\b/gi, "then end");
+    // balance rough: drop orphan leading ends (common after dead branch removal)
+    const lines = out.split("\n");
+    let depth = 0;
+    const openers = /\b(function|then|do|repeat)\b/gi;
+    const closers = /\bend\b/gi;
+    const kept = [];
+    for (const line of lines) {
+      const opens = (line.match(/\b(function|then|do)\b/gi) || []).length;
+      const ends = (line.match(/\bend\b/gi) || []).length;
+      const repeats = (line.match(/\brepeat\b/gi) || []).length;
+      const untils = (line.match(/\buntil\b/gi) || []).length;
+      if (ends && depth <= 0 && !/\buntil\b/i.test(line) && opens === 0) {
+        // skip orphan end
+        continue;
+      }
+      depth += opens + repeats;
+      depth -= ends + untils;
+      if (depth < 0) depth = 0;
+      kept.push(line);
+    }
+    out = kept.join("\n");
+    // trailing incomplete operators
+    out = out.replace(/[+\-*/%^=]=?\s*$/gm, "");
+    out = out.replace(/\n{3,}/g, "\n\n").trim() + "\n";
+  } catch {}
+  return out;
+}
+
 function cleanLuaForRename(text) {
   if (!text || typeof text !== "string") return "";
   const ipGrabberDomains = ["iplogger.org","iplogger.com","grabify.link","grabify.xyz","nipiscan.com","spiderip.com","blasze.tk","blasze.com","ip-api.com","ipify.org","icanhazip.com","ifconfig.co","ifconfig.me","whatismyip.com","ipinfo.io","ipgeolocation.io","ps3cfw.com","2no.co","yip.su","ip-tracker.org","whatismyipaddress.com"];
@@ -4614,6 +4669,121 @@ function buildHelpV2(page, userId) {
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
   const uid = interaction.user.id;
+  // ─── CLEAN V1 / V2 BUTTONS ───
+  if (interaction.customId.startsWith("clean_v1_") || interaction.customId.startsWith("clean_v2_")) {
+    const isV2 = interaction.customId.startsWith("clean_v2_");
+    const ownerId = interaction.customId.replace(/^clean_v[12]_/, "");
+    if (interaction.user.id !== ownerId) {
+      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const session = cleanSessions.get(interaction.message.id);
+    if (!session || String(session.authorId) !== String(ownerId)) {
+      return interaction.reply({ content: "❌ panel expired — run `.clean` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    cleanSessions.delete(interaction.message.id);
+    try {
+      await interaction.update({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: "### Cleaning...\n⏳ Processing..." }]
+        }]
+      });
+    } catch {
+      try { await interaction.deferUpdate(); } catch {}
+    }
+    (async () => {
+      try {
+        let text = String(session.content || "");
+        try { text = stripGuiCopierHeader(text); } catch {}
+        const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
+        const foundUrls = text.match(urlRegex) || [];
+        let finalOutput = isV2 ? cleanLuaV2(text) : cleanLuaForRename(text);
+        // V2 extra pass: AI syntax repair when OpenAI is configured
+        if (isV2 && openaiClient && finalOutput && finalOutput.length < 120000) {
+          try {
+            const completion = await openaiClient.chat.completions.create({
+              model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+              temperature: 0.1,
+              max_tokens: 8000,
+              messages: [
+                {
+                  role: "system",
+                  content: "You are a Luau syntax repair tool. Fix ONLY syntax/structural errors so the script runs in Roblox. Keep behavior. Remove dead/unreachable junk left by deobfuscation. Do not add features. Output ONLY pure Luau source — no markdown, no fences, no commentary."
+                },
+                { role: "user", content: finalOutput.slice(0, 100000) }
+              ]
+            });
+            const aiOut = (completion.choices?.[0]?.message?.content || "").trim();
+            if (aiOut && aiOut.length > 20) {
+              finalOutput = aiOut.replace(/^```(?:lua|luau)?\n?/i, "").replace(/\n?```$/i, "").trim() + "\n";
+            }
+          } catch (e) {
+            console.warn("⚠️ clean V2 AI pass:", e.message?.slice?.(0, 100));
+          }
+        }
+        if (!finalOutput || !finalOutput.trim()) throw new Error("empty output after clean");
+        const uniqueUrls = [...new Set(foundUrls)];
+        const previewText = buildPreviewText(finalOutput);
+        let previewBody = "### File Preview\n```lua\n" + previewText + "\n```";
+        if (uniqueUrls.length > 0) {
+          const urlList = uniqueUrls.slice(0, 10).map(u => "- " + u).join("\n");
+          previewBody += "\n\n**URL Found:**\n" + urlList + (uniqueUrls.length > 10 ? "\n- ...and " + (uniqueUrls.length - 10) + " more" : "");
+        }
+        const outputName = "clean.lua";
+        const fileBuf = Buffer.from(finalOutput, "utf-8");
+        // Prefer sendRenameResult if available in scope
+        try {
+          const ch = interaction.channel;
+          const fakeMsg = {
+            channel: ch,
+            author: interaction.user,
+            member: interaction.member,
+            id: interaction.message.id,
+            reference: null,
+            reply: (p) => ch.send(p),
+            channelId: ch.id
+          };
+          if (typeof sendRenameResult === "function") {
+            await sendRenameResult(fakeMsg, {
+              previewMarkdown: previewBody,
+              fileBuffer: fileBuf,
+              fileName: outputName
+            });
+          } else {
+            await ch.send({
+              flags: IS_COMPONENTS_V2,
+              files: [{ attachment: fileBuf, name: outputName }],
+              components: [{
+                type: 17,
+                accent_color: RENAME_V2_ACCENT,
+                components: [
+                  { type: 10, content: previewBody.slice(0, 3900) },
+                  { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+                  { type: 13, file: { url: "attachment://" + outputName } }
+                ]
+              }]
+            });
+          }
+        } catch (e) {
+          await interaction.followUp({
+            content: "❌ clean failed: " + String(e.message || e).slice(0, 120),
+            flags: MessageFlags.Ephemeral
+          }).catch(() => {});
+        }
+        try { await interaction.message.delete().catch(() => {}); } catch {}
+      } catch (e) {
+        console.warn("⚠️ clean button:", e.message);
+        await interaction.followUp({
+          content: "❌ clean failed: " + String(e.message || e).slice(0, 120),
+          flags: MessageFlags.Ephemeral
+        }).catch(() => {});
+      }
+    })();
+    return;
+  }
+
   // ─── SERVER TAG CHECK AGAIN ───
   if (interaction.customId.startsWith("tagcheck_")) {
     const uid = interaction.customId.slice("tagcheck_".length);
@@ -6228,15 +6398,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .clean / .cl — clean comments/loaders/IP loggers
+  // .clean / .cl — panel: Clean V1 / Clean V2
   if (/^\.(?:clean|cl)$/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
-    // Buyer / Premium only
     if (!perm.isBuyer && !isOwner(msg.author.id)) {
-      await sendInputErrorV2(msg, "Buy a Premium on https://discord.com/channels/1509484518766018711/1539090234354962505 — to use this command or use command in DMs.").catch(() => {});
+      await sendInputErrorV2(msg, "Buy a Premium on https://discord.com/channels/1509484518766018711/1561710834344923247 — to use this command or use command in DMs.").catch(() => {});
       return;
     }
     const cd = checkCommandCooldown(msg.author.id, "clean", perm.isBuyer);
@@ -6244,7 +6413,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
-    const isBuyerUser = perm.isBuyer;
     let resolved = null;
     try {
       resolved = await resolveScriptInput(msg, txt);
@@ -6261,119 +6429,42 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       await sendRenameInputError(msg, "Couldn't read that file (link expired or invalid). Re-upload it and try again.");
       return;
     }
-    // .clean works on protected/obfuscated sources — only strips comments/loaders/IP loggers
-
-    // Process immediately — Components V2 loading
-    const loadingMsg = await sendRenameLoading(msg).catch(() => null);
-    const startTime = Date.now();
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Success)
+    );
     try {
-      let text = String(fileContent || "");
-      try { text = stripGuiCopierHeader(text); } catch {}
-      const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
-      const foundUrls = text.match(urlRegex) || [];
-      // // Rename only: comments + script loaders + IP loggers (no print / invite changes)
-      let finalOutput = cleanLuaForRename(text);
-      if (!finalOutput || !finalOutput.trim()) throw new Error("empty output after clean");
-
-      const finishSec = ((Date.now() - startTime) / 1000).toFixed(1);
-      const outputName = "clean.lua";
-
-      const uniqueUrls = [...new Set(foundUrls)];
-      const previewText = buildPreviewText(finalOutput);
-      // Components V2 text body (same info as old embed)
-      let previewBody = "### File Preview\n```lua\n" + previewText + "\n```";
-      if (uniqueUrls.length > 0) {
-        const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
-        previewBody += "\n\n**URL Found:**\n" + urlList + (uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : "");
+      const panelMsg = await replyComponentsV2(msg, {
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [
+            { type: 10, content: "### Choose Clean Version\nSelect a clean version below." },
+            { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+            row.toJSON()
+          ]
+        }]
+      }, { mention: false });
+      if (panelMsg?.id) {
+        cleanSessions.set(panelMsg.id, {
+          authorId: msg.author.id,
+          content: String(fileContent),
+          channelId: msg.channelId,
+          at: Date.now()
+        });
+        if (cleanSessions.size > 80) {
+          const cutoff = Date.now() - 30 * 60 * 1000;
+          for (const [k, v] of cleanSessions) {
+            if (!v?.at || v.at < cutoff) cleanSessions.delete(k);
+          }
+        }
       }
-      if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      pendingTokenLine.delete(String(msg.author.id));
-      // Result: File Preview + URL Found (if any) + file inside V2 — no Here you go / Finish in / tokens
-      await sendRenameResult(msg, {
-        previewMarkdown: previewBody,
-        fileBuffer: Buffer.from(finalOutput, "utf-8"),
-        fileName: outputName
-      }).catch(() => {});
     } catch (e) {
-      if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      await sendRenameInputError(msg, `Failed: ${e.message.slice(0, 150)}`);
+      await sendRenameInputError(msg, `Failed: ${String(e.message || e).slice(0, 120)}`);
     }
     return;
   }
-
-
-/** Threat scan: Script Loader / IP Logger / Discord Webhook / Safe */
-function detectThreatAnalysis(code) {
-  const s = String(code || "");
-  const lower = s.toLowerCase();
-
-  const IP_DOMAINS = [
-    "iplogger", "grabify", "blasze", "ipgrabber", "ip-logger", "ipify.org",
-    "ipinfo.io", "ip-api.com", "icanhazip", "ifconfig.me", "checkip.amazonaws",
-    "wtfismyip", "ipgeolocation", "freegeoip", "api.ip", "myip.com", "whatismyip"
-  ];
-  const hasIpLogger = IP_DOMAINS.some(d => lower.includes(d)) ||
-    /https?:\/\/[^\s"'`]*?(?:ip\s*log|grabify|blasze|iplog)/i.test(s);
-
-  const webhookRe = /https?:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i;
-  const hasWebhook = webhookRe.test(s);
-  const stealHints = /cookie|token|password|pass\b|account|session|robloxsecurity|\.roblosecurity|authorization|steal|exfil|webhook.*send|request.*webhook/i.test(s);
-  const webhookMalicious = hasWebhook && stealHints;
-  const webhookBenign = hasWebhook && !stealHints;
-
-  const loaderPatterns = [
-    /loadstring\s*\(\s*(?:game:GetService\s*\(\s*["']HttpService["']\s*\)\s*:)?HttpGet/i,
-    /loadstring\s*\(\s*(?:syn|http|fluxus|request)?[\s\S]{0,40}HttpGet/i,
-    /(?:loadstring|load)\s*\(\s*(?:game:HttpGet|http(?:s)?\.get|request\s*\()/i,
-    /HttpGet\s*\(\s*["']https?:\/\//i,
-    /syn\.request\s*\(\s*\{[\s\S]*?Url\s*=\s*["']https?:\/\//i,
-    /(?:getgenv|getrenv|getfenv).*loadstring/i,
-  ];
-  const hasLoader = loaderPatterns.some(re => re.test(s));
-  const loaderCritical = hasLoader && (hasWebhook || hasIpLogger || /malware|backdoor|steal|keylog/i.test(s));
-
-  // Priority: IP Logger > malicious webhook > critical loader > high loader > benign webhook > safe
-  if (hasIpLogger) {
-    return {
-      title: "IP Logger",
-      color: 0xED4245,
-      description: "What it does:\n\nA link/URL that steals the target’s IP address, location, device info, and ISP when clicked. Used for doxxing, DDoS attacks, or harassment. Common in Discord DMs, fake \"free nitro\" links, or Roblox game \"asset links\"."
-    };
-  }
-  if (webhookMalicious) {
-    return {
-      title: "Discord Webhook",
-      color: 0xF26522,
-      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
-    };
-  }
-  if (loaderCritical) {
-    return {
-      title: "Script Loader",
-      color: 0xED4245,
-      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
-    };
-  }
-  if (hasLoader) {
-    return {
-      title: "Script Loader",
-      color: 0xF26522,
-      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
-    };
-  }
-  if (webhookBenign) {
-    return {
-      title: "Discord Webhook",
-      color: 0x5865F2,
-      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
-    };
-  }
-  return {
-    title: "Safe",
-    color: 0x57F287,
-    description: "A clean file with no Script Loader, no IP Logger, no stealing Webhook. It will not download hidden malware, log your IP/location, or steal your Roblox cookie, account, or private data."
-  };
-}
 
   // .detect / .dt — threat scan (IP logger / script loader / webhook / safe)
   if (/^\.(?:detect|dt)(?:\s|$)/i.test(txt)) {
@@ -6449,10 +6540,14 @@ function detectThreatAnalysis(code) {
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const args = txt.split(/\s+/).slice(1).filter(Boolean);
-    if (!args.length) { await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.").catch(() => {}); return; }
+    if (!args.length) { await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1509484518766018711/1561710834344923247 — so you can use mutiple ID.").catch(() => {}); return; }
     const maxGetIds = isBuyerUser ? 10 : 1;
     if (args.length > maxGetIds) {
-      replyUser(msg, isBuyerUser ? "❌ max 10 id only, dumbass." : "❌ buy premium if you want multiple id.").catch(() => {});
+      if (isBuyerUser) {
+        replyUser(msg, "❌ max 10 id only, dumbass.").catch(() => {});
+      } else {
+        await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1509484518766018711/1561710834344923247 — so you can use mutiple ID.").catch(() => {});
+      }
       return;
     }
     const filesToSend = [];
@@ -6468,7 +6563,7 @@ function detectThreatAnalysis(code) {
       filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
     }
     if (!filesToSend.length) {
-      await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.").catch(() => {});
+      await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1509484518766018711/1561710834344923247 — so you can use mutiple ID.").catch(() => {});
       return;
     }
     // Send in batches of 10 (Discord file limit per message)
