@@ -3365,6 +3365,11 @@ function cleanLuaForRename(text) {
       continue;
     }
 
+    // Banner / separator comment lines (====...)
+    if (/^={5,}$/.test(trimmed)) continue;
+    if (/^-{0,2}\s*={10,}\s*-{0,2}$/.test(trimmed)) continue;
+    if (trimmed.includes("==================================================")) continue;
+
     // block comments --[[ ... ]]
     if (inBlockComment) {
       if (trimmed.includes("]]")) inBlockComment = false;
@@ -4733,45 +4738,32 @@ client.on("interactionCreate", async interaction => {
         }
         const outputName = "clean.lua";
         const fileBuf = Buffer.from(finalOutput, "utf-8");
-        // Prefer sendRenameResult if available in scope
+        // Result is a NEW message (not a reply to loading panel)
         try {
           const ch = interaction.channel;
-          const fakeMsg = {
-            channel: ch,
-            author: interaction.user,
-            member: interaction.member,
-            id: interaction.message.id,
-            reference: null,
-            reply: (p) => ch.send(p),
-            channelId: ch.id
-          };
-          if (typeof sendRenameResult === "function") {
-            await sendRenameResult(fakeMsg, {
-              previewMarkdown: previewBody,
-              fileBuffer: fileBuf,
-              fileName: outputName
-            });
-          } else {
-            await ch.send({
-              flags: IS_COMPONENTS_V2,
-              files: [{ attachment: fileBuf, name: outputName }],
-              components: [{
-                type: 17,
-                accent_color: RENAME_V2_ACCENT,
-                components: [
-                  { type: 10, content: previewBody.slice(0, 3900) },
-                  { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-                  { type: 13, file: { url: "attachment://" + outputName } }
-                ]
-              }]
-            });
-          }
+          const safeName = String(outputName).replace(/[^\w.\-]+/g, "_");
+          const file = new AttachmentBuilder(fileBuf, { name: safeName });
+          await ch.send({
+            flags: IS_COMPONENTS_V2,
+            files: [file],
+            components: [{
+              type: 17,
+              accent_color: RENAME_V2_ACCENT,
+              components: [
+                { type: 10, content: previewBody.slice(0, 3900) },
+                { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+                { type: 13, file: { url: "attachment://" + safeName } }
+              ]
+            }],
+            allowedMentions: { repliedUser: false, parse: [] }
+          });
         } catch (e) {
           await interaction.followUp({
             content: "❌ clean failed: " + String(e.message || e).slice(0, 120),
             flags: MessageFlags.Ephemeral
           }).catch(() => {});
         }
+        // delete loading panel after result posts
         try { await interaction.message.delete().catch(() => {}); } catch {}
       } catch (e) {
         console.warn("⚠️ clean button:", e.message);
@@ -6247,8 +6239,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
     if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
     const file = attachments[0];
-    const maxUploadSize = isBuyerUser ? 1024 * 1024 : 200 * 1024;
-    const maxUploadLabel = isBuyerUser ? "1MB" : "200KB";
+    const maxUploadSize = isBuyerUser ? 25 * 1024 * 1024 : 200 * 1024;
+    const maxUploadLabel = isBuyerUser ? "25MB" : "200KB";
     if (file.size > maxUploadSize) { replyUser(msg, `❌ max is ${maxUploadLabel} lol.`).catch(() => {}); return; }
     const savedTokLine = pendingTokenLine.get(String(msg.author.id)) || "";
     pendingTokenLine.delete(String(msg.author.id));
