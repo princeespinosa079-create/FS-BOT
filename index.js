@@ -332,7 +332,8 @@ function formatCooldown(remainingSec) {
  */
 const pendingTokenLine = new Map(); // userId -> "-# You have XX Tokens left." (regular only — never premium)
 const pendingTagRetry = new Map(); // userId -> { content, channelId, guildId, messageId, at }
-const cleanSessions = new Map(); // messageId -> { authorId, content, at }
+const cleanSessions = new Map(); // messageId -> { authorId, content, files?, at }
+const detectSessions = new Map(); // messageId -> { authorId, files, at }
 /** Token line for message TEXT only (never embed). Empty for premium. */
 function tokensResultSuffix(isBuyerUser, tokensLeft) {
   if (isBuyerUser || tokensLeft === null || tokensLeft === undefined) return "";
@@ -1613,6 +1614,138 @@ async function fetchTextFromUrl(url) {
   const text = await res.text();
   if (!text || !text.trim()) throw new Error("empty response");
   return text;
+}
+
+
+/** Threat scan: Script Loader / IP Logger / Discord Webhook / Safe */
+function detectThreatAnalysis(code) {
+  const s = String(code || "");
+  const lower = s.toLowerCase();
+
+  const IP_DOMAINS = [
+    "iplogger", "grabify", "blasze", "ipgrabber", "ip-logger", "ipify.org",
+    "ipinfo.io", "ip-api.com", "icanhazip", "ifconfig.me", "checkip.amazonaws",
+    "wtfismyip", "ipgeolocation", "freegeoip", "api.ip", "myip.com", "whatismyip",
+    "grabify.link", "2no.co", "yip.su", "ps3cfw.com"
+  ];
+  const hasIpLogger = IP_DOMAINS.some(d => lower.includes(d)) ||
+    /https?:\/\/[^\s"'`]*?(?:ip\s*log|grabify|blasze|iplog)/i.test(s);
+
+  const webhookRe = /https?:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i;
+  const hasWebhook = webhookRe.test(s);
+  const stealHints = /cookie|token|password|pass\b|account|session|robloxsecurity|\.roblosecurity|authorization|steal|exfil|webhook.*send|request.*webhook/i.test(s);
+  const webhookMalicious = hasWebhook && stealHints;
+  const webhookBenign = hasWebhook && !stealHints;
+
+  const loaderPatterns = [
+    /loadstring\s*\(\s*(?:game:GetService\s*\(\s*["']HttpService["']\s*\)\s*:)?HttpGet/i,
+    /loadstring\s*\(\s*(?:syn|http|fluxus|request)?[\s\S]{0,40}HttpGet/i,
+    /(?:loadstring|load)\s*\(\s*(?:game:HttpGet|http(?:s)?\.get|request\s*\()/i,
+    /HttpGet\s*\(\s*["']https?:\/\//i,
+    /syn\.request\s*\(\s*\{[\s\S]*?Url\s*=\s*["']https?:\/\//i,
+    /(?:getgenv|getrenv|getfenv).*loadstring/i,
+  ];
+  const hasLoader = loaderPatterns.some(re => re.test(s));
+  const loaderCritical = hasLoader && (hasWebhook || hasIpLogger || /malware|backdoor|steal|keylog/i.test(s));
+
+  if (hasIpLogger) {
+    return {
+      title: "IP Logger",
+      color: 0xED4245,
+      description: "What it does:\n\nA link/URL that steals the target’s IP address, location, device info, and ISP when clicked. Used for doxxing, DDoS attacks, or harassment. Common in Discord DMs, fake \"free nitro\" links, or Roblox game \"asset links\"."
+    };
+  }
+  if (webhookMalicious) {
+    return {
+      title: "Discord Webhook",
+      color: 0xF26522,
+      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
+    };
+  }
+  if (loaderCritical) {
+    return {
+      title: "Script Loader",
+      color: 0xED4245,
+      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
+    };
+  }
+  if (hasLoader) {
+    return {
+      title: "Script Loader",
+      color: 0xF26522,
+      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
+    };
+  }
+  if (webhookBenign) {
+    return {
+      title: "Discord Webhook",
+      color: 0x5865F2,
+      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
+    };
+  }
+  return {
+    title: "Safe",
+    color: 0x57F287,
+    description: "A clean file with no Script Loader, no IP Logger, no stealing Webhook. It will not download hidden malware, log your IP/location, or steal your Roblox cookie, account, or private data."
+  };
+}
+
+async function downloadAttachmentText(file) {
+  if (!file) return null;
+  const tryUrls = [file.url, file.proxyURL, file.proxy_url].filter(Boolean);
+  for (const u of [...new Set(tryUrls)]) {
+    try {
+      const dlRes = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" }, redirect: "follow" });
+      if (dlRes.ok) {
+        const body = await dlRes.text();
+        if (body && body.trim().length >= 5) return body;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+function buildNumberButtonRows(prefix, userId, count) {
+  const n = Math.max(0, Math.min(10, Number(count) || 0));
+  const rows = [];
+  let row = new ActionRowBuilder();
+  for (let i = 0; i < n; i++) {
+    if (i > 0 && i % 5 === 0) {
+      rows.push(row);
+      row = new ActionRowBuilder();
+    }
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(prefix + "_" + (i + 1) + "_" + userId)
+        .setLabel(String(i + 1))
+        .setStyle(ButtonStyle.Secondary)
+    );
+  }
+  if (row.components.length) rows.push(row);
+  return rows;
+}
+
+async function sendFilePickPanel(msg, { prefix, userId, files, listLabel }) {
+  const n = Math.min(10, files.length);
+  const rows = buildNumberButtonRows(prefix, userId, n);
+  const nameLines = files.slice(0, n).map((f, i) =>
+    `\`${i + 1}.\` ${(f.name || f.filename || "file").slice(0, 60)}`
+  ).join("\n");
+  const content =
+    "### Choose a Button below\nPick one button below of what file you want to " + listLabel + ".\n\n" + nameLines;
+  const children = [
+    { type: 10, content: content.slice(0, 3900) },
+    { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL }
+  ];
+  for (const r of rows) children.push(r.toJSON());
+  return replyComponentsV2(msg, {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: RENAME_V2_ACCENT,
+      components: children
+    }]
+  }, { mention: false });
 }
 
 /** Resolve script source for .clean / .detect — file, reply, URL arg, or code block */
@@ -4674,6 +4807,127 @@ function buildHelpV2(page, userId) {
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
   const uid = interaction.user.id;
+  // ─── CLEAN FILE PICK (1–10) ───
+  if (interaction.customId.startsWith("cleanfile_")) {
+    const parts = interaction.customId.split("_");
+    // cleanfile_N_userid
+    const idx = parseInt(parts[1], 10);
+    const ownerId = parts.slice(2).join("_");
+    if (interaction.user.id !== ownerId) {
+      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const session = cleanSessions.get(interaction.message.id);
+    if (!session || String(session.authorId) !== String(ownerId) || !Array.isArray(session.files)) {
+      return interaction.reply({ content: "❌ panel expired — run `.clean` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const fileMeta = session.files[idx - 1];
+    if (!fileMeta) {
+      return interaction.reply({ content: "❌ invalid file number.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    cleanSessions.delete(interaction.message.id);
+    try {
+      await interaction.update({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: "### Loading file...\n⏳ Please wait..." }]
+        }]
+      });
+    } catch { try { await interaction.deferUpdate(); } catch {} }
+
+    try {
+      const body = await downloadAttachmentText(fileMeta);
+      if (!body) {
+        await interaction.followUp({ content: "❌ couldn't read that file.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        try { await interaction.message.delete().catch(() => {}); } catch {}
+        return;
+      }
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("clean_v1_" + ownerId).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId("clean_v2_" + ownerId).setLabel("Clean V2").setStyle(ButtonStyle.Success)
+      );
+      const ch = interaction.channel;
+      const panelMsg = await ch.send({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [
+            { type: 10, content: "### Choose Clean Version\nSelect a clean version below." },
+            { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+            row.toJSON()
+          ]
+        }],
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
+      if (panelMsg?.id) {
+        cleanSessions.set(panelMsg.id, { authorId: ownerId, content: body, at: Date.now() });
+      }
+      try { await interaction.message.delete().catch(() => {}); } catch {}
+    } catch (e) {
+      await interaction.followUp({ content: "❌ " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    return;
+  }
+
+  // ─── DETECT FILE PICK (1–10) ───
+  if (interaction.customId.startsWith("detectfile_")) {
+    const parts = interaction.customId.split("_");
+    const idx = parseInt(parts[1], 10);
+    const ownerId = parts.slice(2).join("_");
+    if (interaction.user.id !== ownerId) {
+      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const session = detectSessions.get(interaction.message.id);
+    if (!session || String(session.authorId) !== String(ownerId) || !Array.isArray(session.files)) {
+      return interaction.reply({ content: "❌ panel expired — run `.detect` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const fileMeta = session.files[idx - 1];
+    if (!fileMeta) {
+      return interaction.reply({ content: "❌ invalid file number.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    detectSessions.delete(interaction.message.id);
+    try {
+      await interaction.update({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
+        }]
+      });
+    } catch { try { await interaction.deferUpdate(); } catch {} }
+
+    try {
+      const body = await downloadAttachmentText(fileMeta);
+      if (!body) {
+        await interaction.followUp({ content: "❌ couldn't read that file.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        try { await interaction.message.delete().catch(() => {}); } catch {}
+        return;
+      }
+      const result = detectThreatAnalysis(body);
+      const text =
+        `## Detected: ${result.title}\n` +
+        `-# What it does:\n\n` +
+        "```" + result.description + "```";
+      const ch = interaction.channel;
+      await ch.send({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: result.color,
+          components: [{ type: 10, content: text.slice(0, 3900) }]
+        }],
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
+      try { await interaction.message.delete().catch(() => {}); } catch {}
+    } catch (e) {
+      await interaction.followUp({ content: "❌ " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    return;
+  }
+
   // ─── CLEAN V1 / V2 BUTTONS ───
   if (interaction.customId.startsWith("clean_v1_") || interaction.customId.startsWith("clean_v2_")) {
     const isV2 = interaction.customId.startsWith("clean_v2_");
@@ -6390,7 +6644,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .clean / .cl — panel: Clean V1 / Clean V2
+  // .clean / .cl — multi-file pick (max 10) → Clean V1 / V2
   if (/^\.(?:clean|cl)$/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
@@ -6405,44 +6659,98 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
-    let resolved = null;
+
+    let files = await getScriptAttachmentsFromMsgOrReply(msg);
+    if (files.length > 10) files = files.slice(0, 10);
+
+    // no attachments → fall back to URL / codeblock single source
+    if (!files.length) {
+      let resolved = null;
+      try { resolved = await resolveScriptInput(msg, txt); } catch (e) {
+        await sendRenameInputError(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`);
+        return;
+      }
+      if (!resolved?.content || resolved.content.trim().length < 5) {
+        await sendRenameInputError(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply / forward a sample.");
+        return;
+      }
+      // single source → V1/V2 panel
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Success)
+      );
+      try {
+        const panelMsg = await replyComponentsV2(msg, {
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: RENAME_V2_ACCENT,
+            components: [
+              { type: 10, content: "### Choose Clean Version\nSelect a clean version below." },
+              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+              row.toJSON()
+            ]
+          }]
+        }, { mention: false });
+        if (panelMsg?.id) {
+          cleanSessions.set(panelMsg.id, { authorId: msg.author.id, content: String(resolved.content), at: Date.now() });
+        }
+      } catch (e) {
+        await sendRenameInputError(msg, `Failed: ${String(e.message || e).slice(0, 120)}`);
+      }
+      return;
+    }
+
+    // 1 file → skip picker, go to V1/V2
+    if (files.length === 1) {
+      const body = await downloadAttachmentText(files[0]);
+      if (!body) {
+        await sendRenameInputError(msg, "Couldn't read that file (link expired or invalid). Re-upload it and try again.");
+        return;
+      }
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Success)
+      );
+      try {
+        const panelMsg = await replyComponentsV2(msg, {
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: RENAME_V2_ACCENT,
+            components: [
+              { type: 10, content: "### Choose Clean Version\nSelect a clean version below." },
+              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+              row.toJSON()
+            ]
+          }]
+        }, { mention: false });
+        if (panelMsg?.id) {
+          cleanSessions.set(panelMsg.id, { authorId: msg.author.id, content: body, at: Date.now() });
+        }
+      } catch (e) {
+        await sendRenameInputError(msg, `Failed: ${String(e.message || e).slice(0, 120)}`);
+      }
+      return;
+    }
+
+    // 2–10 files → numbered gray buttons
     try {
-      resolved = await resolveScriptInput(msg, txt);
-    } catch (e) {
-      await sendRenameInputError(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`);
-      return;
-    }
-    if (!resolved || !resolved.content) {
-      await sendRenameInputError(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply to a sample.");
-      return;
-    }
-    let fileContent = resolved.content;
-    if (!fileContent || fileContent.trim().length < 5) {
-      await sendRenameInputError(msg, "Couldn't read that file (link expired or invalid). Re-upload it and try again.");
-      return;
-    }
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Success)
-    );
-    try {
-      const panelMsg = await replyComponentsV2(msg, {
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: RENAME_V2_ACCENT,
-          components: [
-            { type: 10, content: "### Choose Clean Version\nSelect a clean version below." },
-            { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-            row.toJSON()
-          ]
-        }]
-      }, { mention: false });
+      const panelMsg = await sendFilePickPanel(msg, {
+        prefix: "cleanfile",
+        userId: msg.author.id,
+        files,
+        listLabel: "clean"
+      });
       if (panelMsg?.id) {
         cleanSessions.set(panelMsg.id, {
           authorId: msg.author.id,
-          content: String(fileContent),
-          channelId: msg.channelId,
+          files: files.map(f => ({
+            name: f.name || f.filename || "file",
+            url: f.url,
+            proxyURL: f.proxyURL || f.proxy_url,
+            proxy_url: f.proxy_url || f.proxyURL
+          })),
           at: Date.now()
         });
         if (cleanSessions.size > 80) {
@@ -6458,7 +6766,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .detect / .dt — threat scan (IP logger / script loader / webhook / safe)
+  // .detect / .dt — threat scan (multi-file pick max 10)
   if (/^\.(?:detect|dt)(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
@@ -6469,51 +6777,94 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
-    let resolved = null;
-    try {
-      resolved = await resolveScriptInput(msg, txt);
-    } catch (e) {
-      await sendInputErrorV2(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
-      return;
-    }
-    if (!resolved?.content) {
-      await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply / forward a sample.").catch(() => {});
-      return;
-    }
-    // optional extension hint
-    const fname = String(resolved.name || resolved.filename || "").toLowerCase();
-    if (fname && !/\.(lua|luau|txt)$/i.test(fname) && !resolved.fromCodeBlock) {
-      // still allow if content looks like text
-    }
-    const loadingPayload = {
-      flags: IS_COMPONENTS_V2,
-      components: [{
-        type: 17,
-        accent_color: RENAME_V2_ACCENT,
-        components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
-      }]
-    };
-    const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
-    try {
-      const code = String(resolved.content || "");
-      if (!code.trim()) throw new Error("could not read file");
-      const result = detectThreatAnalysis(code);
-      const body =
-        `## Detected: ${result.title}\n` +
-        `-# What it does:\n\n` +
-        "```" + result.description + "```";
-      if (loadingMsg) await loadingMsg.delete().catch(() => {});
-      pendingTokenLine.delete(String(msg.author.id));
-      await replyComponentsV2(msg, {
+
+    let files = await getScriptAttachmentsFromMsgOrReply(msg);
+    if (files.length > 10) files = files.slice(0, 10);
+
+    const runDetect = async (code) => {
+      const loadingPayload = {
         flags: IS_COMPONENTS_V2,
         components: [{
           type: 17,
-          accent_color: result.color,
-          components: [{ type: 10, content: body.slice(0, 3900) }]
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
         }]
-      }, { mention: false }).catch(() => {});
+      };
+      const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
+      try {
+        if (!code || !String(code).trim()) throw new Error("could not read file");
+        const result = detectThreatAnalysis(code);
+        const body =
+          `## Detected: ${result.title}\n` +
+          `-# What it does:\n\n` +
+          "```" + result.description + "```";
+        if (loadingMsg) await loadingMsg.delete().catch(() => {});
+        pendingTokenLine.delete(String(msg.author.id));
+        await replyComponentsV2(msg, {
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: result.color,
+            components: [{ type: 10, content: body.slice(0, 3900) }]
+          }]
+        }, { mention: false }).catch(() => {});
+      } catch (e) {
+        if (loadingMsg) await loadingMsg.delete().catch(() => {});
+        await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
+      }
+    };
+
+    if (!files.length) {
+      let resolved = null;
+      try { resolved = await resolveScriptInput(msg, txt); } catch (e) {
+        await sendInputErrorV2(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
+        return;
+      }
+      if (!resolved?.content) {
+        await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply / forward a sample.").catch(() => {});
+        return;
+      }
+      await runDetect(resolved.content);
+      return;
+    }
+
+    if (files.length === 1) {
+      const body = await downloadAttachmentText(files[0]);
+      if (!body) {
+        await sendInputErrorV2(msg, "Couldn't read that file (link expired or invalid).").catch(() => {});
+        return;
+      }
+      await runDetect(body);
+      return;
+    }
+
+    // 2–10 files → picker
+    try {
+      const panelMsg = await sendFilePickPanel(msg, {
+        prefix: "detectfile",
+        userId: msg.author.id,
+        files,
+        listLabel: "detect"
+      });
+      if (panelMsg?.id) {
+        detectSessions.set(panelMsg.id, {
+          authorId: msg.author.id,
+          files: files.map(f => ({
+            name: f.name || f.filename || "file",
+            url: f.url,
+            proxyURL: f.proxyURL || f.proxy_url,
+            proxy_url: f.proxy_url || f.proxyURL
+          })),
+          at: Date.now()
+        });
+        if (detectSessions.size > 80) {
+          const cutoff = Date.now() - 30 * 60 * 1000;
+          for (const [k, v] of detectSessions) {
+            if (!v?.at || v.at < cutoff) detectSessions.delete(k);
+          }
+        }
+      }
     } catch (e) {
-      if (loadingMsg) await loadingMsg.delete().catch(() => {});
       await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
     }
     return;
