@@ -1718,7 +1718,7 @@ function buildNumberButtonRows(prefix, userId, count) {
       new ButtonBuilder()
         .setCustomId(prefix + "_" + (i + 1) + "_" + userId)
         .setLabel(String(i + 1))
-        .setStyle(ButtonStyle.Secondary)
+        .setStyle(ButtonStyle.Success)
     );
   }
   if (row.components.length) rows.push(row);
@@ -4958,29 +4958,48 @@ client.on("interactionCreate", async interaction => {
         try { text = stripGuiCopierHeader(text); } catch {}
         const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
         const foundUrls = text.match(urlRegex) || [];
-        let finalOutput = isV2 ? cleanLuaV2(text) : cleanLuaForRename(text);
-        // V2 extra pass: AI syntax repair when OpenAI is configured
-        if (isV2 && openaiClient && finalOutput && finalOutput.length < 120000) {
-          try {
-            const completion = await openaiClient.chat.completions.create({
-              model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-              temperature: 0.1,
-              max_tokens: 8000,
-              messages: [
-                {
-                  role: "system",
-                  content: "You are a Luau syntax repair tool. Fix ONLY syntax/structural errors so the script runs in Roblox. Keep behavior. Remove dead/unreachable junk left by deobfuscation. Do not add features. Output ONLY pure Luau source — no markdown, no fences, no commentary."
-                },
-                { role: "user", content: finalOutput.slice(0, 100000) }
-              ]
-            });
-            const aiOut = (completion.choices?.[0]?.message?.content || "").trim();
-            if (aiOut && aiOut.length > 20) {
-              finalOutput = aiOut.replace(/^```(?:lua|luau)?\n?/i, "").replace(/\n?```$/i, "").trim() + "\n";
+        let finalOutput;
+        if (isV2) {
+          finalOutput = cleanLuaV2(text);
+          // V2 AI clean / deobfuscate when OpenAI is configured
+          if (openaiClient && text && text.length < 120000) {
+            try {
+              const V2_CLEAN_PROMPT = `You are an expert Lua code cleaner and deobfuscator.
+
+TASK: Clean and refactor the provided Lua code.
+
+RULES:
+- Remove all obfuscation, junk code, fake control flows, and useless variables.
+- Keep the EXACT original logic and functionality - do not add or remove features.
+- Format the code with proper indentation and newlines.
+- Rename obfuscated variables (like _G, a1, lIlI) to meaningful names (player, config, etc) where possible.
+- Convert to clean, readable, vanilla Lua (Luau compatible if it's Roblox).
+- Do not explain. Output ONLY the cleaned Lua code in a lua code block.`;
+              const completion = await openaiClient.chat.completions.create({
+                model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+                temperature: 0.1,
+                max_tokens: 8000,
+                messages: [
+                  { role: "system", content: V2_CLEAN_PROMPT },
+                  { role: "user", content: String(text).slice(0, 100000) }
+                ]
+              });
+              const aiOut = (completion.choices?.[0]?.message?.content || "").trim();
+              if (aiOut && aiOut.length > 20) {
+                finalOutput = aiOut
+                  .replace(/^```(?:lua|luau)?\s*\n?/i, "")
+                  .replace(/\n?```\s*$/i, "")
+                  .trim() + "\n";
+              }
+            } catch (e) {
+              console.warn("⚠️ clean V2 AI pass:", e.message?.slice?.(0, 100));
             }
-          } catch (e) {
-            console.warn("⚠️ clean V2 AI pass:", e.message?.slice?.(0, 100));
           }
+          // Header for V2 results
+          finalOutput = String(finalOutput || "").replace(/^\s*--\s*Cleaned by Prince\s*\n?/i, "");
+          finalOutput = "-- Cleaned by Prince\n" + finalOutput;
+        } else {
+          finalOutput = cleanLuaForRename(text);
         }
         if (!finalOutput || !finalOutput.trim()) throw new Error("empty output after clean");
         const uniqueUrls = [...new Set(foundUrls)];
