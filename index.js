@@ -317,7 +317,7 @@ setInterval(cleanupExpiredKeys, 10 * 1000);
 const commandCooldowns = new Map(); // legacy — unused (tokens replace cooldowns)
 const COOLDOWNS = {}; // all timed cooldowns removed — token system used instead
 /** Free commands (no token cost): redeem, help, find (prefix). Finder panel Find button DOES cost. */
-const TOKEN_FREE_CMDS = new Set(["redeem", "help", "find", "leaderboard", "lb"]);
+const TOKEN_FREE_CMDS = new Set(["redeem", "help", "find"]);
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
   const s = remainingSec % 60;
@@ -3532,11 +3532,8 @@ function cleanLuaForRename(text) {
       if (!inS && !inD && c === "-" && n === "-") { cutAt = i; break; }
     }
     if (cutAt >= 0) line = line.slice(0, cutAt);
-    // If only spaces left after cutting a trailing comment, keep as blank line
-    if (!line.trim()) {
-      out.push("");
-      continue;
-    }
+    // Comment-only line after strip → drop entirely (no leftover blank)
+    if (!line.trim()) continue;
 
     // DO NOT rewrite print / warn
     // DO NOT replace Discord invites
@@ -4191,7 +4188,7 @@ DELETE JUNK / WATERMARKS (ALWAYS):
 
 PRESERVE:
 - All real loaders, HttpGet, remotes, webhooks, UI, metatables, hooks, and logic
-- Replace Discord invite links with: https://discord.gg/TBBAUZu8cW
+- Replace Discord invite links with: https://discord.gg/7Ar8QGZB2j
 
 OUTPUT RULES (ABSOLUTE):
 - Output ONLY pure Luau source — nothing else
@@ -4581,6 +4578,10 @@ const commands = [
       .setName("color")
       .setDescription("Optional embed color hex (e.g. #5865F2 or blurple).")
       .setRequired(false))
+    .addAttachmentOption(o => o
+      .setName("image")
+      .setDescription("Optional image (shown below divider on Embed V2).")
+      .setRequired(false))
     .toJSON(),
   new SlashCommandBuilder()
     .setName("finderpanel")
@@ -4713,35 +4714,18 @@ const helpPages = [
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.detect\`** [\`.dt\`] Detect IP logger / script loader / webhook / safe.
+`**\`.upload\`** Turn your file into Script Loader.
 
-**\`.leaderboard\`** [\`.lb\`] Top command users.
+**\`.get\`** Get file using ID.
 
-**\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.
-
-**\`.coinflip\`** Flip a coin — win or lose **1 token**.`
+**\`.find\`** Search files by name.`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.et\`** Extract files from zip archives.
-
-**\`.upload\`** Turn your file into Script Loader.
-
-**\`.get\`** Get file using ID.`
+`**\`.coinflip\`** Flip a coin — win or lose **1 token**.`
     ),
-  new EmbedBuilder()
-    .setTitle("🤖 Bot Commands")
-    .setColor(BLURPLE)
-    .setDescription(
-`**\`.find\`** Search files by name.
-
-**\`.delwh\`** Delete a webhook using its URL.
-
-**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).`
-    ),
-  // Yellow premium page — always last
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
     .setColor(YELLOW_COLOR)
@@ -4756,23 +4740,12 @@ const helpSessions = new Map();
 
 /** Help page bodies for Components V2 */
 const helpPageBodies = [
-  { color: 0x5865F2, text: `**\`.detect\`** [\`.dt\`] Detect IP logger / script loader / webhook / safe.
+  { color: 0x5865F2, text: `**\`.upload\`** Turn your file into Script Loader.
 
-**\`.leaderboard\`** [\`.lb\`] Top command users.
+**\`.get\`** Get file using ID.
 
-**\`.download\`** [\`.dl\`] File link, TikTok Video, using link, etc.
-
-**\`.coinflip\`** Flip a coin — win or lose **1 token**.` },
-  { color: 0x5865F2, text: `**\`.et\`** Extract files from zip archives.
-
-**\`.upload\`** Turn your file into Script Loader.
-
-**\`.get\`** Get file using ID.` },
-  { color: 0x5865F2, text: `**\`.find\`** Search files by name.
-
-**\`.delwh\`** Delete a webhook using its URL.
-
-**\`.bypass\`** Bypass ad/key links (linkvertise, lootlabs, etc.).` },
+**\`.find\`** Search files by name.` },
+  { color: 0x5865F2, text: `**\`.coinflip\`** Flip a coin — win or lose **1 token**.` },
   { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
 
 > Premium users can use all commands in DMs.
@@ -4871,63 +4844,6 @@ client.on("interactionCreate", async interaction => {
     return;
   }
 
-  // ─── DETECT FILE PICK (1–10) ───
-  if (interaction.customId.startsWith("detectfile_")) {
-    const parts = interaction.customId.split("_");
-    const idx = parseInt(parts[1], 10);
-    const ownerId = parts.slice(2).join("_");
-    if (interaction.user.id !== ownerId) {
-      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const session = detectSessions.get(interaction.message.id);
-    if (!session || String(session.authorId) !== String(ownerId) || !Array.isArray(session.files)) {
-      return interaction.reply({ content: "❌ panel expired — run `.detect` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const fileMeta = session.files[idx - 1];
-    if (!fileMeta) {
-      return interaction.reply({ content: "❌ invalid file number.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    detectSessions.delete(interaction.message.id);
-    try {
-      await interaction.update({
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: RENAME_V2_ACCENT,
-          components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
-        }]
-      });
-    } catch { try { await interaction.deferUpdate(); } catch {} }
-
-    try {
-      const body = await downloadAttachmentText(fileMeta);
-      if (!body) {
-        await interaction.followUp({ content: "❌ couldn't read that file.", flags: MessageFlags.Ephemeral }).catch(() => {});
-        try { await interaction.message.delete().catch(() => {}); } catch {}
-        return;
-      }
-      const result = detectThreatAnalysis(body);
-      const text =
-        `## Detected: ${result.title}\n` +
-        `-# What it does:\n\n` +
-        "```" + result.description + "```";
-      const ch = interaction.channel;
-      await ch.send({
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: result.color,
-          components: [{ type: 10, content: text.slice(0, 3900) }]
-        }],
-        allowedMentions: { repliedUser: false, parse: [] }
-      });
-      try { await interaction.message.delete().catch(() => {}); } catch {}
-    } catch (e) {
-      await interaction.followUp({ content: "❌ " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    return;
-  }
-
   // ─── CLEAN V1 / V2 BUTTONS ───
   if (interaction.customId.startsWith("clean_v1_") || interaction.customId.startsWith("clean_v2_")) {
     const isV2 = interaction.customId.startsWith("clean_v2_");
@@ -4974,6 +4890,7 @@ RULES:
 - Format the code with proper indentation and newlines.
 - Rename obfuscated variables (like _G, a1, lIlI) to meaningful names (player, config, etc) where possible.
 - Convert to clean, readable, vanilla Lua (Luau compatible if it's Roblox).
+- Remove all comments or text/word that are not valid Lua or that cause of syntax errors.
 - Do not explain. Output ONLY the cleaned Lua code in a lua code block.`;
               const completion = await openaiClient.chat.completions.create({
                 model: process.env.OPENAI_MODEL || "gpt-4o-mini",
@@ -4995,9 +4912,6 @@ RULES:
               console.warn("⚠️ clean V2 AI pass:", e.message?.slice?.(0, 100));
             }
           }
-          // Header for V2 results
-          finalOutput = String(finalOutput || "").replace(/^\s*--\s*Cleaned by Prince\s*\n?/i, "");
-          finalOutput = "-- Cleaned by Prince\n" + finalOutput;
         } else {
           finalOutput = cleanLuaForRename(text);
         }
@@ -5621,6 +5535,7 @@ client.on("interactionCreate", async interaction => {
       const title = interaction.options.getString("title");
       const footer = interaction.options.getString("footer");
       const colorRaw = (interaction.options.getString("color") || "").trim();
+      const imageAtt = interaction.options.getAttachment("image");
       await interaction.deleteReply().catch(() => {});
       const targetChannel = interaction.channel || interaction.user.dmChannel || await interaction.user.createDM().catch(() => null);
       if (!targetChannel) {
@@ -5628,7 +5543,8 @@ client.on("interactionCreate", async interaction => {
         return;
       }
       if (type === "none") {
-        await targetChannel.send({ content: text });
+        if (imageAtt?.url) await targetChannel.send({ content: text, files: [{ attachment: imageAtt.url, name: imageAtt.name || "image.png" }] });
+        else await targetChannel.send({ content: text });
       } else if (type === "v2") {
         let color = RENAME_V2_ACCENT;
         if (colorRaw) {
@@ -5640,9 +5556,18 @@ client.on("interactionCreate", async interaction => {
         let body = String(text || "");
         if (title) body = "### " + String(title).slice(0, 200) + "\n" + body;
         if (footer) body = body + "\n\n-# " + String(footer).slice(0, 200);
+        const v2Children = [{ type: 10, content: body.slice(0, 4000) }];
+        const files = [];
+        if (imageAtt?.url) {
+          v2Children.push({ type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL });
+          const imgName = (imageAtt.name || "image.png").replace(/[^\w.\-]+/g, "_");
+          files.push({ attachment: imageAtt.url, name: imgName });
+          v2Children.push({ type: 12, items: [{ media: { url: "attachment://" + imgName } }] });
+        }
         await targetChannel.send({
           flags: IS_COMPONENTS_V2,
-          components: [{ type: 17, accent_color: color, components: [{ type: 10, content: body.slice(0, 4000) }] }]
+          files: files.length ? files : undefined,
+          components: [{ type: 17, accent_color: color, components: v2Children }]
         });
       } else {
         let color = BLURPLE;
@@ -5655,6 +5580,7 @@ client.on("interactionCreate", async interaction => {
         const embed = new EmbedBuilder().setColor(color).setDescription(text);
         if (title) embed.setTitle(title);
         if (footer) embed.setFooter({ text: footer });
+        if (imageAtt?.url) embed.setImage(imageAtt.url);
         await targetChannel.send({ embeds: [embed] });
       }
       return;
@@ -6086,7 +6012,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   // ─────────────────────────────────────────────
   // .set / .sc — Owner Only (set allowed channel) — improved
   // ─────────────────────────────────────────────
-  if (/^\.(?:set|sc)(?:\s|$)/i.test(txt)) {
+  if (/^\.set(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1);
@@ -6391,21 +6317,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     } catch (e) { if (sentMsg) await sentMsg.delete().catch(() => {}); replyUser(msg, `❌ error: ${e.message}`).catch(() => {}); }
     return;
   }
-  if (/^\.getinv(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    const serverId = txt.split(/\s+/)[1];
-    if (!serverId) { replyUser(msg, "❌ usage: `.getinv <server id>`, dumbass.").catch(() => {}); return; }
-    try {
-      const guild = await client.guilds.fetch(serverId.trim());
-      const channels = await guild.channels.fetch();
-      const targetChannel = channels.find(c => c.type === ChannelType.GuildText && c.permissionsFor(guild.members.me)?.has("CreateInstantInvite"))
-        || channels.find(c => c.isTextBased?.() && c.permissionsFor(guild.members.me)?.has("CreateInstantInvite"));
-      if (!targetChannel) { replyUser(msg, "❌ no channel with invite permission found, bro.").catch(() => {}); return; }
-      const invite = await targetChannel.createInvite({ maxAge: 1800, maxUses: 1, unique: true, reason: "Owner requested" });
-      replyUser(msg, `✅ **Invite for \`${guild.name}\`**\n🔗 https://discord.gg/${invite.code}\n⏱️ Expires: **30 min**\n👤 Uses: **1**`).catch(() => {});
-    } catch (e) { replyUser(msg, `❌ failed: \`${e.message}\``).catch(() => {}); }
-    return;
-  }
   if (/^\.leave(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const args = txt.split(/\s+/).slice(1); const target = args[0];
@@ -6435,67 +6346,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   // ─────────────────────────────────────────────
   // ─────────────────────────────────────────────
   // ─────────────────────────────────────────────
-  // .delwh — Delete Webhook (regular + buyer)
-  // ─────────────────────────────────────────────
-  if (/^\.delwh(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "delwh", perm.isBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    const isBuyerUser = perm.isBuyer;
-    
-    const arg = txt.split(/\s+/)[1]?.trim();
-    if (!arg) {
-      return replyUser(msg, "❌ usage: `.delwh <webhook_url>`, dumbass.").catch(() => {});
-    }
-    
-    let webhookUrl = arg;
-    const urlMatch = txt.match(/(https:\/\/discord\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+)/i);
-    if (urlMatch) webhookUrl = urlMatch[1];
-
-    const timeFooter = `Requested by @${msg.author.username}│Webhook Delete`;
-    const loadingEmbed = new EmbedBuilder()
-      .setColor(getEmbedColor(isBuyerUser))
-      .setTitle("Deleting Webhook URL...")
-      .setDescription("⏳ Processing...")
-      .setFooter({ text: timeFooter });
-    const sentMsg = await replyUser(msg, { embeds: [loadingEmbed] }).catch(() => {});
-
-    try {
-      const res = await fetch(webhookUrl, { method: "DELETE" });
-      
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      
-      if (res.status === 404) {
-        await msg.channel.send(`<@${msg.author.id}> ❌ Not Found`).catch(() => {});
-      } else {
-        const resultEmbed = new EmbedBuilder()
-          .setColor(getEmbedColor(isBuyerUser))
-          .setTitle("Result")
-          .setFooter({ text: timeFooter });
-        
-        if (res.ok) {
-          resultEmbed.setDescription("✅ Delete");
-        } else {
-          resultEmbed.setDescription(`❌ failed: HTTP ${res.status}`);
-        }
-        const tokLine = isBuyerUser ? "" : tokensResultSuffix(false, peekTokens(msg.author.id, false).tokens);
-        await msg.channel.send({
-          content: `<@${msg.author.id}> done, delete the webhook bro!` + tokLine,
-          embeds: [resultEmbed]
-        }).catch(() => {});
-      }
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ error: ${e.message.slice(0,100)}`).catch(() => {});
-    }
-    return;
-  }
   // .upload — file → Pastefy loadstring (regular + buyer)
   // ─────────────────────────────────────────────
   if (/^\.upload(?:\s|$)/i.test(txt)) {
@@ -6566,102 +6416,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-
-  if (/^\.et(?:\s|$)/i.test(txt) || /^\.extract(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "et", perm.isBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    if (isDM && !perm.isBuyer) { replyUser(msg, "❌ not here, dumbass.").catch(() => {}); return; }
-
-    const argUrl = (txt.split(/\s+/)[1] || "").trim();
-    let attachments = await attachmentsFromMsgOrReply(msg, a => isZipFile(a.name || a.filename, a.contentType) || isHtmlFile(a.name || a.filename, a.contentType));
-    if (!attachments.length && msg.reference?.messageId) {
-      const any = await attachmentsFromMsgOrReply(msg, null);
-      attachments = any.filter(a => isZipFile(a.name || a.filename, a.contentType) || isHtmlFile(a.name || a.filename, a.contentType));
-    }
-
-    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-    try {
-      let files = [];
-      // URL → fetch page HTML and extract embedded scripts / links
-      if (!attachments.length && /^https?:\/\//i.test(argUrl)) {
-        const res = await fetch(argUrl, {
-          headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html,application/xhtml+xml,*/*" },
-          redirect: "follow"
-        });
-        if (!res.ok) throw new Error("failed to fetch URL (" + res.status + ")");
-        const ct = String(res.headers.get("content-type") || "").toLowerCase();
-        const buf = Buffer.from(await res.arrayBuffer());
-        const nameGuess = argUrl.split("/").pop()?.split("?")[0] || "page.html";
-        if (ct.includes("zip") || /\.zip$/i.test(nameGuess)) {
-          if (!isOwner(msg.author.id)) throw new Error(".zip is owner only");
-          files = extractFilesFromZip(buf);
-        } else {
-          files = extractFilesFromHtml(buf, nameGuess.endsWith(".html") || nameGuess.endsWith(".htm") ? nameGuess : "page.html");
-        }
-      } else if (attachments.length) {
-        const sourceFile = attachments[0];
-        if (isZipFile(sourceFile.name, sourceFile.contentType) && !isOwner(msg.author.id)) {
-          throw new Error(".zip is owner only");
-        }
-        const maxInfo = getMaxFileSize(msg.guild);
-        if (sourceFile.size > maxInfo.size) throw new Error("max file is " + maxInfo.label);
-        const buf = await downloadURL(sourceFile.url);
-        if (isHtmlFile(sourceFile.name, sourceFile.contentType)) {
-          files = extractFilesFromHtml(buf, sourceFile.name);
-        } else {
-          files = extractFilesFromZip(buf);
-        }
-      } else {
-        // Reply text that looks like HTML
-        let htmlText = null;
-        if (msg.reference?.messageId) {
-          try {
-            const ref = await msg.channel.messages.fetch(msg.reference.messageId).catch(() => null);
-            if (ref?.content && /<\/?[a-z][\s\S]*>/i.test(ref.content)) htmlText = ref.content;
-          } catch {}
-        }
-        if (!htmlText && /<\/?[a-z][\s\S]*>/i.test(msg.content || "")) {
-          htmlText = msg.content.replace(/^\.et(?:\s|$)/i, "").replace(/^\.extract(?:\s|$)/i, "").trim();
-        }
-        if (htmlText && htmlText.length > 20) {
-          files = extractFilesFromHtml(Buffer.from(htmlText, "utf8"), "message.html");
-        }
-      }
-
-      if (!files.length) {
-        if (sentMsg) await sentMsg.delete().catch(() => {});
-        replyUser(msg, "❌ upload a .zip / .html file, reply to one, or use `.et <url>` for a website page.").catch(() => {});
-        return;
-      }
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      const firstFile = files[0];
-      const attachment = new AttachmentBuilder(firstFile.data, { name: firstFile.name });
-      const pageLabel = `1/${files.length}`;
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("extract_prev").setEmoji("⬅️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1),
-        new ButtonBuilder().setCustomId("extract_page").setLabel(pageLabel).setStyle(ButtonStyle.Primary).setDisabled(true),
-        new ButtonBuilder().setCustomId("extract_next").setEmoji("➡️").setStyle(ButtonStyle.Secondary).setDisabled(files.length <= 1)
-      );
-      const carouselMsg = await msg.channel.send({ files: [attachment], components: [row] }).catch(() => {});
-      if (carouselMsg) {
-        extractCarouselMenus.set(msg.author.id, {
-          files, index: 0, zipType: "zip",
-          messageId: carouselMsg.id, authorId: msg.author.id, createdAt: Date.now()
-        });
-      }
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ error: ${String(e.message || e).slice(0, 150)}`).catch(() => {});
-    }
-    return;
-  }
 
   // .clean / .cl — multi-file pick (max 10) → Clean V1 / V2
   if (/^\.(?:clean|cl)$/i.test(txt)) {
@@ -6785,110 +6539,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .detect / .dt — threat scan (multi-file pick max 10)
-  if (/^\.(?:detect|dt)(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "detect", perm.isBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-
-    let files = await getScriptAttachmentsFromMsgOrReply(msg);
-    if (files.length > 10) files = files.slice(0, 10);
-
-    const runDetect = async (code) => {
-      const loadingPayload = {
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: RENAME_V2_ACCENT,
-          components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
-        }]
-      };
-      const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
-      try {
-        if (!code || !String(code).trim()) throw new Error("could not read file");
-        const result = detectThreatAnalysis(code);
-        const body =
-          `## Detected: ${result.title}\n` +
-          `-# What it does:\n\n` +
-          "```" + result.description + "```";
-        if (loadingMsg) await loadingMsg.delete().catch(() => {});
-        pendingTokenLine.delete(String(msg.author.id));
-        await replyComponentsV2(msg, {
-          flags: IS_COMPONENTS_V2,
-          components: [{
-            type: 17,
-            accent_color: result.color,
-            components: [{ type: 10, content: body.slice(0, 3900) }]
-          }]
-        }, { mention: false }).catch(() => {});
-      } catch (e) {
-        if (loadingMsg) await loadingMsg.delete().catch(() => {});
-        await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
-      }
-    };
-
-    if (!files.length) {
-      let resolved = null;
-      try { resolved = await resolveScriptInput(msg, txt); } catch (e) {
-        await sendInputErrorV2(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
-        return;
-      }
-      if (!resolved?.content) {
-        await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply / forward a sample.").catch(() => {});
-        return;
-      }
-      await runDetect(resolved.content);
-      return;
-    }
-
-    if (files.length === 1) {
-      const body = await downloadAttachmentText(files[0]);
-      if (!body) {
-        await sendInputErrorV2(msg, "Couldn't read that file (link expired or invalid).").catch(() => {});
-        return;
-      }
-      await runDetect(body);
-      return;
-    }
-
-    // 2–10 files → picker
-    try {
-      const panelMsg = await sendFilePickPanel(msg, {
-        prefix: "detectfile",
-        userId: msg.author.id,
-        files,
-        listLabel: "detect"
-      });
-      if (panelMsg?.id) {
-        detectSessions.set(panelMsg.id, {
-          authorId: msg.author.id,
-          files: files.map(f => ({
-            name: f.name || f.filename || "file",
-            url: f.url,
-            proxyURL: f.proxyURL || f.proxy_url,
-            proxy_url: f.proxy_url || f.proxyURL
-          })),
-          at: Date.now()
-        });
-        if (detectSessions.size > 80) {
-          const cutoff = Date.now() - 30 * 60 * 1000;
-          for (const [k, v] of detectSessions) {
-            if (!v?.at || v.at < cutoff) detectSessions.delete(k);
-          }
-        }
-      }
-    } catch (e) {
-      await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
-    }
-    return;
-  }
-
   // .get — regular: 1 ID max, buyer: up to 10 IDs
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
@@ -6942,162 +6592,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // .dl / .download — library ID, Discord CDN, TikTok, Instagram, direct links
-  if (/^\.(?:dl|download)(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "dl", perm.isBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    const arg = (txt.split(/\s+/)[1] || "").trim();
-    if (!arg) { replyUser(msg, "❌ put file link or id, idiot.").catch(() => {}); return; }
-    const isBuyerUser = perm.isBuyer;
-    const startTime = Date.now();
-    const sentMsg = await replyUser(msg, "⏳ Processing...").catch(() => {});
-
-    const finishSend = async (payload) => {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      const elapsed = Date.now() - startTime;
-      const content = (payload.content ? payload.content + "\n" : "") + `**Finish in:** \`${elapsed}ms\``;
-      await msg.channel.send({ ...payload, content: `<@${msg.author.id}> **Here you go!**\n` + content }).catch(() => {});
-    };
-
-    try {
-      // TikTok
-      if (/tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com/i.test(arg)) {
-        const resolved = await resolveTikTokMedia(arg);
-        if (!resolved?.url) throw new Error("Failed to get TikTok video — try another link");
-        const attachment = await downloadAsAttachment(resolved.url, "tiktok.mp4");
-        if (attachment) {
-          await finishSend({ files: [attachment] });
-        } else {
-          await finishSend({
-            embeds: [new EmbedBuilder()
-              .setColor(getEmbedColor(isBuyerUser))
-              .setTitle("📥 TikTok Download")
-              .setDescription(`🔗 **Download:** [Click Here](${resolved.url})`)
-              .setFooter({ text: `Request by @${msg.author.username}│TikTok DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) })]
-          });
-        }
-        return;
-      }
-
-      // Instagram
-      if (/instagram\.com|instagr\.am|ig\.me/i.test(arg)) {
-        const resolved = await resolveCobaltMedia(arg);
-        if (!resolved?.url) throw new Error("Failed to get Instagram media");
-        const attachment = await downloadAsAttachment(resolved.url, "instagram.mp4");
-        if (attachment) {
-          await finishSend({ content: `**Type:** ${resolved.type || "Media"}`, files: [attachment] });
-        } else {
-          await finishSend({
-            embeds: [new EmbedBuilder()
-              .setColor(getEmbedColor(isBuyerUser))
-              .setTitle("📥 Instagram Download")
-              .setDescription(`**Type:** ${resolved.type || "Media"}\n🔗 **Download:** [Click Here](${resolved.url})`)
-              .setFooter({ text: `Request by @${msg.author.username}│Instagram DL`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) })]
-          });
-        }
-        return;
-      }
-
-      // Direct / Discord CDN URL
-      if (/^https?:\/\//i.test(arg) || /cdn\.discordapp\.com|media\.discordapp\.net/i.test(arg)) {
-        // Try cobalt for other social media first
-        if (/youtube\.com|youtu\.be|twitter\.com|x\.com|reddit\.com|facebook\.com|fb\.watch|pinterest\.com|threads\.net/i.test(arg)) {
-          const resolved = await resolveCobaltMedia(arg);
-          if (resolved?.url) {
-            const attachment = await downloadAsAttachment(resolved.url, "media.mp4");
-            if (attachment) {
-              await finishSend({ files: [attachment] });
-              return;
-            }
-            await finishSend({
-              embeds: [new EmbedBuilder()
-                .setColor(getEmbedColor(isBuyerUser))
-                .setTitle("📥 Media Download")
-                .setDescription(`🔗 **Download:** [Click Here](${resolved.url})`)]
-            });
-            return;
-          }
-        }
-        const buf = await downloadURL(arg);
-        let fileName = "file";
-        const urlMatch = arg.match(/\/([^/?#]+)(?:\?|#|$)/);
-        if (urlMatch) fileName = decodeURIComponent(urlMatch[1]);
-        if (!ext(fileName)) fileName += ".txt";
-        await finishSend({ files: [new AttachmentBuilder(buf, { name: fileName })] });
-        return;
-      }
-
-      // Library ID
-      const file = getFile(arg);
-      if (!file) throw new Error("wrong id — use `.find` for a working id");
-      if (!canGetLibraryFile(file, msg.author.id)) throw new Error(".zip files are owner only");
-      const freshUrl = await getFreshUrl(file);
-      const fileUrl = freshUrl || file.url;
-      if (!fileUrl) throw new Error("file URL expired");
-      let buf = null;
-      try { buf = await downloadURL(fileUrl); } catch {
-        const again = await getFreshUrl(file);
-        if (again) buf = await downloadURL(again);
-      }
-      if (!buf?.length) throw new Error("could not download file");
-      await finishSend({ files: [new AttachmentBuilder(buf, { name: file.filename || "file.lua" })] });
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
-    }
-    return;
-  }
-
-  // .bypass — bypass ad/key links (linkvertise, lootlabs, work.ink, etc.)
-  if (/^\.bypass(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "bypass", perm.isBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-    const arg = (txt.split(/\s+/)[1] || "").trim();
-    if (!arg || !/^https?:\/\//i.test(arg)) {
-      replyUser(msg, "❌ usage: `.bypass <ad_or_key_link>`").catch(() => {});
-      return;
-    }
-    const isBuyerUser = perm.isBuyer;
-    const sentMsg = await replyUser(msg, "⏳ Bypassing...").catch(() => {});
-    try {
-      const result = await bypassAdLink(arg);
-      if (!result?.url && !result?.key) throw new Error("could not bypass this link");
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      const out = result.key || result.url;
-      const isKey = !!result.key || (!/^https?:\/\//i.test(String(out)));
-      const desc = isKey
-        ? `**Original:** ${arg.slice(0, 180)}\n**Key:**\n\`\`\`\n${out}\n\`\`\``
-        : `**Original:** ${arg.slice(0, 180)}\n**Bypassed:** [Open Link](${out})\n\`\`\`\n${out}\n\`\`\``;
-      const embed = new EmbedBuilder()
-        .setColor(getEmbedColor(isBuyerUser))
-        .setTitle(isKey ? "🔑 Bypass Key" : "🔓 Bypass Result")
-        .setDescription(desc)
-        .setFooter({ text: `Request by @${msg.author.username}│Bypass`, iconURL: msg.author.displayAvatarURL({ dynamic: true, size: 128 }) });
-      await msg.channel.send({
-        content: `<@${msg.author.id}> **Here you go!**`,
-        embeds: [embed]
-      }).catch(() => {});
-    } catch (e) {
-      if (sentMsg) await sentMsg.delete().catch(() => {});
-      replyUser(msg, `❌ bypass failed: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
-    }
-    return;
-  }
-
   // .copy — Owner Only: copy roles/categories/channels from one server into another
   // Usage: .copy <source_server_id> <dest_server_id>
   if (/^\.copy(?:\s|$)/i.test(txt)) {
@@ -7308,43 +6802,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // .leaderboard / .lb — top command users
-  if (/^\.(?:leaderboard|lb)(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    // free
-    const entries = Object.entries(usageStore.users || {})
-      .map(([id, v]) => ({ id, username: v.username || "unknown", count: Number(v.count) || 0 }))
-      .filter(e => e.count > 0)
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 10);
-    if (!entries.length) {
-      await replyComponentsV2(msg, {
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: RENAME_V2_ACCENT,
-          components: [{ type: 10, content: "### The Leaderboard\nNo command uses recorded yet." }]
-        }]
-      }, { mention: false }).catch(() => {});
-      return;
-    }
-    const lines = entries.map((e, i) =>
-      `> **${i + 1}.** \`${String(e.username).replace(/[`]/g, "")}\` -> **${e.count}** use.`
-    ).join("\n");
-    await replyComponentsV2(msg, {
-      flags: IS_COMPONENTS_V2,
-      components: [{
-        type: 17,
-        accent_color: RENAME_V2_ACCENT,
-        components: [{ type: 10, content: ("### The Leaderboard\n" + lines).slice(0, 3900) }]
-      }]
-    }, { mention: false }).catch(() => {});
-    return;
-  }
-
   // .coinflip — win or lose 1 token (regular users)
   if (/^\.coinflip(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
