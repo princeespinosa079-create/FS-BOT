@@ -317,7 +317,7 @@ setInterval(cleanupExpiredKeys, 10 * 1000);
 const commandCooldowns = new Map(); // legacy — unused (tokens replace cooldowns)
 const COOLDOWNS = {}; // all timed cooldowns removed — token system used instead
 /** Free commands (no token cost): redeem, help, find (prefix). Finder panel Find button DOES cost. */
-const TOKEN_FREE_CMDS = new Set(["redeem", "help", "find"]);
+const TOKEN_FREE_CMDS = new Set(["redeem", "help", "find", "leaderboard"]);
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
   const s = remainingSec % 60;
@@ -4188,7 +4188,7 @@ DELETE JUNK / WATERMARKS (ALWAYS):
 
 PRESERVE:
 - All real loaders, HttpGet, remotes, webhooks, UI, metatables, hooks, and logic
-- Replace Discord invite links with: https://discord.gg/7Ar8QGZB2j
+- Replace Discord invite links with: https://discord.gg/TBBAUZu8cW
 
 OUTPUT RULES (ABSOLUTE):
 - Output ONLY pure Luau source — nothing else
@@ -4582,6 +4582,10 @@ const commands = [
       .setName("image")
       .setDescription("Optional image (shown below divider on Embed V2).")
       .setRequired(false))
+    .addAttachmentOption(o => o
+      .setName("file")
+      .setDescription("Optional file attachment (no divider).")
+      .setRequired(false))
     .toJSON(),
   new SlashCommandBuilder()
     .setName("finderpanel")
@@ -4714,17 +4718,21 @@ const helpPages = [
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.upload\`** Turn your file into Script Loader.
+`**\`.detect\`** Detect IP logger / script loader / webhook / safe.
 
-**\`.get\`** Get file using ID.
+**\`.upload\`** Turn your file into Script Loader.
 
-**\`.find\`** Search files by name.`
+**\`.get\`** Get file using ID.`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.coinflip\`** Flip a coin — win or lose **1 token**.`
+`**\`.find\`** Search files by name.
+
+**\`.leaderboard\`** Top command users.
+
+**\`.coinflip\`** Flip a coin — win or lose **1 token**.`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
@@ -4740,12 +4748,16 @@ const helpSessions = new Map();
 
 /** Help page bodies for Components V2 */
 const helpPageBodies = [
-  { color: 0x5865F2, text: `**\`.upload\`** Turn your file into Script Loader.
+  { color: 0x5865F2, text: `**\`.detect\`** Detect IP logger / script loader / webhook / safe.
 
-**\`.get\`** Get file using ID.
+**\`.upload\`** Turn your file into Script Loader.
 
-**\`.find\`** Search files by name.` },
-  { color: 0x5865F2, text: `**\`.coinflip\`** Flip a coin — win or lose **1 token**.` },
+**\`.get\`** Get file using ID.` },
+  { color: 0x5865F2, text: `**\`.find\`** Search files by name.
+
+**\`.leaderboard\`** Top command users.
+
+**\`.coinflip\`** Flip a coin — win or lose **1 token**.` },
   { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
 
 > Premium users can use all commands in DMs.
@@ -4837,6 +4849,63 @@ client.on("interactionCreate", async interaction => {
       if (panelMsg?.id) {
         cleanSessions.set(panelMsg.id, { authorId: ownerId, content: body, at: Date.now() });
       }
+      try { await interaction.message.delete().catch(() => {}); } catch {}
+    } catch (e) {
+      await interaction.followUp({ content: "❌ " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    return;
+  }
+
+  // ─── DETECT FILE PICK (1–10) ───
+  if (interaction.customId.startsWith("detectfile_")) {
+    const parts = interaction.customId.split("_");
+    const idx = parseInt(parts[1], 10);
+    const ownerId = parts.slice(2).join("_");
+    if (interaction.user.id !== ownerId) {
+      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const session = detectSessions.get(interaction.message.id);
+    if (!session || String(session.authorId) !== String(ownerId) || !Array.isArray(session.files)) {
+      return interaction.reply({ content: "❌ panel expired — run `.detect` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const fileMeta = session.files[idx - 1];
+    if (!fileMeta) {
+      return interaction.reply({ content: "❌ invalid file number.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    detectSessions.delete(interaction.message.id);
+    try {
+      await interaction.update({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
+        }]
+      });
+    } catch { try { await interaction.deferUpdate(); } catch {} }
+
+    try {
+      const body = await downloadAttachmentText(fileMeta);
+      if (!body) {
+        await interaction.followUp({ content: "❌ couldn't read that file.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        try { await interaction.message.delete().catch(() => {}); } catch {}
+        return;
+      }
+      const result = detectThreatAnalysis(body);
+      const textBody =
+        `## Detected: ${result.title}\n` +
+        `-# What it does:\n\n` +
+        "```" + result.description + "```";
+      const ch = interaction.channel;
+      await ch.send({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: result.color,
+          components: [{ type: 10, content: textBody.slice(0, 3900) }]
+        }],
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
       try { await interaction.message.delete().catch(() => {}); } catch {}
     } catch (e) {
       await interaction.followUp({ content: "❌ " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5536,6 +5605,7 @@ client.on("interactionCreate", async interaction => {
       const footer = interaction.options.getString("footer");
       const colorRaw = (interaction.options.getString("color") || "").trim();
       const imageAtt = interaction.options.getAttachment("image");
+      const fileAtt = interaction.options.getAttachment("file");
       await interaction.deleteReply().catch(() => {});
       const targetChannel = interaction.channel || interaction.user.dmChannel || await interaction.user.createDM().catch(() => null);
       if (!targetChannel) {
@@ -5543,7 +5613,10 @@ client.on("interactionCreate", async interaction => {
         return;
       }
       if (type === "none") {
-        if (imageAtt?.url) await targetChannel.send({ content: text, files: [{ attachment: imageAtt.url, name: imageAtt.name || "image.png" }] });
+        const noneFiles = [];
+        if (imageAtt?.url) noneFiles.push({ attachment: imageAtt.url, name: imageAtt.name || "image.png" });
+        if (fileAtt?.url) noneFiles.push({ attachment: fileAtt.url, name: fileAtt.name || "file" });
+        if (noneFiles.length) await targetChannel.send({ content: text, files: noneFiles });
         else await targetChannel.send({ content: text });
       } else if (type === "v2") {
         let color = RENAME_V2_ACCENT;
@@ -5564,6 +5637,12 @@ client.on("interactionCreate", async interaction => {
           files.push({ attachment: imageAtt.url, name: imgName });
           v2Children.push({ type: 12, items: [{ media: { url: "attachment://" + imgName } }] });
         }
+        if (fileAtt?.url) {
+          // file: no divider line
+          const fName = (fileAtt.name || "file").replace(/[^\w.\-]+/g, "_");
+          files.push({ attachment: fileAtt.url, name: fName });
+          v2Children.push({ type: 13, file: { url: "attachment://" + fName } });
+        }
         await targetChannel.send({
           flags: IS_COMPONENTS_V2,
           files: files.length ? files : undefined,
@@ -5581,7 +5660,9 @@ client.on("interactionCreate", async interaction => {
         if (title) embed.setTitle(title);
         if (footer) embed.setFooter({ text: footer });
         if (imageAtt?.url) embed.setImage(imageAtt.url);
-        await targetChannel.send({ embeds: [embed] });
+        const embFiles = [];
+        if (fileAtt?.url) embFiles.push({ attachment: fileAtt.url, name: fileAtt.name || "file" });
+        await targetChannel.send({ embeds: [embed], files: embFiles.length ? embFiles : undefined });
       }
       return;
     }
@@ -5669,7 +5750,7 @@ client.on("messageCreate", async msg => {
     // count prefix command uses for leaderboard (username snapshot)
     try {
       const cmdName = (txt.slice(1).split(/\s+/)[0] || "").toLowerCase();
-      if (cmdName && cmdName !== "leaderboard" && cmdName !== "lb") trackCommandUse(msg.author);
+      if (cmdName && cmdName !== "leaderboard") trackCommandUse(msg.author);
     } catch {}
 
     const isDM = !msg.guild;
@@ -6539,6 +6620,109 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
+  // .detect — threat scan (multi-file pick max 10) — no .dt alias
+  if (/^\.detect(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    const cd = checkCommandCooldown(msg.author.id, "detect", perm.isBuyer);
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
+
+    let files = await getScriptAttachmentsFromMsgOrReply(msg);
+    if (files.length > 10) files = files.slice(0, 10);
+
+    const runDetect = async (code) => {
+      const loadingPayload = {
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
+        }]
+      };
+      const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
+      try {
+        if (!code || !String(code).trim()) throw new Error("could not read file");
+        const result = detectThreatAnalysis(code);
+        const body =
+          `## Detected: ${result.title}\n` +
+          `-# What it does:\n\n` +
+          "```" + result.description + "```";
+        if (loadingMsg) await loadingMsg.delete().catch(() => {});
+        pendingTokenLine.delete(String(msg.author.id));
+        await replyComponentsV2(msg, {
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: result.color,
+            components: [{ type: 10, content: body.slice(0, 3900) }]
+          }]
+        }, { mention: false }).catch(() => {});
+      } catch (e) {
+        if (loadingMsg) await loadingMsg.delete().catch(() => {});
+        await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
+      }
+    };
+
+    if (!files.length) {
+      let resolved = null;
+      try { resolved = await resolveScriptInput(msg, txt); } catch (e) {
+        await sendInputErrorV2(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
+        return;
+      }
+      if (!resolved?.content) {
+        await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply / forward a sample.").catch(() => {});
+        return;
+      }
+      await runDetect(resolved.content);
+      return;
+    }
+
+    if (files.length === 1) {
+      const body = await downloadAttachmentText(files[0]);
+      if (!body) {
+        await sendInputErrorV2(msg, "Couldn't read that file (link expired or invalid).").catch(() => {});
+        return;
+      }
+      await runDetect(body);
+      return;
+    }
+
+    try {
+      const panelMsg = await sendFilePickPanel(msg, {
+        prefix: "detectfile",
+        userId: msg.author.id,
+        files,
+        listLabel: "detect"
+      });
+      if (panelMsg?.id) {
+        detectSessions.set(panelMsg.id, {
+          authorId: msg.author.id,
+          files: files.map(f => ({
+            name: f.name || f.filename || "file",
+            url: f.url,
+            proxyURL: f.proxyURL || f.proxy_url,
+            proxy_url: f.proxy_url || f.proxyURL
+          })),
+          at: Date.now()
+        });
+        if (detectSessions.size > 80) {
+          const cutoff = Date.now() - 30 * 60 * 1000;
+          for (const [k, v] of detectSessions) {
+            if (!v?.at || v.at < cutoff) detectSessions.delete(k);
+          }
+        }
+      }
+    } catch (e) {
+      await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
+    }
+    return;
+  }
+
   // .get — regular: 1 ID max, buyer: up to 10 IDs
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
@@ -6802,6 +6986,42 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
+  // .leaderboard — top command users (no .lb alias)
+  if (/^\.leaderboard(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    const entries = Object.entries(usageStore.users || {})
+      .map(([id, v]) => ({ id, username: v.username || "unknown", count: Number(v.count) || 0 }))
+      .filter(e => e.count > 0)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+    if (!entries.length) {
+      await replyComponentsV2(msg, {
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: "### The Leaderboard\nNo command uses recorded yet." }]
+        }]
+      }, { mention: false }).catch(() => {});
+      return;
+    }
+    const lines = entries.map((e, i) =>
+      `> **${i + 1}.** \`${String(e.username).replace(/[`]/g, "")}\` -> **${e.count}** use.`
+    ).join("\n");
+    await replyComponentsV2(msg, {
+      flags: IS_COMPONENTS_V2,
+      components: [{
+        type: 17,
+        accent_color: RENAME_V2_ACCENT,
+        components: [{ type: 10, content: ("### The Leaderboard\n" + lines).slice(0, 3900) }]
+      }]
+    }, { mention: false }).catch(() => {});
+    return;
+  }
+
   // .coinflip — win or lose 1 token (regular users)
   if (/^\.coinflip(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
