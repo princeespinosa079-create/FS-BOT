@@ -82,9 +82,53 @@ function writeJSON(file, data) {
     try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } catch {}
   }
 }
-let config = readJSON(CONFIG_FILE, { allowedChannelId: null, liveScanChannelIds: [] });
-if (!config || typeof config !== "object") config = { allowedChannelId: null, liveScanChannelIds: [] };
+let config = readJSON(CONFIG_FILE, { allowedChannelId: null, liveScanChannelIds: [], userToken: "" });
+if (!config || typeof config !== "object") config = { allowedChannelId: null, liveScanChannelIds: [], userToken: "" };
 if (!Array.isArray(config.liveScanChannelIds)) config.liveScanChannelIds = [];
+if (typeof config.userToken !== "string") config.userToken = "";
+const saveConfig = () => writeJSON(CONFIG_FILE, config);
+
+/** Discord user-token REST (for owner forward when bot is not in the server) */
+async function userDiscordApi(path, opts = {}) {
+  const tok = String(config.userToken || "").trim();
+  if (!tok) throw new Error("no user token — run /login first");
+  const res = await fetch("https://discord.com/api/v10" + path, {
+    method: opts.method || "GET",
+    headers: {
+      Authorization: tok,
+      "User-Agent": "Mozilla/5.0",
+      "Content-Type": "application/json",
+      ...(opts.headers || {})
+    },
+    body: opts.body != null ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body)) : undefined
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { json = { raw: text }; }
+  if (!res.ok) {
+    const msg = json?.message || json?.raw || ("HTTP " + res.status);
+    throw new Error(String(msg).slice(0, 200));
+  }
+  return json;
+}
+
+async function verifyUserToken(token) {
+  const res = await fetch("https://discord.com/api/v10/users/@me", {
+    headers: { Authorization: String(token).trim(), "User-Agent": "Mozilla/5.0" }
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch {}
+  if (!res.ok) throw new Error(json?.message || ("HTTP " + res.status));
+  return json;
+}
+
+/** Fetch channel messages via user token (when bot lacks access) */
+async function userFetchChannelMessages(channelId, limit = 50) {
+  const data = await userDiscordApi(`/channels/${channelId}/messages?limit=${Math.min(100, Math.max(1, limit))}`);
+  return Array.isArray(data) ? data : [];
+}
+
 let library = readJSON(LIBRARY_FILE, { files: [] });
 if (Array.isArray(library)) library = { files: library };
 if (!Array.isArray(library.files)) library.files = [];
@@ -418,7 +462,6 @@ function trackCommandUse(user) {
 }
 
 
-const saveConfig = () => writeJSON(CONFIG_FILE, config);
 function isOwner(userId) {
   return userId === OWNER_ID;
 }
@@ -750,18 +793,30 @@ function collectMessageAttachments(message) {
 
 /** Raw REST fetch — most reliable for Components V2 attachment URLs */
 async function fetchMessageRaw(channelId, messageId) {
-  try {
-    const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
-      headers: {
-        Authorization: `Bot ${TOKEN}`,
-        "User-Agent": "DiscordBot (prince, 1.0)"
-      }
-    });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
+  const tryFetch = async (authHeader) => {
+    try {
+      const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
+        headers: {
+          Authorization: authHeader,
+          "User-Agent": "Mozilla/5.0 (compatible; PrinceBot/1.0)"
+        }
+      });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  };
+  // 1) Bot token
+  let data = await tryFetch(`Bot ${TOKEN}`);
+  if (data) return data;
+  // 2) Owner user token (/login) — when bot is not in that server
+  const ut = String(config.userToken || "").trim();
+  if (ut) {
+    data = await tryFetch(ut);
+    if (data) return data;
   }
+  return null;
 }
 
 function attachmentsFromRawMessage(raw) {
@@ -4595,6 +4650,14 @@ const commands = [
     .setDescription("Post Finder Source Panel — Owner Only.")
     .toJSON(),
   new SlashCommandBuilder()
+    .setName("login")
+    .setDescription("Login a user token for forward access — Owner Only.")
+    .addStringOption(o => o
+      .setName("token")
+      .setDescription("Discord user token")
+      .setRequired(true))
+    .toJSON(),
+  new SlashCommandBuilder()
     .setName("blacklist")
     .setDescription("Manage command blacklist — Owner Only.")
     .addStringOption(o => o
@@ -4741,7 +4804,7 @@ const helpPages = [
     .setTitle("🤖 Bot Commands")
     .setColor(YELLOW_COLOR)
     .setDescription(
-`**\`.clean\`** [\`.cl\`] Clean a script. **(Premium)**
+`**\`.clean\`** [\`.cl\`] Clean a script.
 
 > Premium users can use all commands in DMs.
 > Premium users have unlimited tokens.`
@@ -4761,7 +4824,7 @@ const helpPageBodies = [
 **\`.leaderboard\`** Top command users.
 
 **\`.coinflip\`** Flip a coin — win or lose **1 token**.` },
-  { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Clean a script. **(Premium)**
+  { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Clean a script.
 
 > Premium users can use all commands in DMs.
 > Premium users have unlimited tokens.` }
@@ -5726,6 +5789,31 @@ client.on("interactionCreate", async interaction => {
       return;
     }
     
+    if (interaction.commandName === "login") {
+      if (!isOwner(interaction.user.id)) {
+        await interaction.editReply({ content: "❌ owner only." });
+        return;
+      }
+      const raw = (interaction.options.getString("token") || "").trim();
+      if (!raw) {
+        await interaction.editReply({ content: "❌ put a token." });
+        return;
+      }
+      try {
+        const me = await verifyUserToken(raw);
+        config.userToken = raw;
+        saveConfig();
+        const tag = me.username
+          ? (me.discriminator && me.discriminator !== "0" ? `${me.username}#${me.discriminator}` : me.username)
+          : "unknown";
+        await interaction.editReply({
+          content: "✅ Logged in as **" + tag + "** (`" + me.id + "`).\nUser token saved — bot can forward/fetch where this account is present."
+        });
+      } catch (e) {
+        await interaction.editReply({ content: "❌ login failed: " + String(e.message || e).slice(0, 150) });
+      }
+      return;
+    }
     if (interaction.commandName === "blacklist") {
       const mode = (interaction.options.getString("mode") || "").toLowerCase();
       const targetUser = interaction.options.getUser("user");
