@@ -90,14 +90,15 @@ const saveConfig = () => writeJSON(CONFIG_FILE, config);
 
 /** Discord user-token REST (for owner forward when bot is not in the server) */
 async function userDiscordApi(path, opts = {}) {
-  const tok = String(config.userToken || "").trim();
+  const tok = normalizeUserToken(config.userToken || "");
   if (!tok) throw new Error("no user token — run /login first");
   const res = await fetch("https://discord.com/api/v10" + path, {
     method: opts.method || "GET",
     headers: {
       Authorization: tok,
-      "User-Agent": "Mozilla/5.0",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "Content-Type": "application/json",
+      "X-Super-Properties": "eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzEyMC4wLjAuMCBTYWZhcmkvNTM3LjM2IiwiYnJvd3Nlcl92ZXJzaW9uIjoiMTIwLjAuMC4wIiwib3NfdmVyc2lvbiI6IjEwIiwicmVmZXJyZXIiOiIiLCJyZWZlcnJpbmdfZG9tYWluIjoiIiwicmVmZXJyZXJfY3VycmVudCI6IiIsInJlbGVhc2VfY2hhbm5lbCI6InN0YWJsZSIsImNsaWVudF9idWlsZF9udW1iZXIiOjI1NjIzMSwiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0=",
       ...(opts.headers || {})
     },
     body: opts.body != null ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body)) : undefined
@@ -112,9 +113,53 @@ async function userDiscordApi(path, opts = {}) {
   return json;
 }
 
+function normalizeUserToken(raw) {
+  let t = String(raw || "").trim();
+  if (!t) return "";
+  // JSON dump objects: {"token":"..."} / token dumps
+  if (t.startsWith("{") || t.startsWith("[")) {
+    try {
+      const j = JSON.parse(t);
+      if (Array.isArray(j) && j.length) {
+        const first = j[0];
+        if (typeof first === "string") t = first;
+        else if (first && typeof first === "object")
+          t = first.token || first.Token || first.userToken || first.authorization || t;
+      } else if (j && typeof j === "object") {
+        t = j.token || j.Token || j.userToken || j.user_token || j.authorization || j.auth || t;
+      }
+      if (typeof t !== "string") t = String(raw || "");
+    } catch {}
+  }
+  t = String(t).trim();
+  // Strip wrapping quotes
+  t = t.replace(/^["'`]+|["'`]+$/g, "");
+  // Authorization header leftovers
+  t = t.replace(/^(Bearer|Bot)\s+/i, "");
+  t = t.replace(/^Token\s*[:=]\s*/i, "");
+  t = t.replace(/^authorization\s*[:=]\s*/i, "");
+  // email:password:token  OR  user:pass:token dumps
+  if ((t.match(/:/g) || []).length >= 2) {
+    const parts = t.split(":");
+    const last = parts[parts.length - 1].trim();
+    if (last.length > 30 && last.includes(".")) t = last;
+  }
+  // Pull Discord-shaped token out of messy dump text
+  const m = String(t).match(/(?:mfa\.)?[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{10,}/);
+  if (m) t = m[0];
+  t = t.replace(/[\r\n\t\s]+/g, "");
+  return t;
+}
+
 async function verifyUserToken(token) {
+  const tok = normalizeUserToken(token);
+  if (!tok || tok.length < 20) throw new Error("token too short / empty");
   const res = await fetch("https://discord.com/api/v10/users/@me", {
-    headers: { Authorization: String(token).trim(), "User-Agent": "Mozilla/5.0" }
+    headers: {
+      Authorization: tok,
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "X-Super-Properties": "eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzEyMC4wLjAuMCBTYWZhcmkvNTM3LjM2IiwiYnJvd3Nlcl92ZXJzaW9uIjoiMTIwLjAuMC4wIiwib3NfdmVyc2lvbiI6IjEwIiwicmVmZXJyZXIiOiIiLCJyZWZlcnJpbmdfZG9tYWluIjoiIiwicmVmZXJyZXJfY3VycmVudCI6IiIsInJlbGVhc2VfY2hhbm5lbCI6InN0YWJsZSIsImNsaWVudF9idWlsZF9udW1iZXIiOjI1NjIzMSwiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0="
+    }
   });
   const text = await res.text();
   let json = null;
@@ -124,9 +169,48 @@ async function verifyUserToken(token) {
 }
 
 /** Fetch channel messages via user token (when bot lacks access) */
-async function userFetchChannelMessages(channelId, limit = 50) {
-  const data = await userDiscordApi(`/channels/${channelId}/messages?limit=${Math.min(100, Math.max(1, limit))}`);
+async function userFetchChannelMessages(channelId, limit = 50, before = null) {
+  let path = `/channels/${channelId}/messages?limit=${Math.min(100, Math.max(1, limit))}`;
+  if (before) path += `&before=${before}`;
+  const data = await userDiscordApi(path);
   return Array.isArray(data) ? data : [];
+}
+
+/** Paginate all messages in a channel via user token */
+async function userFetchAllChannelMessages(channelId, maxMessages = 5000) {
+  const all = [];
+  let before = null;
+  while (all.length < maxMessages) {
+    const batch = await userFetchChannelMessages(channelId, 100, before);
+    if (!batch.length) break;
+    all.push(...batch);
+    before = batch[batch.length - 1]?.id;
+    if (batch.length < 100) break;
+  }
+  return all;
+}
+
+/** Attachments from a raw REST message object */
+function attachmentsFromUserMessage(raw) {
+  const out = [];
+  if (!raw) return out;
+  const push = (a) => {
+    if (!a) return;
+    const name = a.filename || a.name || "file";
+    const url = a.url || a.proxy_url || a.proxyURL;
+    if (!url || !name) return;
+    if (out.some(x => x.name === name && x.url === url)) return;
+    out.push({ name, filename: name, url, proxyURL: a.proxy_url || a.url, size: a.size || 0 });
+  };
+  for (const a of raw.attachments || []) push(a);
+  try {
+    const snaps = raw.message_snapshots || raw.messageSnapshots || [];
+    for (const snap of snaps) {
+      const m = snap?.message || snap;
+      for (const a of m?.attachments || []) push(a);
+    }
+  } catch {}
+  return out;
 }
 
 let library = readJSON(LIBRARY_FILE, { files: [] });
@@ -178,6 +262,45 @@ function blacklistRemove(userId) {
 function blacklistList() {
   return [...blacklistStore.users];
 }
+
+// ============================================================
+// WHITELIST — allowed to use .forward (owner always allowed)
+// ============================================================
+const WHITELIST_FILE = path.join(DATA_DIR, "whitelist.json");
+let whitelistStore = readJSON(WHITELIST_FILE, { users: [] });
+if (!whitelistStore || typeof whitelistStore !== "object") whitelistStore = { users: [] };
+if (!Array.isArray(whitelistStore.users)) whitelistStore.users = [];
+const saveWhitelist = () => writeJSON(WHITELIST_FILE, whitelistStore);
+
+function isWhitelisted(userId) {
+  return whitelistStore.users.includes(String(userId));
+}
+function canUseForward(userId) {
+  return isOwner(userId) || isWhitelisted(userId);
+}
+function whitelistAdd(userId) {
+  const id = String(userId);
+  if (!whitelistStore.users.includes(id)) {
+    whitelistStore.users.push(id);
+    saveWhitelist();
+    return true;
+  }
+  return false;
+}
+function whitelistRemove(userId) {
+  const id = String(userId);
+  const before = whitelistStore.users.length;
+  whitelistStore.users = whitelistStore.users.filter(u => u !== id);
+  if (whitelistStore.users.length !== before) {
+    saveWhitelist();
+    return true;
+  }
+  return false;
+}
+function whitelistList() {
+  return [...whitelistStore.users];
+}
+
 
 // ============================================================
 // TOKEN SYSTEM (regular users — max 10, daily refill when empty)
@@ -811,7 +934,7 @@ async function fetchMessageRaw(channelId, messageId) {
   let data = await tryFetch(`Bot ${TOKEN}`);
   if (data) return data;
   // 2) Owner user token (/login) — when bot is not in that server
-  const ut = String(config.userToken || "").trim();
+  const ut = normalizeUserToken(config.userToken || "");
   if (ut) {
     data = await tryFetch(ut);
     if (data) return data;
@@ -4673,6 +4796,27 @@ const commands = [
       .setName("user")
       .setDescription("User to add/remove (required for Add/Remove)")
       .setRequired(false))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("whitelist")
+    .setDescription("Whitelist users for .forward — Owner Only.")
+    .addStringOption(o => o
+      .setName("mode")
+      .setDescription("Add, Remove, or List")
+      .setRequired(true)
+      .addChoices(
+        { name: "Add", value: "add" },
+        { name: "Remove", value: "remove" },
+        { name: "List", value: "list" }
+      ))
+    .addUserOption(o => o
+      .setName("user")
+      .setDescription("User (mention / pick)")
+      .setRequired(false))
+    .addStringOption(o => o
+      .setName("id")
+      .setDescription("User ID or username (if not using user picker)")
+      .setRequired(false))
     .toJSON()
 ].map(c => c);
 async function registerCommands() {
@@ -5800,8 +5944,9 @@ client.on("interactionCreate", async interaction => {
         return;
       }
       try {
-        const me = await verifyUserToken(raw);
-        config.userToken = raw;
+        const normalized = normalizeUserToken(raw);
+        const me = await verifyUserToken(normalized);
+        config.userToken = normalized;
         saveConfig();
         const tag = me.username
           ? (me.discriminator && me.discriminator !== "0" ? `${me.username}#${me.discriminator}` : me.username)
@@ -5834,6 +5979,70 @@ client.on("interactionCreate", async interaction => {
       if (mode === "remove") {
         const ok = blacklistRemove(targetUser.id);
         await interaction.editReply({ content: ok ? `✅ removed <@${targetUser.id}>.` : `⚠️ was not blacklisted.` });
+        return;
+      }
+      await interaction.editReply({ content: "❌ mode must be Add, Remove, or List." });
+      return;
+    }
+    if (interaction.commandName === "whitelist") {
+      const mode = (interaction.options.getString("mode") || "").toLowerCase();
+      const targetUser = interaction.options.getUser("user");
+      const idOrName = (interaction.options.getString("id") || "").trim();
+      if (mode === "list") {
+        const list = whitelistList();
+        if (!list.length) { await interaction.editReply({ content: "📋 Whitelist is empty." }); return; }
+        const lines = list.slice(0, 50).map((id, i) => `${i + 1}. <@${id}> (\`${id}\`)`);
+        await interaction.editReply({ content: `📋 **Whitelist (${list.length}):**\n${lines.join("\n")}` });
+        return;
+      }
+      let targetId = targetUser?.id || null;
+      let label = targetUser ? `<@${targetUser.id}>` : null;
+      if (!targetId && idOrName) {
+        if (/^\d{17,20}$/.test(idOrName)) {
+          targetId = idOrName;
+          label = `<@${targetId}> (\`${targetId}\`)`;
+        } else {
+          const name = idOrName.replace(/^@/, "").toLowerCase();
+          let found = client.users.cache.find(u =>
+            u.username?.toLowerCase() === name ||
+            u.globalName?.toLowerCase() === name ||
+            `${u.username}`.toLowerCase() === name
+          );
+          if (!found && interaction.guild) {
+            try {
+              const members = await interaction.guild.members.fetch({ query: idOrName, limit: 5 }).catch(() => null);
+              if (members?.size) {
+                const m = members.find(mm =>
+                  mm.user.username?.toLowerCase() === name ||
+                  mm.user.globalName?.toLowerCase() === name ||
+                  mm.displayName?.toLowerCase() === name
+                ) || members.first();
+                if (m) found = m.user;
+              }
+            } catch {}
+          }
+          if (found) {
+            targetId = found.id;
+            label = `<@${found.id}> (\`${found.username}\`)`;
+          }
+        }
+      }
+      if (!targetId) {
+        await interaction.editReply({ content: "❌ pick a user or put an ID / username." });
+        return;
+      }
+      if (isOwner(targetId)) {
+        await interaction.editReply({ content: "❌ owner is always allowed — no need to whitelist." });
+        return;
+      }
+      if (mode === "add") {
+        const ok = whitelistAdd(targetId);
+        await interaction.editReply({ content: ok ? `✅ whitelisted ${label} — can use \`.forward\`.` : `⚠️ already whitelisted.` });
+        return;
+      }
+      if (mode === "remove") {
+        const ok = whitelistRemove(targetId);
+        await interaction.editReply({ content: ok ? `✅ removed ${label} from whitelist.` : `⚠️ was not on whitelist.` });
         return;
       }
       await interaction.editReply({ content: "❌ mode must be Add, Remove, or List." });
@@ -6253,29 +6462,73 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
   // ─────────────────────────────────────────────
-  // .forward — Owner Only (forward all files from source to dest channel)
+  // .forward — Owner or Whitelist (source can use /login user token)
   // ─────────────────────────────────────────────
   if (/^\.forward(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
-    if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
-    const idMatches = txt.match(/\d{17,20}/g);
-    if (!idMatches || idMatches.length < 2) {
-      replyUser(msg, "❌ usage: `.forward <source_channel_id> <destination_channel_id>`").catch(() => {});
+    if (!canUseForward(msg.author.id)) {
+      replyUser(msg, "❌ owner / whitelist only.").catch(() => {});
       return;
     }
-    const [sourceId, destId] = idMatches;
-    let sourceCh, destCh;
-    try { sourceCh = await client.channels.fetch(sourceId.trim()); } catch {}
-    try { destCh = await client.channels.fetch(destId.trim()); } catch {}
-    if (!sourceCh || !sourceCh.isTextBased?.()) { replyUser(msg, "❌ invalid source channel.").catch(() => {}); return; }
-    if (!destCh || !destCh.isTextBased?.()) { replyUser(msg, "❌ invalid destination channel.").catch(() => {}); return; }
-    const statusMsg = await replyUser(msg, `⚡ Forwarding files from <#${sourceCh.id}> → <#${destCh.id}>...`).catch(() => {});
-    let sent = 0, skipped = 0, before = null;
-    const isForwardable = (name, contentType) => {
+    if (isDM) { replyUser(msg, "❌ use this in a server.").catch(() => {}); return; }
+    // Prefer channel IDs from discord.com/channels/guild/channel links
+    const linkIds = [...String(txt).matchAll(/channels\/\d+\/(\d{17,20})/gi)].map(m => m[1]);
+    let sourceId, destId;
+    if (linkIds.length >= 2) {
+      sourceId = linkIds[0];
+      destId = linkIds[1];
+    } else {
+      const idMatches = txt.match(/\d{17,20}/g);
+      if (!idMatches || idMatches.length < 2) {
+        replyUser(msg, "❌ usage: `.forward <source_channel_id> <destination_channel_id>`\n(or paste two channel links)").catch(() => {});
+        return;
+      }
+      // guild+channel links leave 4 snowflakes → take channel slots (2nd & 4th)
+      if (idMatches.length >= 4) {
+        sourceId = idMatches[1];
+        destId = idMatches[3];
+      } else {
+        sourceId = idMatches[0];
+        destId = idMatches[1];
+      }
+    }
+    let destCh = null;
+    try { destCh = await client.channels.fetch(String(destId).trim()); } catch {}
+    if (!destCh || !destCh.isTextBased?.()) {
+      replyUser(msg, "❌ invalid destination channel (bot must be in that server).").catch(() => {});
+      return;
+    }
+
+    // Source: bot first, else user token (/login)
+    let sourceCh = null;
+    try { sourceCh = await client.channels.fetch(String(sourceId).trim()); } catch {}
+    const useUserToken = !sourceCh || !sourceCh.isTextBased?.();
+    if (useUserToken) {
+      const ut = normalizeUserToken(config.userToken || "");
+      if (!ut) {
+        replyUser(msg, "❌ source channel not visible to bot. Run `/login` with a user/dump token that can see that channel.").catch(() => {});
+        return;
+      }
+      try {
+        await userDiscordApi("/channels/" + String(sourceId).trim());
+      } catch (e1) {
+        try {
+          await userFetchChannelMessages(String(sourceId).trim(), 1);
+        } catch (e2) {
+          replyUser(msg, "❌ invalid source channel id (user token cannot access it): " + String(e2.message || e1.message || e2).slice(0, 120) + "\nTip: use a **channel** id (not server id), and token account must be in that server.").catch(() => {});
+          return;
+        }
+      }
+    }
+
+    const statusMsg = await replyUser(msg, `⚡ Forwarding files from \`${sourceId}\` → <#${destCh.id}>${useUserToken ? " (via user token)" : ""}...`).catch(() => {});
+    let sent = 0, skipped = 0;
+
+    const isForwardable = (name) => {
       const e = (String(name || "").match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
-      return e === "txt" || e === "lua" || e === "zip";
+      return e === "txt" || e === "lua" || e === "luau" || e === "zip";
     };
-    // Collect existing filenames in destination (normalized) — only forward files not already there
+
+    // Existing names in destination
     const existingNames = new Set();
     try {
       let destBefore = null;
@@ -6288,11 +6541,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
           for (const a of m.attachments?.values?.() || []) {
             if (a.name) existingNames.add(String(a.name).toLowerCase());
           }
-          for (const s of m.messageSnapshots?.values?.() || []) {
-            for (const a of s.attachments?.values?.() || []) {
-              if (a.name) existingNames.add(String(a.name).toLowerCase());
-            }
-          }
         }
         const oldest = batch.last();
         if (!oldest || batch.size < 100) break;
@@ -6301,55 +6549,72 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     } catch (e) {
       console.warn("⚠️ Forward dest scan:", e.message);
     }
+
+    const processAtt = async (name, url) => {
+      if (!isForwardable(name)) return;
+      if (existingNames.has(String(name).toLowerCase())) { skipped++; return; }
+      try {
+        const buf = await downloadURL(url);
+        if (!buf || !buf.length) return;
+        await destCh.send({ files: [new AttachmentBuilder(buf, { name: name || "file" })] });
+        existingNames.add(String(name).toLowerCase());
+        sent++;
+      } catch (e) {
+        console.warn("⚠️ Forward file:", name, e.message);
+      }
+    };
+
     try {
-      while (true) {
-        const opts = { limit: 100 };
-        if (before) opts.before = before;
-        const batch = await sourceCh.messages.fetch(opts);
-        if (!batch.size) break;
-        const sendTasks = [];
-        for (const m of batch.values()) {
-          const atts = [];
-          for (const a of m.attachments?.values?.() || []) {
-            if (isForwardable(a.name, a.contentType)) atts.push(a);
-          }
-          for (const s of m.messageSnapshots?.values?.() || []) {
-            for (const a of s.attachments?.values?.() || []) {
-              if (isForwardable(a.name, a.contentType)) atts.push(a);
-            }
-          }
+      if (useUserToken) {
+        const msgs = await userFetchAllChannelMessages(sourceId.trim(), 8000);
+        for (const raw of msgs) {
+          const atts = attachmentsFromUserMessage(raw);
           for (const a of atts) {
-            const fname = String(a.name || "file").toLowerCase();
-            if (existingNames.has(fname)) {
-              skipped++;
-              continue;
-            }
-            existingNames.add(fname); // avoid dupes within same forward run
-            sendTasks.push(
-              fetch(a.url).then(r => r.arrayBuffer()).then(buf =>
-                destCh.send({ files: [new AttachmentBuilder(Buffer.from(buf), { name: a.name || "file" })] })
-                  .then(() => { sent++; })
-                  .catch(() => { skipped++; })
-              ).catch(() => { skipped++; })
-            );
+            await processAtt(a.name || a.filename, a.url || a.proxyURL);
           }
         }
-        await Promise.allSettled(sendTasks);
-        const oldest = batch.last();
-        if (!oldest || batch.size < 100) break;
-        before = oldest.id;
+      } else {
+        let before = null;
+        while (true) {
+          const opts = { limit: 100 };
+          if (before) opts.before = before;
+          const batch = await sourceCh.messages.fetch(opts);
+          if (!batch.size) break;
+          for (const m of batch.values()) {
+            for (const a of m.attachments?.values?.() || []) {
+              await processAtt(a.name, a.url || a.proxyURL);
+            }
+            // snapshots / forwards
+            try {
+              for (const s of m.messageSnapshots?.values?.() || []) {
+                for (const a of s.attachments?.values?.() || []) {
+                  await processAtt(a.name, a.url || a.proxyURL);
+                }
+              }
+            } catch {}
+            try {
+              const collected = collectMessageAttachments(m);
+              for (const a of collected) {
+                await processAtt(a.name || a.filename, a.url || a.proxyURL);
+              }
+            } catch {}
+          }
+          const oldest = batch.last();
+          if (!oldest || batch.size < 100) break;
+          before = oldest.id;
+        }
       }
-      const result = `✅ **Forward complete!**\n📂 Source: <#${sourceCh.id}>\n📥 Dest: <#${destCh.id}>\n📄 Sent: \`${sent}\`\n🚫 Skipped (already in dest / failed): \`${skipped}\``;
-      if (statusMsg) statusMsg.edit(result).catch(() => {});
-      else replyUser(msg, result).catch(() => {});
+      const done = `✅ Forward done — **${sent}** sent` + (skipped ? `, **${skipped}** skipped (already there)` : "") + ".";
+      if (statusMsg) await statusMsg.edit(done).catch(() => {});
+      else replyUser(msg, done).catch(() => {});
     } catch (e) {
-      const err = `❌ Forward failed: ${e.message.slice(0, 150)}`;
-      if (statusMsg) statusMsg.edit(err).catch(() => {});
+      const err = `❌ forward failed: ${String(e.message || e).slice(0, 150)}`;
+      if (statusMsg) await statusMsg.edit(err).catch(() => {});
       else replyUser(msg, err).catch(() => {});
     }
     return;
   }
-  // ─────────────────────────────────────────────
+
   // .logs — Owner Only (set channel for Finder Panel usage logs)
   // ─────────────────────────────────────────────
   if (/^\.logs(?:\s|$)/i.test(txt)) {
