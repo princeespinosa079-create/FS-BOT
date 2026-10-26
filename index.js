@@ -1827,7 +1827,7 @@ function isErrorPayload(body) {
   const contentStr = typeof body.content === "string" ? body.content : "";
   // Loading / processing messages — never put tokens on these
   if (/⏳|uploading|processing|renaming|cleaning|fetching|dumping/i.test(contentStr)) return true;
-  const errRe = /❌|no found for that|not found|failed:|upload failed|scan failed|forward failed|invalid key|owner only|usage:|put (?:file|id|a file)|you're on|need to wait|buy access|buy premium|join in main server|reply to a file|already got a key|already redeem|can't send|not yours|adopt the Server Tag|max \d+ id|wrong, try|empty response|rate limited|input error|dumbass/i;
+  const errRe = /❌|no found|not found|failed:|upload failed|scan failed|forward failed|invalid key|owner only|usage:|put (?:file|id|a file)|you're on|need to wait|buy access|buy premium|join in main server|reply to a file|already got a key|already redeem|can't send|not yours|adopt the Server Tag|max \d+ id|wrong, try|empty response|rate limited|input error|dumbass/i;
   if (errRe.test(contentStr)) return true;
   if (body.embeds && body.embeds.length) {
     for (const emb of body.embeds) {
@@ -2089,9 +2089,12 @@ async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName
 }
 
 /** Build Finder Source Results Components V2 payload (list + divider + optional action row) */
+function finderDisplayName(name) {
+  return String(name || "file").replace(/\.(txt|lua|luau|zip|html|htm)$/i, "");
+}
 function buildFinderV2Payload({ listLines, pageLabel, actionRow, ephemeral = false }) {
   const listText = Array.isArray(listLines) ? listLines.join("\n") : String(listLines || "");
-  let content = `### Finder Source Results\n${listText}`;
+  let content = `## Finder Source Results\n${listText}`;
   if (pageLabel) content += `\n\n-# ${pageLabel}`;
   content = content.slice(0, 4000);
   // Buttons live INSIDE the container (after separator), matching Components V2 layout
@@ -4738,7 +4741,7 @@ const helpPages = [
     .setTitle("🤖 Bot Commands")
     .setColor(YELLOW_COLOR)
     .setDescription(
-`**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
+`**\`.clean\`** [\`.cl\`] Clean a script. **(Premium)**
 
 > Premium users can use all commands in DMs.
 > Premium users have unlimited tokens.`
@@ -4758,7 +4761,7 @@ const helpPageBodies = [
 **\`.leaderboard\`** Top command users.
 
 **\`.coinflip\`** Flip a coin — win or lose **1 token**.` },
-  { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Remove comments, IP loggers, script loaders. **(Premium)**
+  { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Clean a script. **(Premium)**
 
 > Premium users can use all commands in DMs.
 > Premium users have unlimited tokens.` }
@@ -5045,10 +5048,9 @@ RULES:
     }
     const hasTag = await hasPrinceStatus(uid);
     if (!hasTag) {
-      return interaction.reply({
-        content: "❌ still no **FS** server tag — put it on, then click again.",
-        flags: MessageFlags.Ephemeral
-      }).catch(() => {});
+      // Silent — no response if still missing FS tag
+      try { await interaction.deferUpdate(); } catch {}
+      return;
     }
     pendingTagRetry.delete(uid);
     try {
@@ -5073,14 +5075,15 @@ RULES:
       if (pending.messageId) {
         try { origMsg = await ch.messages.fetch(pending.messageId); } catch {}
       }
+      if (pending.fromPanel) {
+        // Finder Panel / button flows — Access granted already shown
+        return;
+      }
       if (origMsg) {
-        // Re-run the original command message through the bot pipeline
         client.emit("messageCreate", origMsg);
       } else {
-        await interaction.followUp({
-          content: "❌ original message not found — run the command again.",
-          flags: MessageFlags.Ephemeral
-        }).catch(() => {});
+        // Silent if nothing to re-run
+        return;
       }
     } catch (e) {
       console.warn("⚠️ tagcheck retry:", e.message);
@@ -5290,7 +5293,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(menu.page <= 1),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(menu.page >= menu.totalPages)
     );
-    const listLines = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``);
+    const listLines = pageItems.map(f => `> \`${finderDisplayName(f.filename)}\` — ID: \`${f.id}\``);
     const v2 = buildFinderV2Payload({
       listLines,
       pageLabel: `Pages ${menu.page}/${menu.totalPages}`,
@@ -5324,6 +5327,10 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
   }
   // ─── FINDER PANEL BUTTONS (never expire) — tokens charged on modal submit ───
   if (interaction.customId === "finderpanel_redeem") {
+    if (isBlacklisted(interaction.user.id) && !isOwner(interaction.user.id)) {
+      try { await interaction.deferUpdate(); } catch {}
+      return;
+    }
     const modal = new ModalBuilder()
       .setCustomId("finderpanel_redeem_modal")
       .setTitle("Redeem Premium Key");
@@ -5339,15 +5346,41 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
   }
   if (interaction.customId === "finderpanel_find" || interaction.customId === "finderpanel_get") {
     const uid = interaction.user.id;
+    // Blacklisted — silent (no response)
+    if (isBlacklisted(uid) && !isOwner(uid)) {
+      try { await interaction.deferUpdate(); } catch {}
+      return;
+    }
     // Server Tag required for non-owner / non-buyer
     const buyer = isOwner(uid) || await isBuyer(uid, interaction.member);
     if (!buyer) {
       const hasTag = await hasPrinceStatus(uid);
       if (!hasTag) {
-        const body = "### Input Error\n**Tips:**\n- Go on your profile, click `Edit Profile` then scroll down, you’ll see the `Select a Server Tag` click it then use our Server Tag.";
+        pendingTagRetry.set(String(uid), {
+          content: "",
+          channelId: String(interaction.channelId || ""),
+          guildId: String(interaction.guildId || ""),
+          messageId: String(interaction.message?.id || ""),
+          at: Date.now(),
+          fromPanel: true
+        });
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("tagcheck_" + uid)
+            .setLabel("Check again")
+            .setStyle(ButtonStyle.Success)
+        );
         return interaction.reply({
           flags: IS_COMPONENTS_V2 | ((MessageFlags && MessageFlags.Ephemeral != null) ? MessageFlags.Ephemeral : 64),
-          components: [{ type: 17, accent_color: 0xED4245, components: [{ type: 10, content: body }] }]
+          components: [{
+            type: 17,
+            accent_color: 0xED4245,
+            components: [
+              { type: 10, content: "## Server tag required\nWear the `FS` server tag, then click check again." },
+              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+              row.toJSON()
+            ]
+          }]
         }).catch(() => {});
       }
     }
@@ -5473,11 +5506,11 @@ client.on("interactionCreate", async interaction => {
         return;
       }
       const results = findFiles(query);
-      if (!results.length) { await interaction.editReply({ content: "❌ no found for that, dumbass." }); return; }
+      if (!results.length) { await interaction.editReply({ content: "❌ no found." }); return; }
       const perPage = 8;
       const totalPages = Math.ceil(results.length / perPage);
       const pageItems = results.slice(0, perPage);
-      const listLines = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``);
+      const listLines = pageItems.map(f => `> \`${finderDisplayName(f.filename)}\` — ID: \`${f.id}\``);
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
         new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
@@ -7073,14 +7106,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
     }
     const query = txt.slice(5).trim();
-    if (!query) { replyUser(msg, "❌ usage: `.find <file name>`, dumbass.").catch(() => {}); return; }
+    if (!query) { replyUser(msg, "❌ usage: `.find <file name>`.").catch(() => {}); return; }
     const results = findFiles(query);
-    if (!results.length) { replyUser(msg, "❌ no found for that, dumbass.").catch(() => {}); return; }
+    if (!results.length) { replyUser(msg, "❌ no found.").catch(() => {}); return; }
     const isBuyerUser = perm.isBuyer;
     const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
     // Finder source — Components V2 (never show tokens left)
-    const listLines = pageItems.map(f => `\`${f.filename}\` — ID: \`${f.id}\``);
+    const listLines = pageItems.map(f => `> \`${finderDisplayName(f.filename)}\` — ID: \`${f.id}\``);
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
       new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
