@@ -850,7 +850,8 @@ async function checkRegularPermission(msg, needsFileReply = false) {
   }
   // Channel lock — Components V2 Input Error
   if (!channelAllowed(msg)) {
-    sendInputErrorV2(msg, "**Tips:**\n- Use server tag and go to the allowed channel.").catch(() => {});
+    const allowedMention = config.allowedChannelId ? ("<#" + config.allowedChannelId + ">") : "the allowed channel";
+    sendInputErrorV2(msg, "**Tips:**\n- Go to " + allowedMention + ", make sure you're using our server tag.").catch(() => {});
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
   // Auto-give role when they have the tag (in case sync missed them)
@@ -6470,7 +6471,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
     if (isDM) { replyUser(msg, "❌ use this in a server.").catch(() => {}); return; }
-    // Prefer channel IDs from discord.com/channels/guild/channel links
     const linkIds = [...String(txt).matchAll(/channels\/\d+\/(\d{17,20})/gi)].map(m => m[1]);
     let sourceId, destId;
     if (linkIds.length >= 2) {
@@ -6482,7 +6482,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         replyUser(msg, "❌ usage: `.forward <source_channel_id> <destination_channel_id>`\n(or paste two channel links)").catch(() => {});
         return;
       }
-      // guild+channel links leave 4 snowflakes → take channel slots (2nd & 4th)
       if (idMatches.length >= 4) {
         sourceId = idMatches[1];
         destId = idMatches[3];
@@ -6491,16 +6490,18 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         destId = idMatches[1];
       }
     }
+    sourceId = String(sourceId).trim();
+    destId = String(destId).trim();
+
     let destCh = null;
-    try { destCh = await client.channels.fetch(String(destId).trim()); } catch {}
+    try { destCh = await client.channels.fetch(destId); } catch {}
     if (!destCh || !destCh.isTextBased?.()) {
       replyUser(msg, "❌ invalid destination channel (bot must be in that server).").catch(() => {});
       return;
     }
 
-    // Source: bot first, else user token (/login)
     let sourceCh = null;
-    try { sourceCh = await client.channels.fetch(String(sourceId).trim()); } catch {}
+    try { sourceCh = await client.channels.fetch(sourceId); } catch {}
     const useUserToken = !sourceCh || !sourceCh.isTextBased?.();
     if (useUserToken) {
       const ut = normalizeUserToken(config.userToken || "");
@@ -6509,10 +6510,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         return;
       }
       try {
-        await userDiscordApi("/channels/" + String(sourceId).trim());
+        await userDiscordApi("/channels/" + sourceId);
       } catch (e1) {
         try {
-          await userFetchChannelMessages(String(sourceId).trim(), 1);
+          await userFetchChannelMessages(sourceId, 1);
         } catch (e2) {
           replyUser(msg, "❌ invalid source channel id (user token cannot access it): " + String(e2.message || e1.message || e2).slice(0, 120) + "\nTip: use a **channel** id (not server id), and token account must be in that server.").catch(() => {});
           return;
@@ -6520,98 +6521,175 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       }
     }
 
-    const statusMsg = await replyUser(msg, `⚡ Forwarding files from \`${sourceId}\` → <#${destCh.id}>${useUserToken ? " (via user token)" : ""}...`).catch(() => {});
-    let sent = 0, skipped = 0;
+    const statusMsg = await replyUser(msg, `⚡ Forwarding files from \`${sourceId}\` → <#${destCh.id}>${useUserToken ? " (via user token)" : ""}...`).catch(() => null);
 
-    const isForwardable = (name) => {
-      const e = (String(name || "").match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
-      return e === "txt" || e === "lua" || e === "luau" || e === "zip";
-    };
+    // Run in background so gateway heartbeats stay alive (prevents offline)
+    const destChId = destCh.id;
+    const srcId = sourceId;
+    const useTok = useUserToken;
+    const srcChRef = sourceCh;
 
-    // Existing names in destination
-    const existingNames = new Set();
-    try {
-      let destBefore = null;
-      while (true) {
-        const opts = { limit: 100 };
-        if (destBefore) opts.before = destBefore;
-        const batch = await destCh.messages.fetch(opts);
-        if (!batch.size) break;
-        for (const m of batch.values()) {
-          for (const a of m.attachments?.values?.() || []) {
-            if (a.name) existingNames.add(String(a.name).toLowerCase());
-          }
-        }
-        const oldest = batch.last();
-        if (!oldest || batch.size < 100) break;
-        destBefore = oldest.id;
-      }
-    } catch (e) {
-      console.warn("⚠️ Forward dest scan:", e.message);
-    }
+    setImmediate(() => {
+      (async () => {
+        const counts = { txt: 0, lua: 0, zip: 0 };
+        let skipped = 0;
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const yieldTick = () => new Promise(r => setImmediate(r));
 
-    const processAtt = async (name, url) => {
-      if (!isForwardable(name)) return;
-      if (existingNames.has(String(name).toLowerCase())) { skipped++; return; }
-      try {
-        const buf = await downloadURL(url);
-        if (!buf || !buf.length) return;
-        await destCh.send({ files: [new AttachmentBuilder(buf, { name: name || "file" })] });
-        existingNames.add(String(name).toLowerCase());
-        sent++;
-      } catch (e) {
-        console.warn("⚠️ Forward file:", name, e.message);
-      }
-    };
+        const isForwardable = (name) => {
+          const e = (String(name || "").match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
+          return e === "txt" || e === "lua" || e === "luau" || e === "zip";
+        };
+        const bumpExt = (name) => {
+          const e = (String(name || "").match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
+          if (e === "txt") counts.txt++;
+          else if (e === "lua" || e === "luau") counts.lua++;
+          else if (e === "zip") counts.zip++;
+        };
 
-    try {
-      if (useUserToken) {
-        const msgs = await userFetchAllChannelMessages(sourceId.trim(), 8000);
-        for (const raw of msgs) {
-          const atts = attachmentsFromUserMessage(raw);
-          for (const a of atts) {
-            await processAtt(a.name || a.filename, a.url || a.proxyURL);
-          }
-        }
-      } else {
-        let before = null;
-        while (true) {
-          const opts = { limit: 100 };
-          if (before) opts.before = before;
-          const batch = await sourceCh.messages.fetch(opts);
-          if (!batch.size) break;
-          for (const m of batch.values()) {
-            for (const a of m.attachments?.values?.() || []) {
-              await processAtt(a.name, a.url || a.proxyURL);
+        let destChannel = destCh;
+        try {
+          if (!destChannel) destChannel = await client.channels.fetch(destChId);
+        } catch {}
+
+        // Existing names — only scan recent messages (avoid memory blow)
+        const existingNames = new Set();
+        try {
+          let destBefore = null;
+          let scanned = 0;
+          while (scanned < 300) {
+            const opts = { limit: 100 };
+            if (destBefore) opts.before = destBefore;
+            const batch = await destChannel.messages.fetch(opts);
+            if (!batch.size) break;
+            for (const m of batch.values()) {
+              scanned++;
+              for (const a of m.attachments?.values?.() || []) {
+                if (a.name) existingNames.add(String(a.name).toLowerCase());
+              }
             }
-            // snapshots / forwards
-            try {
-              for (const s of m.messageSnapshots?.values?.() || []) {
-                for (const a of s.attachments?.values?.() || []) {
-                  await processAtt(a.name, a.url || a.proxyURL);
-                }
-              }
-            } catch {}
-            try {
-              const collected = collectMessageAttachments(m);
-              for (const a of collected) {
-                await processAtt(a.name || a.filename, a.url || a.proxyURL);
-              }
-            } catch {}
+            const oldest = batch.last();
+            if (!oldest || batch.size < 100) break;
+            destBefore = oldest.id;
+            await yieldTick();
           }
-          const oldest = batch.last();
-          if (!oldest || batch.size < 100) break;
-          before = oldest.id;
+        } catch (e) {
+          console.warn("⚠️ Forward dest scan:", e.message);
         }
-      }
-      const done = `✅ Forward done — **${sent}** sent` + (skipped ? `, **${skipped}** skipped (already there)` : "") + ".";
-      if (statusMsg) await statusMsg.edit(done).catch(() => {});
-      else replyUser(msg, done).catch(() => {});
-    } catch (e) {
-      const err = `❌ forward failed: ${String(e.message || e).slice(0, 150)}`;
-      if (statusMsg) await statusMsg.edit(err).catch(() => {});
-      else replyUser(msg, err).catch(() => {});
-    }
+
+        const processAtt = async (name, url) => {
+          if (!isForwardable(name) || !url) return;
+          if (existingNames.has(String(name).toLowerCase())) { skipped++; return; }
+          try {
+            const buf = await downloadURL(url);
+            if (!buf || !buf.length) return;
+            await destChannel.send({ files: [new AttachmentBuilder(buf, { name: name || "file" })] });
+            existingNames.add(String(name).toLowerCase());
+            bumpExt(name);
+            // Rate-limit sends so Discord doesn't kill the gateway
+            await sleep(450);
+          } catch (e) {
+            console.warn("⚠️ Forward file:", name, e?.message || e);
+            await sleep(800);
+          }
+        };
+
+        try {
+          if (useTok) {
+            // Paginate via user token — do NOT load everything into memory
+            let before = null;
+            let pages = 0;
+            while (pages < 80) {
+              pages++;
+              let batch = [];
+              try {
+                batch = await userFetchChannelMessages(srcId, 100, before);
+              } catch (e) {
+                console.warn("⚠️ Forward user page:", e?.message || e);
+                break;
+              }
+              if (!batch.length) break;
+              for (const raw of batch) {
+                const atts = attachmentsFromUserMessage(raw);
+                for (const a of atts) {
+                  await processAtt(a.name || a.filename, a.url || a.proxyURL);
+                }
+                await yieldTick();
+              }
+              before = batch[batch.length - 1]?.id;
+              if (batch.length < 100) break;
+              await sleep(350);
+            }
+          } else {
+            let before = null;
+            let pages = 0;
+            while (pages < 80) {
+              pages++;
+              let batch;
+              try {
+                const opts = { limit: 100 };
+                if (before) opts.before = before;
+                batch = await srcChRef.messages.fetch(opts);
+              } catch (e) {
+                console.warn("⚠️ Forward bot page:", e?.message || e);
+                break;
+              }
+              if (!batch || !batch.size) break;
+              for (const m of batch.values()) {
+                try {
+                  for (const a of m.attachments?.values?.() || []) {
+                    await processAtt(a.name, a.url || a.proxyURL);
+                  }
+                } catch {}
+                try {
+                  for (const s of m.messageSnapshots?.values?.() || []) {
+                    for (const a of s.attachments?.values?.() || []) {
+                      await processAtt(a.name, a.url || a.proxyURL);
+                    }
+                  }
+                } catch {}
+                try {
+                  const collected = collectMessageAttachments(m);
+                  for (const a of collected) {
+                    await processAtt(a.name || a.filename, a.url || a.proxyURL);
+                  }
+                } catch {}
+                await yieldTick();
+              }
+              const oldest = batch.last();
+              if (!oldest || batch.size < 100) break;
+              before = oldest.id;
+              await sleep(350);
+            }
+          }
+
+          const doneBody =
+            "### Forward Done!\n" +
+            `.txt: ${counts.txt}\n` +
+            `.lua: ${counts.lua}\n` +
+            `.zip: ${counts.zip}\n` +
+            `from <#${srcId}> to <#${destChId}>`;
+          try {
+            if (statusMsg) {
+              await statusMsg.edit({ content: doneBody }).catch(async () => {
+                await msg.channel.send({ content: doneBody }).catch(() => {});
+              });
+            } else {
+              await msg.channel.send({ content: doneBody }).catch(() => {});
+            }
+          } catch {
+            try { await msg.channel.send({ content: doneBody }).catch(() => {}); } catch {}
+          }
+        } catch (e) {
+          console.error("❌ forward job:", e?.message || e);
+          const err = `❌ forward failed: ${String(e.message || e).slice(0, 150)}`;
+          try {
+            if (statusMsg) await statusMsg.edit({ content: err }).catch(() => {});
+            else await replyUser(msg, err).catch(() => {});
+          } catch {}
+        }
+      })().catch(e => console.error("❌ forward unhandled:", e?.message || e));
+    });
     return;
   }
 
