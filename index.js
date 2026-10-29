@@ -26,9 +26,7 @@ const crypto = require("crypto");
 const OpenAI = require("openai");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const openaiClient = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
-// ============================================================
-// ENV
-// ============================================================
+
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
@@ -36,17 +34,15 @@ const OWNER_ID = "1302080645987569694";
 const BUYER_ROLE_ID = "1553385966629158963";
 const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
-const REGULAR_COLOR = 0x2B2D31; // black gray
-const BLURPLE = 0x5865F2; // Discord blurple
-const GRAY_COLOR = 0x99AAB5; // light gray (not black-gray)
+const REGULAR_COLOR = 0x2B2D31; 
+const BLURPLE = 0x5865F2; 
+const GRAY_COLOR = 0x99AAB5; 
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.");
   process.exit(1);
 }
-// ============================================================
-// STORAGE
-// ============================================================
+
 const DATA_DIR = fs.existsSync("/data") ? "/data" : __dirname;
 const LIBRARY_FILE = path.join(DATA_DIR, "file-library.json");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
@@ -63,7 +59,7 @@ function writeJSON(file, data) {
   try {
     const jsonStr = JSON.stringify(data, null, 2);
     fs.writeFileSync(tmp, jsonStr, "utf8");
-    // Force flush to disk
+    
     try {
       const fd = fs.openSync(tmp, "r+");
       fs.fsyncSync(fd);
@@ -71,14 +67,14 @@ function writeJSON(file, data) {
     } catch {}
     fs
   .renameSync(tmp, file);
-    // Verify file was written correctly
+    
     const verify = JSON.parse(fs.readFileSync(file, "utf8"));
     if (Array.isArray(data?.files) && Array.isArray(verify?.files)) {
       console.log(`💾 Saved ${path.basename(file)}: ${verify.files.length} files`);
     }
   } catch (e) {
     console.error(`❌ Saving ${path.basename(file)}:`, e.message);
-    // Emergency: try direct write
+    
     try { fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8"); } catch {}
   }
 }
@@ -88,7 +84,6 @@ if (!Array.isArray(config.liveScanChannelIds)) config.liveScanChannelIds = [];
 if (typeof config.userToken !== "string") config.userToken = "";
 const saveConfig = () => writeJSON(CONFIG_FILE, config);
 
-/** Discord user-token REST (for owner forward when bot is not in the server) */
 async function userDiscordApi(path, opts = {}) {
   const tok = normalizeUserToken(config.userToken || "");
   if (!tok) throw new Error("no user token — run /login first");
@@ -116,7 +111,7 @@ async function userDiscordApi(path, opts = {}) {
 function normalizeUserToken(raw) {
   let t = String(raw || "").trim();
   if (!t) return "";
-  // JSON dump objects: {"token":"..."} / token dumps
+  
   if (t.startsWith("{") || t.startsWith("[")) {
     try {
       const j = JSON.parse(t);
@@ -132,19 +127,19 @@ function normalizeUserToken(raw) {
     } catch {}
   }
   t = String(t).trim();
-  // Strip wrapping quotes
+  
   t = t.replace(/^["'`]+|["'`]+$/g, "");
-  // Authorization header leftovers
+  
   t = t.replace(/^(Bearer|Bot)\s+/i, "");
   t = t.replace(/^Token\s*[:=]\s*/i, "");
   t = t.replace(/^authorization\s*[:=]\s*/i, "");
-  // email:password:token  OR  user:pass:token dumps
+  
   if ((t.match(/:/g) || []).length >= 2) {
     const parts = t.split(":");
     const last = parts[parts.length - 1].trim();
     if (last.length > 30 && last.includes(".")) t = last;
   }
-  // Pull Discord-shaped token out of messy dump text
+  
   const m = String(t).match(/(?:mfa\.)?[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{10,}/);
   if (m) t = m[0];
   t = t.replace(/[\r\n\t\s]+/g, "");
@@ -168,7 +163,6 @@ async function verifyUserToken(token) {
   return json;
 }
 
-/** Fetch channel messages via user token (when bot lacks access) */
 async function userFetchChannelMessages(channelId, limit = 50, before = null) {
   let path = `/channels/${channelId}/messages?limit=${Math.min(100, Math.max(1, limit))}`;
   if (before) path += `&before=${before}`;
@@ -176,7 +170,6 @@ async function userFetchChannelMessages(channelId, limit = 50, before = null) {
   return Array.isArray(data) ? data : [];
 }
 
-/** Paginate all messages in a channel via user token */
 async function userFetchAllChannelMessages(channelId, maxMessages = 5000) {
   const all = [];
   let before = null;
@@ -190,7 +183,6 @@ async function userFetchAllChannelMessages(channelId, maxMessages = 5000) {
   return all;
 }
 
-/** Attachments from a raw REST message object */
 function attachmentsFromUserMessage(raw) {
   const out = [];
   if (!raw) return out;
@@ -213,20 +205,169 @@ function attachmentsFromUserMessage(raw) {
   return out;
 }
 
+function parseChannelIdArg(raw) {
+  const s = String(raw || "").trim();
+  const link = s.match(/channels\/\d+\/(\d{17,20})/i);
+  if (link) return link[1];
+  const id = s.match(/(\d{17,20})/);
+  return id ? id[1] : null;
+}
+
+function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, statusEdit }) {
+  setImmediate(() => {
+    (async () => {
+      const counts = { txt: 0, lua: 0, zip: 0 };
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const yieldTick = () => new Promise(r => setImmediate(r));
+      const isForwardable = (name) => {
+        const e = (String(name || "").match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
+        return e === "txt" || e === "lua" || e === "luau" || e === "zip";
+      };
+      const bumpExt = (name) => {
+        const e = (String(name || "").match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
+        if (e === "txt") counts.txt++;
+        else if (e === "lua" || e === "luau") counts.lua++;
+        else if (e === "zip") counts.zip++;
+      };
+
+      let destChannel = destCh;
+      try {
+        if (!destChannel) destChannel = await client.channels.fetch(destId);
+      } catch {}
+
+      const existingNames = new Set();
+      try {
+        let destBefore = null;
+        let scanned = 0;
+        while (scanned < 300 && destChannel) {
+          const opts = { limit: 100 };
+          if (destBefore) opts.before = destBefore;
+          const batch = await destChannel.messages.fetch(opts);
+          if (!batch.size) break;
+          for (const m of batch.values()) {
+            scanned++;
+            for (const a of m.attachments?.values?.() || []) {
+              if (a.name) existingNames.add(String(a.name).toLowerCase());
+            }
+          }
+          const oldest = batch.last();
+          if (!oldest || batch.size < 100) break;
+          destBefore = oldest.id;
+          await yieldTick();
+        }
+      } catch (e) {
+        console.warn("⚠️ Forward dest scan:", e.message);
+      }
+
+      const processAtt = async (name, url) => {
+        if (!isForwardable(name) || !url) return;
+        if (existingNames.has(String(name).toLowerCase())) return;
+        try {
+          const buf = await downloadURL(url);
+          if (!buf || !buf.length) return;
+          await destChannel.send({ files: [new AttachmentBuilder(buf, { name: name || "file" })] });
+          existingNames.add(String(name).toLowerCase());
+          bumpExt(name);
+          await sleep(450);
+        } catch (e) {
+          console.warn("⚠️ Forward file:", name, e?.message || e);
+          await sleep(800);
+        }
+      };
+
+      try {
+        if (useUserToken) {
+          let before = null;
+          for (let pages = 0; pages < 80; pages++) {
+            let batch = [];
+            try {
+              batch = await userFetchChannelMessages(sourceId, 100, before);
+            } catch (e) {
+              console.warn("⚠️ Forward user page:", e?.message || e);
+              break;
+            }
+            if (!batch.length) break;
+            for (const raw of batch) {
+              const atts = attachmentsFromUserMessage(raw);
+              for (const a of atts) {
+                await processAtt(a.name || a.filename, a.url || a.proxyURL);
+              }
+              await yieldTick();
+            }
+            before = batch[batch.length - 1]?.id;
+            if (batch.length < 100) break;
+            await sleep(350);
+          }
+        } else if (sourceCh) {
+          let before = null;
+          for (let pages = 0; pages < 80; pages++) {
+            let batch;
+            try {
+              const opts = { limit: 100 };
+              if (before) opts.before = before;
+              batch = await sourceCh.messages.fetch(opts);
+            } catch (e) {
+              console.warn("⚠️ Forward bot page:", e?.message || e);
+              break;
+            }
+            if (!batch || !batch.size) break;
+            for (const m of batch.values()) {
+              try {
+                for (const a of m.attachments?.values?.() || []) {
+                  await processAtt(a.name, a.url || a.proxyURL);
+                }
+              } catch {}
+              try {
+                for (const s of m.messageSnapshots?.values?.() || []) {
+                  for (const a of s.attachments?.values?.() || []) {
+                    await processAtt(a.name, a.url || a.proxyURL);
+                  }
+                }
+              } catch {}
+              try {
+                const collected = collectMessageAttachments(m);
+                for (const a of collected) {
+                  await processAtt(a.name || a.filename, a.url || a.proxyURL);
+                }
+              } catch {}
+              await yieldTick();
+            }
+            const oldest = batch.last();
+            if (!oldest || batch.size < 100) break;
+            before = oldest.id;
+            await sleep(350);
+          }
+        }
+
+        const doneBody =
+          "### Forward Done!\n" +
+          `.txt: ${counts.txt}\n` +
+          `.lua: ${counts.lua}\n` +
+          `.zip: ${counts.zip}\n` +
+          `from <#${sourceId}> to <#${destId}>`;
+        try {
+          if (typeof statusEdit === "function") await statusEdit(doneBody);
+        } catch {}
+      } catch (e) {
+        console.error("❌ forward job:", e?.message || e);
+        try {
+          if (typeof statusEdit === "function") {
+            await statusEdit("❌ forward failed: " + String(e.message || e).slice(0, 150));
+          }
+        } catch {}
+      }
+    })().catch(e => console.error("❌ forward unhandled:", e?.message || e));
+  });
+}
+
 let library = readJSON(LIBRARY_FILE, { files: [] });
 if (Array.isArray(library)) library = { files: library };
 if (!Array.isArray(library.files)) library.files = [];
 
-// ============================================================
-// KEY SYSTEM (Premium Keys)
-// ============================================================
 const KEYS_FILE = path.join(DATA_DIR, "keys.json");
 let keyStore = readJSON(KEYS_FILE, { keys: [] });
 if (!Array.isArray(keyStore.keys)) keyStore.keys = [];
 
-// ============================================================
-// BLACKLIST (owner-managed user ids blocked from commands)
-// ============================================================
 const BLACKLIST_FILE = path.join(DATA_DIR, "blacklist.json");
 let blacklistStore = readJSON(BLACKLIST_FILE, { users: [] });
 if (!blacklistStore || typeof blacklistStore !== "object") blacklistStore = { users: [] };
@@ -263,9 +404,6 @@ function blacklistList() {
   return [...blacklistStore.users];
 }
 
-// ============================================================
-// WHITELIST — allowed to use .forward (owner always allowed)
-// ============================================================
 const WHITELIST_FILE = path.join(DATA_DIR, "whitelist.json");
 let whitelistStore = readJSON(WHITELIST_FILE, { users: [] });
 if (!whitelistStore || typeof whitelistStore !== "object") whitelistStore = { users: [] };
@@ -301,25 +439,18 @@ function whitelistList() {
   return [...whitelistStore.users];
 }
 
-
-// ============================================================
-// TOKEN SYSTEM (regular users — max 10, daily refill when empty)
-// Premium / Owner = unlimited
-// ============================================================
 const TOKENS_FILE = path.join(DATA_DIR, "tokens.json");
 const MAX_REGULAR_TOKENS = 10;
-const PH_OFFSET_MS = 8 * 60 * 60 * 1000; // Asia/Manila = UTC+8
+const PH_OFFSET_MS = 8 * 60 * 60 * 1000; 
 let tokenStore = readJSON(TOKENS_FILE, { users: {} });
 if (!tokenStore || typeof tokenStore !== "object") tokenStore = { users: {} };
 if (!tokenStore.users || typeof tokenStore.users !== "object") tokenStore.users = {};
 const saveTokens = () => writeJSON(TOKENS_FILE, tokenStore);
 
-/** YYYY-MM-DD in Asia/Manila */
 function getPHDateKey(ms = Date.now()) {
   return new Date(ms).toLocaleDateString("en-CA", { timeZone: "Asia/Manila" });
 }
 
-/** Next 12:00 AM Philippine time (epoch ms) */
 function getNextMidnightPHMs(fromMs = Date.now()) {
   const phNow = fromMs + PH_OFFSET_MS;
   const d = new Date(phNow);
@@ -336,7 +467,6 @@ function getUserTokenData(userId) {
   return tokenStore.users[id];
 }
 
-/** At 12 AM PH every day → tokens reset to 10 (gifts after reset can go above 10) */
 function ensureDailyTokenReset(userId) {
   const data = getUserTokenData(userId);
   const today = getPHDateKey();
@@ -370,7 +500,6 @@ function tokenLeftLine(tokensLeft, unlimited) {
   return `-# You have ${tokensLeft} Tokens left.`;
 }
 
-/** Consume 1 token for regular users. Buyers/owners unlimited. Daily reset 12 AM PH. */
 function tryConsumeToken(userId, isBuyerUser) {
   if (isBuyerUser || isOwner(userId)) {
     return { ok: true, unlimited: true, tokens: null };
@@ -395,10 +524,9 @@ function peekTokens(userId, isBuyerUser) {
   return { unlimited: false, tokens: data.tokens, nextRefillAt: data.nextRefillAt || getNextMidnightPHMs() };
 }
 
-/** Gift tokens — can go above 10 (e.g. 20). Daily 12 AM PH still resets to 10. */
 function addToken(userId, amount) {
   const data = ensureDailyTokenReset(userId);
-  // Cap at 10 — never above max (gifts / coinflip / etc.)
+  
   data.tokens = Math.min(MAX_REGULAR_TOKENS, Math.max(0, data.tokens + amount));
   if (data.tokens > 0) data.nextRefillAt = null;
   else data.nextRefillAt = getNextMidnightPHMs();
@@ -406,7 +534,6 @@ function addToken(userId, amount) {
   return data.tokens;
 }
 
-/** Subtract tokens from a regular user. Returns { ok, tokens, need? }. */
 function subtractTokens(userId, amount) {
   const data = ensureDailyTokenReset(userId);
   if (data.tokens < amount) {
@@ -478,12 +605,9 @@ function cleanupExpiredKeys() {
 }
 setInterval(cleanupExpiredKeys, 10 * 1000);
 
-// ============================================================
-// COOLDOWN TRACKER
-// ============================================================
-const commandCooldowns = new Map(); // legacy — unused (tokens replace cooldowns)
-const COOLDOWNS = {}; // all timed cooldowns removed — token system used instead
-/** Free commands (no token cost): redeem, help, find (prefix). Finder panel Find button DOES cost. */
+const commandCooldowns = new Map(); 
+const COOLDOWNS = {}; 
+
 const TOKEN_FREE_CMDS = new Set(["redeem", "help", "find", "leaderboard"]);
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
@@ -492,23 +616,18 @@ function formatCooldown(remainingSec) {
   if (m > 0) return `${m}m`;
   return `${s}s`;
 }
-/**
- * Token gate (replaces timed cooldowns).
- * Returns { onCooldown, noTokens, waitUntil, tokensLeft, unlimited }
- * onCooldown=true only when out of tokens (wait for daily refill).
- */
-const pendingTokenLine = new Map(); // userId -> "-# You have XX Tokens left." (regular only — never premium)
-const pendingTagRetry = new Map(); // userId -> { content, channelId, guildId, messageId, at }
-const cleanSessions = new Map(); // messageId -> { authorId, content, files?, at }
-const detectSessions = new Map(); // messageId -> { authorId, files, at }
-/** Token line for message TEXT only (never embed). Empty for premium. */
+
+const pendingTokenLine = new Map(); 
+const pendingTagRetry = new Map(); 
+const cleanSessions = new Map(); 
+
 function tokensResultSuffix(isBuyerUser, tokensLeft) {
   if (isBuyerUser || tokensLeft === null || tokensLeft === undefined) return "";
   return `\n-# You have ${tokensLeft} Tokens left.`;
 }
 function checkCommandCooldown(userId, cmd, isBuyerUser) {
   const free = TOKEN_FREE_CMDS.has(cmd);
-  // Premium / owner: never show token line, never consume
+  
   if (isBuyerUser || isOwner(userId)) {
     pendingTokenLine.delete(String(userId));
     return { onCooldown: false, unlimited: true, tokensLeft: null, free };
@@ -526,17 +645,12 @@ function checkCommandCooldown(userId, cmd, isBuyerUser) {
   pendingTokenLine.set(String(userId), tokenLeftLine(r.tokens, false));
   return { onCooldown: false, unlimited: false, tokensLeft: r.tokens, free: false };
 }
-/** Reply helper when out of tokens — never attach tokens left */
+
 function replyNoTokens(msg, waitUntil) {
   pendingTokenLine.delete(String(msg.author.id));
   const leftMs = Math.max(0, (waitUntil || getNextMidnightPHMs()) - Date.now());
   return sendInputErrorV2(msg, "You need to wait **" + formatTokenWait(leftMs) + "**");
 }
-// ============================================================
-// DISCORD CLIENT
-// ============================================================
-
-
 
 const client = new Client({
   intents: [
@@ -551,20 +665,18 @@ const client = new Client({
 });
 const runningScans = new Set();
 const paginationMenus = new Map();
-const obfTemp = new Map(); // userId -> { source, fileName, isBuyerUser }
+const obfTemp = new Map(); 
 const altListMenus = new Map();
 const extractCarouselMenus = new Map();
-const renamePanels = new Map(); // messageId -> { authorId, fileUrl, fileName, isBuyerUser }
-const finderPanelCooldowns = new Map(); // "find:userId" | "get:userId" → expiry timestamp
-const FINDER_PANEL_CD_MS = 60 * 1000; // 1 minute per Find / Get use
+const renamePanels = new Map(); 
+const finderPanelCooldowns = new Map(); 
+const FINDER_PANEL_CD_MS = 60 * 1000; 
 const EXPIRY_MS = 5 * 60 * 1000;
 let isReady = false;
 let lastReady = Date.now();
 let registering = false;
 let reconnecting = false;
-// ============================================================
-// BASIC HELPERS
-// ============================================================
+
 const saveLibrary = () => writeJSON(LIBRARY_FILE, library);
 
 const USAGE_FILE = path.join(DATA_DIR, "command-usage.json");
@@ -584,12 +696,10 @@ function trackCommandUse(user) {
   } catch {}
 }
 
-
 function isOwner(userId) {
   return userId === OWNER_ID;
 }
 
-// Auto-role for alt accounts: remove all roles, add ALT role
 async function applyAltRole(member) {
   if (!member || !member.roles) return;
   try {
@@ -605,17 +715,17 @@ async function applyAltRole(member) {
   }
 }
 async function isBuyer(userId, member) {
-  // ONLY Owner + BUYER_ROLE_ID count as buyer.
-  // PRINCE_ROLE_ID (Server Tag role) does NOT grant buyer/DM access.
+  
+  
   const uid = userId || member?.id;
   if (!uid) return false;
   if (uid === OWNER_ID) return true;
-  // Fast path: local guild member check — BUYER role only (never Prince role)
+  
   if (member?.roles?.cache?.has(BUYER_ROLE_ID)) {
     console.log(`👑 isBuyer: ${uid} → YES (local member)`);
     return true;
   }
-  // Main guild fetch
+  
   try {
     let mainGuild = client.guilds.cache.get(GUILD_ID);
     if (!mainGuild) {
@@ -626,7 +736,7 @@ async function isBuyer(userId, member) {
       console.warn(`⚠️ isBuyer: main guild not found`);
       return false;
     }
-    // Fetch member with force
+    
     let mainMember = mainGuild.members.cache.get(uid);
     if (!mainMember) {
       console.log(`👑 isBuyer: fetching member ${uid} from main guild...`);
@@ -636,12 +746,12 @@ async function isBuyer(userId, member) {
       console.log(`👑 isBuyer: ${uid} → NO (not in main guild)`);
       return false;
     }
-    // Check roles cache
+    
     if (mainMember.roles.cache.has(BUYER_ROLE_ID)) {
       console.log(`👑 isBuyer: ${uid} → YES (role in cache)`);
       return true;
     }
-    // Force fetch roles if cache seems incomplete
+    
     if (mainMember.roles.cache.size <= 1) {
       console.log(`👑 isBuyer: force-fetching roles for ${uid}...`);
       try {
@@ -654,7 +764,7 @@ async function isBuyer(userId, member) {
         console.warn(`⚠️ isBuyer roles fetch: ${roleErr.message}`);
       }
     }
-    // Last resort: check via list of role IDs
+    
     const roleIds = [...mainMember.roles.cache.keys()];
     console.log(`👑 isBuyer: ${uid} roles = [${roleIds.join(", ")}] (looking for ${BUYER_ROLE_ID})`);
     if (roleIds.includes(BUYER_ROLE_ID)) {
@@ -665,7 +775,7 @@ async function isBuyer(userId, member) {
     return false;
   } catch (e) {
     console.warn(`⚠️ isBuyer ERROR for ${uid}: ${e.message}`);
-    // Final fallback: check local member if available
+    
     if (member?.roles?.cache?.has(BUYER_ROLE_ID)) {
       console.log(`👑 isBuyer: ${uid} → YES (fallback local)`);
       return true;
@@ -675,7 +785,7 @@ async function isBuyer(userId, member) {
 }
 function channelAllowed(msg) {
   try {
-    // Always re-read from disk so .set changes apply immediately and survive restarts
+    
     try {
       const fresh = readJSON(CONFIG_FILE, { allowedChannelId: null });
       if (fresh && typeof fresh === "object") {
@@ -683,7 +793,7 @@ function channelAllowed(msg) {
       }
     } catch {}
     const chId = String(msg.channel?.id || msg.channelId || msg.channel_id || "");
-    // ONLY the channel set by .set — no hardcoded fallback
+    
     const allowed = config.allowedChannelId ? String(config.allowedChannelId) : "";
     if (!chId || !allowed) return false;
     return chId === allowed;
@@ -691,13 +801,13 @@ function channelAllowed(msg) {
     return false;
   }
 }
-// Check if a user/member has adopted THIS server's Server Tag (primary guild identity)
+
 function memberHasServerTag(member) {
   if (!member?.user) return false;
   try {
     const pg = member.user.primaryGuild;
     if (!pg) return false;
-    // Must be displaying the tag AND it must be for our guild
+    
     return pg.identityEnabled === true && String(pg.identityGuildId) === String(GUILD_ID);
   } catch {
     return false;
@@ -706,7 +816,7 @@ function memberHasServerTag(member) {
 function hasServerTag(member) {
   return memberHasServerTag(member);
 }
-// Async — fetch member from main guild then check Server Tag
+
 async function hasPrinceStatus(userId) {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
@@ -716,7 +826,7 @@ async function hasPrinceStatus(userId) {
     return false;
   }
 }
-// Alias used by older call sites
+
 function memberHasPrinceStatus(member) {
   return memberHasServerTag(member);
 }
@@ -729,12 +839,12 @@ async function isInMainGuild(userId) {
     return false;
   }
 }
-// Auto-give / remove PRINCE role based on Server Tag
+
 async function syncPrinceRole(member) {
   try {
     if (!member || member.guild.id !== GUILD_ID) return;
     if (member.user.bot) return;
-    // Force-fetch to get latest user data (primaryGuild / Server Tag)
+    
     try { member = await member.guild.members.fetch(member.id, { force: true }); } catch {}
     const hasTag = memberHasServerTag(member);
     const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
@@ -776,11 +886,7 @@ async function syncAllPrinceRoles() {
     console.warn(`⚠️ syncAllPrinceRoles: ${e.message}`);
   }
 }
-// ============================================================
-// PERMISSION CHECK — REGULAR USER COMMANDS
-// Owner / Buyer → bypass all
-// Regular → status + channel + guild checks
-// ============================================================
+
 async function checkRegularPermission(msg, needsFileReply = false) {
   try {
     if (isBlacklisted(msg.author?.id) && !isOwner(msg.author?.id)) {
@@ -788,25 +894,25 @@ async function checkRegularPermission(msg, needsFileReply = false) {
     }
   } catch {}
   try {
-  // Owner → full bypass, can use ANYWHERE
+  
   if (isOwner(msg.author.id)) {
     return { allowed: true, isBuyer: true, isOwner: true };
   }
 
-  // Buyer → bypass cooldowns, can use in DMs
+  
   if (await isBuyer(msg.author.id, msg.member)) {
     return { allowed: true, isBuyer: true };
   }
 
   const isDM = !msg.guild;
 
-  // Regular user in DMs → premium required
+  
   if (isDM) {
     sendInputErrorV2(msg, "Buy a Premium on https://discord.com/channels/1509484518766018711/1561710834344923247 — to use this command or use command in DMs.").catch(() => {});
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
 
-  // Cross-server check: must be in main guild
+  
   if (msg.guild.id !== GUILD_ID) {
     const inMain = await isInMainGuild(msg.author.id);
     if (!inMain) {
@@ -814,7 +920,7 @@ async function checkRegularPermission(msg, needsFileReply = false) {
     }
   }
 
-  // Server Tag requirement — regular users MUST adopt this server's Server Tag
+  
   const hasTag = await hasPrinceStatus(msg.author.id);
   if (!hasTag) {
     try {
@@ -848,13 +954,13 @@ async function checkRegularPermission(msg, needsFileReply = false) {
     }
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
-  // Channel lock — Components V2 Input Error
+  
   if (!channelAllowed(msg)) {
     const allowedMention = config.allowedChannelId ? ("<#" + config.allowedChannelId + ">") : "the allowed channel";
     sendInputErrorV2(msg, "**Tips:**\n- Go to " + allowedMention + ", make sure you're using our server tag.").catch(() => {});
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
-  // Auto-give role when they have the tag (in case sync missed them)
+  
   try {
     if (msg.member && msg.guild?.id === GUILD_ID) {
       await syncPrinceRole(msg.member);
@@ -867,15 +973,15 @@ async function checkRegularPermission(msg, needsFileReply = false) {
     }
   }
 
-  // All checks passed — regular user allowed
+  
   return { allowed: true, isBuyer: false };
   } catch (e) {
     console.error("❌ checkRegularPermission error:", e.message);
-    // Fail OPEN — don't block users on error
+    
     return { allowed: true, isBuyer: false, error: e.message };
   }
 }
-/** Collect all file attachments from a message (normal + forwarded + V2) */
+
 function collectMessageAttachments(message) {
   const out = [];
   if (!message) return out;
@@ -883,7 +989,7 @@ function collectMessageAttachments(message) {
     for (const a of message.attachments?.values?.() || []) out.push(a);
   } catch {}
   try {
-    // discord.js Collection sometimes not iterable the same way
+    
     if (!out.length && message.attachments?.forEach) {
       message.attachments.forEach(a => out.push(a));
     }
@@ -893,7 +999,7 @@ function collectMessageAttachments(message) {
       for (const a of s.attachments?.values?.() || []) out.push(a);
     }
   } catch {}
-  // Components V2: walk components for type 13 file refs (attachment://name)
+  
   try {
     const walk = (comps) => {
       if (!Array.isArray(comps)) return;
@@ -901,7 +1007,7 @@ function collectMessageAttachments(message) {
         if (!c) continue;
         if (c.type === 13 && c.file) {
           const name = String(c.file.name || c.file.filename || (c.file.url || "").replace(/^attachment:\/\//, "") || "file");
-          // Prefer matching real attachment by name
+          
           const match = out.find(a => (a.name || a.filename) === name);
           if (!match && (c.file.url || "").startsWith("http")) {
             out.push({ name, url: c.file.url, proxyURL: c.file.url, size: c.file.size || 0 });
@@ -915,7 +1021,6 @@ function collectMessageAttachments(message) {
   return out;
 }
 
-/** Raw REST fetch — most reliable for Components V2 attachment URLs */
 async function fetchMessageRaw(channelId, messageId) {
   const tryFetch = async (authHeader) => {
     try {
@@ -931,10 +1036,10 @@ async function fetchMessageRaw(channelId, messageId) {
       return null;
     }
   };
-  // 1) Bot token
+  
   let data = await tryFetch(`Bot ${TOKEN}`);
   if (data) return data;
-  // 2) Owner user token (/login) — when bot is not in that server
+  
   const ut = normalizeUserToken(config.userToken || "");
   if (ut) {
     data = await tryFetch(ut);
@@ -964,7 +1069,7 @@ function attachmentsFromRawMessage(raw) {
     });
   };
   for (const a of raw.attachments || []) push(a);
-  // Walk V2 components for type 13
+  
   const walk = (comps) => {
     if (!Array.isArray(comps)) return;
     for (const c of comps) {
@@ -979,7 +1084,7 @@ function attachmentsFromRawMessage(raw) {
     }
   };
   try { walk(raw.components); } catch {}
-  // Forwarded messages: message_snapshots[].message.attachments (REST shape)
+  
   try {
     const snaps = raw.message_snapshots || raw.messageSnapshots || [];
     for (const snap of snaps) {
@@ -992,7 +1097,6 @@ function attachmentsFromRawMessage(raw) {
   return out;
 }
 
-/** Fetch the message this one is replying to (cache or API) */
 async function fetchRepliedMessage(msg) {
   const refId = msg?.reference?.messageId;
   if (!refId) return null;
@@ -1013,18 +1117,18 @@ function isReplyingToFile(msg) {
   const ref = msg.reference?.messageId;
   if (!ref) return false;
   const repliedMsg = msg.channel?.messages?.cache?.get(ref);
-  if (!repliedMsg) return true; // not cached — let handlers resolve
+  if (!repliedMsg) return true; 
   if (collectMessageAttachments(repliedMsg).length > 0) return true;
   try {
     const flags = Number(repliedMsg.flags?.bitfield ?? repliedMsg.flags ?? 0);
-    if (flags & 32768) return true; // Components V2 — allow, handlers use REST
+    if (flags & 32768) return true; 
   } catch {}
   return false;
 }
 
 async function isReplyingToFileAsync(msg) {
   if (!msg?.reference?.messageId) return false;
-  // Any reply may target a V2 file message — resolve via REST if needed
+  
   const list = await attachmentsFromMsgOrReply(msg, null);
   if (list.length > 0) return true;
   try {
@@ -1036,7 +1140,6 @@ async function isReplyingToFileAsync(msg) {
   return false;
 }
 
-/** Attachments on this message or the message it replies to (Components V2 safe via REST) */
 async function attachmentsFromMsgOrReply(msg, filterFn = null) {
   const onlyFiles = (arr) => (arr || []).filter(a => {
     if (!a) return false;
@@ -1062,12 +1165,12 @@ async function attachmentsFromMsgOrReply(msg, filterFn = null) {
   if (!list.length && msg.reference?.messageId) {
     const refId = msg.reference.messageId;
     const refChannelId = msg.reference.channelId || msg.channel?.id;
-    // 1) discord.js object
+    
     try {
       const refMsg = await fetchRepliedMessage(msg);
       if (refMsg) {
         list = onlyFiles(collectMessageAttachments(refMsg));
-        // Also use attachmentsOf (V2 + forward-aware)
+        
         if (!list.length) {
           try {
             list = onlyFiles(attachmentsOf(refMsg).map(x => x.attachment));
@@ -1075,14 +1178,14 @@ async function attachmentsFromMsgOrReply(msg, filterFn = null) {
         }
       }
     } catch {}
-    // 2) Raw REST — reliable for Components V2 + forwards
+    
     if (!list.length && refChannelId) {
       try {
         const raw = await fetchMessageRaw(refChannelId, refId);
         list = onlyFiles(attachmentsFromRawMessage(raw));
       } catch {}
     }
-    // 3) Same channel REST fallback
+    
     if (!list.length && msg.channel?.id && msg.channel.id !== refChannelId) {
       try {
         const raw = await fetchMessageRaw(msg.channel.id, refId);
@@ -1091,7 +1194,7 @@ async function attachmentsFromMsgOrReply(msg, filterFn = null) {
     }
   }
 
-  // Also: if this msg itself is empty, try raw self (rare)
+  
   if (!list.length && msg.id) {
     try {
       const raw = await fetchMessageRaw(msg.channel.id, msg.id);
@@ -1103,11 +1206,6 @@ async function attachmentsFromMsgOrReply(msg, filterFn = null) {
   return list;
 }
 
-/** Script files from message or reply (Components V2 — same path as .upload) */
-
-// ============================================================
-// OBFUSCATOR DETECTOR (.detect / .dt)
-// ============================================================
 const SIGNATURES = {
     Prometheus: [
         [20, /return\s*\(function\s*\(\.\.\.\)\s*local\s+\w\s*=\s*\{/],
@@ -1285,7 +1383,6 @@ const SIGNATURES = {
         [15, /\}\s*,\s*false\s*,\s*string\.sub\s*,\s*select\s*,\s*error/],
         [20, /string\.byte\s*,\s*tonumber\s*,\s*math\.ldexp\s*,\s*\.\.\.\s*\)\s*\(\.\.\.\s*\)\s*;/],
     ],
-
 
     Luarmor: [
         [70, /luarmor\.net/i],
@@ -1706,8 +1803,6 @@ function isDefinitelyObfuscated(code) {
     return false;
 }
 
-
-/** Extract Luraph version string e.g. Luraph V14.9 from source headers */
 function formatLuraphName(code, fallback) {
     const s = String(code || "");
     let m = s.match(/Luraph\s+Obfuscator\s+v?(\d+(?:\.\d+){0,3})/i);
@@ -1716,7 +1811,7 @@ function formatLuraphName(code, fallback) {
     if (!m) m = s.match(/Luraph\s+v(?:ersion\s*)?(\d+(?:\.\d+){0,3})/i);
     if (!m) m = s.match(/\bLPH[_\s-]*v?(\d+(?:\.\d+){0,2})\b/i);
     if (m) return "Luraph V" + m[1];
-    // fallback from signature bucket name
+    
     if (/14/.test(fallback)) return "Luraph V14";
     if (/10/.test(fallback)) return "Luraph V10";
     if (/Luraph/i.test(fallback)) return "Luraph";
@@ -1780,8 +1875,6 @@ function printReport(results) {
     return `Detected: ${topName} (score ${score})`;
 }
 
-
-/** Fetch remote text (script URL) */
 async function fetchTextFromUrl(url) {
   const u = String(url || "").trim();
   if (!/^https?:\/\//i.test(u)) return null;
@@ -1793,80 +1886,6 @@ async function fetchTextFromUrl(url) {
   const text = await res.text();
   if (!text || !text.trim()) throw new Error("empty response");
   return text;
-}
-
-
-/** Threat scan: Script Loader / IP Logger / Discord Webhook / Safe */
-function detectThreatAnalysis(code) {
-  const s = String(code || "");
-  const lower = s.toLowerCase();
-
-  const IP_DOMAINS = [
-    "iplogger", "grabify", "blasze", "ipgrabber", "ip-logger", "ipify.org",
-    "ipinfo.io", "ip-api.com", "icanhazip", "ifconfig.me", "checkip.amazonaws",
-    "wtfismyip", "ipgeolocation", "freegeoip", "api.ip", "myip.com", "whatismyip",
-    "grabify.link", "2no.co", "yip.su", "ps3cfw.com"
-  ];
-  const hasIpLogger = IP_DOMAINS.some(d => lower.includes(d)) ||
-    /https?:\/\/[^\s"'`]*?(?:ip\s*log|grabify|blasze|iplog)/i.test(s);
-
-  const webhookRe = /https?:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i;
-  const hasWebhook = webhookRe.test(s);
-  const stealHints = /cookie|token|password|pass\b|account|session|robloxsecurity|\.roblosecurity|authorization|steal|exfil|webhook.*send|request.*webhook/i.test(s);
-  const webhookMalicious = hasWebhook && stealHints;
-  const webhookBenign = hasWebhook && !stealHints;
-
-  const loaderPatterns = [
-    /loadstring\s*\(\s*(?:game:GetService\s*\(\s*["']HttpService["']\s*\)\s*:)?HttpGet/i,
-    /loadstring\s*\(\s*(?:syn|http|fluxus|request)?[\s\S]{0,40}HttpGet/i,
-    /(?:loadstring|load)\s*\(\s*(?:game:HttpGet|http(?:s)?\.get|request\s*\()/i,
-    /HttpGet\s*\(\s*["']https?:\/\//i,
-    /syn\.request\s*\(\s*\{[\s\S]*?Url\s*=\s*["']https?:\/\//i,
-    /(?:getgenv|getrenv|getfenv).*loadstring/i,
-  ];
-  const hasLoader = loaderPatterns.some(re => re.test(s));
-  const loaderCritical = hasLoader && (hasWebhook || hasIpLogger || /malware|backdoor|steal|keylog/i.test(s));
-
-  if (hasIpLogger) {
-    return {
-      title: "IP Logger",
-      color: 0xED4245,
-      description: "What it does:\n\nA link/URL that steals the target’s IP address, location, device info, and ISP when clicked. Used for doxxing, DDoS attacks, or harassment. Common in Discord DMs, fake \"free nitro\" links, or Roblox game \"asset links\"."
-    };
-  }
-  if (webhookMalicious) {
-    return {
-      title: "Discord Webhook",
-      color: 0xF26522,
-      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
-    };
-  }
-  if (loaderCritical) {
-    return {
-      title: "Script Loader",
-      color: 0xED4245,
-      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
-    };
-  }
-  if (hasLoader) {
-    return {
-      title: "Script Loader",
-      color: 0xF26522,
-      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
-    };
-  }
-  if (webhookBenign) {
-    return {
-      title: "Discord Webhook",
-      color: 0x5865F2,
-      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
-    };
-  }
-  return {
-    title: "Safe",
-    color: 0x57F287,
-    description: "A clean file with no Script Loader, no IP Logger, no stealing Webhook. It will not download hidden malware, log your IP/location, or steal your Roblox cookie, account, or private data."
-  };
 }
 
 async function downloadAttachmentText(file) {
@@ -1927,12 +1946,8 @@ async function sendFilePickPanel(msg, { prefix, userId, files, listLabel }) {
   }, { mention: false });
 }
 
-/** Resolve script source for .clean / .detect — file, reply, URL arg, or code block */
-
-/** Resolve script source for .clean / .detect — file, reply, URL arg, or code block */
-
 async function resolveScriptInput(msg, txt) {
-  // 1) Attachment / reply / forward
+  
   let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
   if (attachments.length) {
     const file = attachments[0];
@@ -1949,13 +1964,13 @@ async function resolveScriptInput(msg, txt) {
       } catch {}
     }
   }
-  // 2) URL in command args
+  
   const urlMatch = String(txt || "").match(/https?:\/\/[^\s<>]+/i);
   if (urlMatch) {
     const content = await fetchTextFromUrl(urlMatch[0].replace(/[)>,.]+$/, ""));
     if (content) return { content, name: "from_url.lua", from: "url" };
   }
-  // 3) Code block in message
+  
   const block = String(msg.content || "").match(/```(?:lua|luau|txt)?\s*([\s\S]*?)```/i);
   if (block && block[1] && block[1].trim().length >= 5) {
     return { content: block[1].trim(), name: "codeblock.lua", from: "codeblock" };
@@ -1978,9 +1993,9 @@ async function getScriptAttachmentsFromMsgOrReply(msg) {
   if (!attachments.length) {
     const any = await attachmentsFromMsgOrReply(msg, null);
     attachments = any.filter(isScriptLike);
-    if (!attachments.length && any.length) attachments = any; // accept any file
+    if (!attachments.length && any.length) attachments = any; 
   }
-  // Reply / forward: raw REST + snapshots
+  
   if (!attachments.length && msg.reference?.messageId) {
     const refId = msg.reference.messageId;
     const refChannelId = msg.reference.channelId || msg.channel?.id;
@@ -2001,10 +2016,9 @@ async function getScriptAttachmentsFromMsgOrReply(msg) {
   return attachments;
 }
 
-/** True if this reply is an error / tips / fail / loading — never attach tokens left */
 function isErrorPayload(body) {
   const contentStr = typeof body.content === "string" ? body.content : "";
-  // Loading / processing messages — never put tokens on these
+  
   if (/⏳|uploading|processing|renaming|cleaning|fetching|dumping/i.test(contentStr)) return true;
   const errRe = /❌|no found|not found|failed:|upload failed|scan failed|forward failed|invalid key|owner only|usage:|put (?:file|id|a file)|you're on|need to wait|buy access|buy premium|join in main server|reply to a file|already got a key|already redeem|can't send|not yours|adopt the Server Tag|max \d+ id|wrong, try|empty response|rate limited|input error|dumbass/i;
   if (errRe.test(contentStr)) return true;
@@ -2022,19 +2036,17 @@ function isErrorPayload(body) {
   return false;
 }
 
-/** Discord Components V2 flag (1<<15). Fallback numeric if djs build lacks enum. */
 const IS_COMPONENTS_V2 = (MessageFlags && MessageFlags.IsComponentsV2 != null)
   ? MessageFlags.IsComponentsV2
   : 32768;
-/** Accent used in renamer V2 containers (matches discohook sample) */
-const RENAME_V2_ACCENT = 0x2B2D31; // black-gray
-const FINDER_V2_ACCENT = 0x2B2D31; // black-gray
-/** Separator spacing: 1 = Small, 2 = Large */
+
+const RENAME_V2_ACCENT = 0x2B2D31; 
+const FINDER_V2_ACCENT = 0x2B2D31; 
+
 const SEPARATOR_SPACING_SMALL = 1;
 
-/** Reply-safe Components V2 send (avoids Input Error on some clients/API paths) */
 async function replyComponentsV2(message, payload, opts = {}) {
-  const mention = opts.mention === true; // default OFF ping for finder/help-style; pass { mention: true } to ping
+  const mention = opts.mention === true; 
   const base = {
     ...payload,
     allowedMentions: {
@@ -2047,7 +2059,7 @@ async function replyComponentsV2(message, payload, opts = {}) {
       failIfNotExists: false
     }
   };
-  // Prefer channel.send + messageReference (works when replying to Components V2)
+  
   try {
     if (base.flags == null && payload.flags != null) base.flags = payload.flags;
     return await message.channel.send(base);
@@ -2070,7 +2082,6 @@ async function replyComponentsV2(message, payload, opts = {}) {
   }
 }
 
-/** Renamer loading message — Components V2 only */
 async function sendRenameLoading(message) {
   const payload = {
     flags: IS_COMPONENTS_V2,
@@ -2090,7 +2101,6 @@ async function sendRenameLoading(message) {
   }
 }
 
-/** Obfuscator loading — Components V2 */
 async function sendObfLoading(message) {
   const payload = {
     flags: IS_COMPONENTS_V2,
@@ -2109,7 +2119,6 @@ async function sendObfLoading(message) {
   }
 }
 
-/** Obfuscator result — PC/Mobile copy above divider, file below */
 async function sendObfResult(message, { loadstring, fileBuffer, fileName }) {
   const safeName = String(fileName || "obfuscated.lua").replace(/[^\w.\-]+/g, "_");
   const file = new AttachmentBuilder(fileBuffer, { name: safeName });
@@ -2141,7 +2150,6 @@ async function sendObfResult(message, { loadstring, fileBuffer, fileName }) {
   }
 }
 
-/** Upload loading — Components V2 */
 async function sendUploadLoading(message) {
   const payload = {
     flags: IS_COMPONENTS_V2,
@@ -2160,7 +2168,6 @@ async function sendUploadLoading(message) {
   }
 }
 
-/** Upload result — loadstring only (PC + Mobile), no divider / no file */
 async function sendUploadResult(message, { loadstring, tokLine }) {
   const ls = String(loadstring || "").slice(0, 1800);
   let body = ("**PC COPY:**\n```lua\n" + ls + "\n```\n\n**MOBILE COPY:**\n`" + ls + "`");
@@ -2183,8 +2190,6 @@ async function sendUploadResult(message, { loadstring, tokLine }) {
   }
 }
 
-
-/** Generic Input Error — Components V2 (red) */
 async function sendInputErrorV2(message, description) {
   const body = "### Input Error\n" + String(description || "").slice(0, 3800);
   const payload = {
@@ -2202,7 +2207,6 @@ async function sendInputErrorV2(message, description) {
   }
 }
 
-/** Renamer Input Error / fail — Components V2 (red accent) */
 const RENAME_V2_ERROR_ACCENT = 0xED4245;
 async function sendRenameInputError(message, description) {
   const body = `### Input Error
@@ -2225,11 +2229,6 @@ ${String(description || "").slice(0, 3800)}`;
   }
 }
 
-
-/**
- * Renamer result — Components V2
- * File Preview (+ URL Found if any) + file component (type 13) inside container
- */
 async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName, footerLine }) {
   const safeName = String(fileName || "file.lua").replace(/[^\w.\-]+/g, "_");
   const file = new AttachmentBuilder(fileBuffer, { name: safeName });
@@ -2239,7 +2238,7 @@ async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName
   if (footerLine) parts.push(String(footerLine).trim());
   const body = parts.join("\n\n").slice(0, 4000) || "### File Preview";
 
-  // Above divider: File Preview + URL Found | Below divider: result file
+  
   const v2Payload = {
     flags: IS_COMPONENTS_V2,
     files: [file],
@@ -2267,7 +2266,6 @@ async function sendRenameResult(message, { previewMarkdown, fileBuffer, fileName
   }
 }
 
-/** Build Finder Source Results Components V2 payload (list + divider + optional action row) */
 function finderDisplayName(name) {
   return String(name || "file").replace(/\.(txt|lua|luau|zip|html|htm)$/i, "");
 }
@@ -2276,7 +2274,7 @@ function buildFinderV2Payload({ listLines, pageLabel, actionRow, ephemeral = fal
   let content = `## Finder Source Results\n${listText}`;
   if (pageLabel) content += `\n\n-# ${pageLabel}`;
   content = content.slice(0, 4000);
-  // Buttons live INSIDE the container (after separator), matching Components V2 layout
+  
   const containerChildren = [
     { type: 10, content },
     { type: 14, spacing: SEPARATOR_SPACING_SMALL }
@@ -2303,7 +2301,7 @@ function buildFinderV2Payload({ listLines, pageLabel, actionRow, ephemeral = fal
 function replyUser(message, payload) {
   const body = typeof payload === "string" ? { content: payload } : { ...payload };
   body.allowedMentions = { ...(body.allowedMentions || {}), repliedUser: true };
-  // Token balance ONLY in message text — never inside embeds
+  
   try {
     const line = pendingTokenLine.get(String(message.author?.id));
     if (line) {
@@ -2315,7 +2313,7 @@ function replyUser(message, payload) {
             || /⏳/.test(String(d?.description || "")) || /⏳/.test(String(d?.title || ""));
         }));
       if (isLoading) {
-        // keep pendingTokenLine for the real result message
+        
       } else if (isErrorPayload(body)) {
         pendingTokenLine.delete(String(message.author.id));
       } else {
@@ -2328,7 +2326,6 @@ function replyUser(message, payload) {
   return message.reply(body);
 }
 
-// Detect obfuscator type and confidence
 function detectObfuscator(src) {
   if (!src || typeof src !== "string") return { name: "Unknown", confidence: 0 };
   const s = src;
@@ -2344,13 +2341,13 @@ function detectObfuscator(src) {
   sc["Base64-Encoded"] = 0; sc["XOR-Encrypted"] = 0; sc.Bytecode = 0;
   sc["VM-Obfuscated"] = 0; sc.Unobfuscate = 0;
   
-  // ── Luraph ──
+  
   if (/Luraph|luraph/i.test(s)) sc.Luraph += 50;
   if (/\[=\[[\s\S]{200,}\]\]/.test(s)) sc.Luraph += 20;
   if (/loadstring\s*\(\s*[A-Za-z0-9+/=]{200,}\s*\)/.test(s)) sc.Luraph += 15;
   if (/setmetatable\s*\(\s*\{\s*\}\s*,\s*\{\s*__index/.test(s)) sc.Luraph += 10;
   
-  // ── WeAreDevs ──
+  
   if (/WeAreDevs|WAD_|wad_|wearedevs/i.test(s)) sc.WeAreDevs += 50;
   if (/--\s*\/\/?\s*WeAreDevs/i.test(s)) sc.WeAreDevs += 30;
   if (/M\s*\(\s*-?\d+\s*[+\-*]\s*-?\d+\s*\)/.test(s)) sc.WeAreDevs += 25;
@@ -2358,130 +2355,130 @@ function detectObfuscator(src) {
   if (/\bz\s*\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\]/.test(s)) sc.WeAreDevs += 15;
   if (/return\s*\(\s*function\s*\(/.test(s)) sc.WeAreDevs += 10;
   
-  // ── Prometheus ──
+  
   if (/Prometheus|prometheus/i.test(s)) sc.Prometheus += 50;
   if (/--\s*This file was generated using/i.test(s)) sc.Prometheus += 30;
   if (/loadstring\s*\(\s*function\s*\(\s*\)\s*return\s*["']/.test(s)) sc.Prometheus += 20;
   if (/string\.char\s*\(\s*\d+\s*(?:,\s*\d+\s*){5,}\)/.test(s)) sc.Prometheus += 15;
   if (/pcall\s*\(\s*loadstring/.test(s)) sc.Prometheus += 10;
   
-  // ── Luarmor ──
+  
   if (/Luarmor|luarmor/i.test(s)) sc.Luarmor += 50;
   if (/_G\s*\[\s*["']luarmor/i.test(s)) sc.Luarmor += 30;
   if (/string\.dump\s*\(/.test(s)) sc.Luarmor += 20;
   if (/luarmor\.net|luarmor\.gg/i.test(s)) sc.Luarmor += 20;
   
-  // ── PolSec ──
+  
   if (/PolSec|polsec/i.test(s)) sc.PolSec += 50;
   if (/polsec\.gg/i.test(s)) sc.PolSec += 30;
   if (/PolSecure|polsecure/i.test(s)) sc.PolSec += 20;
   
-  // ── 25ms ──
+  
   if (/\b25ms\b|25MS/.test(s)) sc["25ms"] += 50;
   if (/25ms\.to|25ms\.gg/i.test(s)) sc["25ms"] += 25;
   
-  // ── Moonveil ──
+  
   if (/Moonveil|moonveil/i.test(s)) sc.Moonveil += 50;
   if (/moonveil\.gg/i.test(s)) sc.Moonveil += 25;
   
-  // ── MoonSec V3 ──
+  
   if (/MoonSec|moonsec|MoonSec V3/i.test(s)) sc["MoonSec V3"] += 50;
   if (/moonsec\.net|moonsec\.gg/i.test(s)) sc["MoonSec V3"] += 25;
   
-  // ── Solara ──
+  
   if (/Solara|solara/i.test(s)) sc.Solara += 50;
   if (/solara\.gg|solara\.app/i.test(s)) sc.Solara += 25;
   
-  // ── Hydrogen ──
+  
   if (/Hydrogen|hydrogen/i.test(s)) sc.Hydrogen += 50;
   if (/hydrogen\.gg|hydrogen\.exe/i.test(s)) sc.Hydrogen += 25;
   
-  // ── Wave ──
+  
   if (/\bWave\b|wave\.exe/i.test(s)) sc.Wave += 45;
   
-  // ── Evon ──
+  
   if (/Evon|evon/i.test(s)) sc.Evon += 45;
   if (/evon\.gg/i.test(s)) sc.Evon += 25;
   
-  // ── Synapse X ──
+  
   if (/Synapse|synapse|Synapse X/i.test(s)) sc["Synapse X"] += 45;
   if (/syn\.|synapse\.cc/i.test(s)) sc["Synapse X"] += 25;
   
-  // ── Script-Ware ──
+  
   if (/Script-Ware|ScriptWare|script-ware/i.test(s)) sc["Script-Ware"] += 45;
   if (/sw\.|scriptware/i.test(s)) sc["Script-Ware"] += 20;
   
-  // ── Krnl ──
+  
   if (/Krnl|krnl/i.test(s)) sc.Krnl += 45;
   if (/krnl\.gg|krnl\.ca/i.test(s)) sc.Krnl += 25;
   
-  // ── Fluxus ──
+  
   if (/Fluxus|fluxus/i.test(s)) sc.Fluxus += 45;
   if (/fluxteam|fluxus\.gg/i.test(s)) sc.Fluxus += 25;
   
-  // ── Delta ──
+  
   if (/Delta|delta/i.test(s)) sc.Delta += 40;
   if (/delta\.gg|deltaexec/i.test(s)) sc.Delta += 25;
   
-  // ── Celery ──
+  
   if (/Celery|celery/i.test(s)) sc.Celery += 40;
   if (/celery\.gg|celeryexec/i.test(s)) sc.Celery += 25;
   
-  // ── Electron ──
+  
   if (/Electron|electron/i.test(s)) sc.Electron += 40;
   if (/electron\.gg/i.test(s)) sc.Electron += 25;
   
-  // ── Comet ──
+  
   if (/Comet|comet/i.test(s)) sc.Comet += 40;
   if (/comet\.gg/i.test(s)) sc.Comet += 25;
   
-  // ── Vega X ──
+  
   if (/Vega X|VegaX|vegax/i.test(s)) sc["Vega X"] += 40;
   if (/vegax\.gg/i.test(s)) sc["Vega X"] += 25;
   
-  // ── More Obfuscators ──
-  // ── IronBrew ──
+  
+  
   if (/IronBrew|ironbrew|IB2|IB_/i.test(s)) sc.IronBrew += 50;
   if (/ironbrew\.io/i.test(s)) sc.IronBrew += 25;
   
-  // ── DarkEccentric ──
+  
   if (/DarkEccentric|darkeccentric|DE_/i.test(s)) sc.DarkEccentric += 50;
   
-  // ── Axon ──
+  
   if (/\bAxon\b|axon\.exe/i.test(s)) sc.Axon += 45;
   
-  // ── ProtoSmasher ──
+  
   if (/ProtoSmasher|protosmasher/i.test(s)) sc.ProtoSmasher += 45;
   
-  // ── Elysian ──
+  
   if (/Elysian|elysian/i.test(s)) sc.Elysian += 45;
   
-  // ── SirHurt ──
+  
   if (/SirHurt|sirhurt/i.test(s)) sc.SirHurt += 45;
   
-  // ── CocoZ ──
+  
   if (/CocoZ|cocoz/i.test(s)) sc.CocoZ += 45;
   
-  // ── Zaptosis ──
+  
   if (/Zaptosis|zaptosis/i.test(s)) sc.Zaptosis += 45;
   
-  // ── Obfuscator.Lua ──
+  
   if (/Obfuscator\.Lua|obfuscator\.lua/i.test(s)) sc["Obfuscator.Lua"] += 45;
   
-  // ── LuaMinify ──
+  
   if (/luamin|lua_min|minified\slua/i.test(s)) sc.LuaMinify += 35;
   
-  // ── Base64-Encoded ──
+  
   if (/loadstring\s*\(\s*game:HttpGet.*base64|base64decode|base64_decode/i.test(s)) sc["Base64-Encoded"] += 35;
   
-  // ── XOR-Encrypted ──
+  
   if (/xor\s*\(|bit\.bxor|string\.char\s*\(\s*\d+\s*%/i.test(s)) sc["XOR-Encrypted"] += 30;
   
-  // ── Bytecode ──
+  
   if (/string\.dump|loadstring\s*\(\s*\\x/i.test(s)) sc.Bytecode += 40;
   if (/\\x[0-9a-fA-F]{2}.*\\x[0-9a-fA-F]{2}.*\\x[0-9a-fA-F]{2}/.test(s)) sc.Bytecode += 20;
   
-  // ── VM-Obfuscated (general fallback) ──
+  
   let vmScore = 0;
   if (/loadstring\s*\(/.test(s)) vmScore += 10;
   if (/\\x[0-9a-fA-F]{2}/.test(s)) vmScore += 10;
@@ -2491,7 +2488,7 @@ function detectObfuscator(src) {
   if (/\bassert\s*\(/.test(s)) vmScore += 5;
   sc["VM-Obfuscated"] = vmScore;
   
-  // ── Unobfuscate (clean script) ──
+  
   const allObfScores = Object.values(sc).reduce((a, b) => a + b, 0) - (sc.Unobfuscate || 0);
   if (allObfScores < 15) {
     if (/function\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\(/.test(s)) sc.Unobfuscate += 25;
@@ -2500,10 +2497,10 @@ function detectObfuscator(src) {
     if (/print\s*\(|warn\s*\(|error\s*\(/.test(s)) sc.Unobfuscate += 5;
   }
   
-  // Cap scores
+  
   for (const k of Object.keys(sc)) sc[k] = Math.min(sc[k], 100);
   
-  // Sort and return best
+  
   const entries = Object.entries(sc).map(([name, score]) => ({ name, score }));
   entries.sort((a, b) => b.score - a.score);
   
@@ -2517,9 +2514,7 @@ function getEmbedColor(isBuyerUser) {
 function getFinderTitle(isBuyerUser) {
   return "Finder Source Results";
 }
-// ============================================================
-// FILE HELPERS
-// ============================================================
+
 function normalize(name) {
   return String(name || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
     .replace(/\.[^/.]+$/, "").replace(/[_\-.()[\]{}]+/g, " ")
@@ -2542,10 +2537,10 @@ function isImage(name, contentType) {
 }
 function isAllowedFileType(name, contentType) {
   const e = ext(name);
-  // .zip is scanned into library; only owner may .get / download zip by id
+  
   return (e === "txt" || e === "lua" || e === "zip" || String(contentType || "").toLowerCase().includes("zip")) && !isImage(name, contentType);
 }
-/** True if this library file may be retrieved by userId (.zip = owner only) */
+
 function canGetLibraryFile(file, userId) {
   if (!file) return false;
   if (isOwner(userId)) return true;
@@ -2574,7 +2569,6 @@ function idForFile() {
   return id;
 }
 
-/** Always remove Discord "content no longer available" placeholders (36-byte) from library */
 function purgeUnavailableFromLibrary() {
   const before = library.files.length;
   library.files = library.files.filter(file => Number(file.size || 0) !== 36);
@@ -2586,7 +2580,6 @@ function purgeUnavailableFromLibrary() {
   return 0;
 }
 
-/** Search live-scan channels for a fresh copy of filename and index it */
 async function rescanLibraryNameInLiveChannels(filename) {
   const wantBase = normalizeBase(filename);
   const wantFull = normalize(filename);
@@ -2611,7 +2604,7 @@ async function rescanLibraryNameInLiveChannels(filename) {
             const url = a.url || a.proxyURL || a.proxy_url;
             if (!url || fileSize === 36) continue;
             if (baseName !== wantBase && fullName !== wantFull) continue;
-            // remove any dead entries with this name first
+            
             library.files = library.files.filter(f => normalizeBase(f.filename) !== wantBase && normalize(f.filename) !== wantFull);
             const entry = {
               id: idForFile(), filename: fname, url, size: fileSize,
@@ -2645,7 +2638,7 @@ function getFile(id) {
     library.files = library.files.filter(file => file.id !== f.id);
     saveLibrary();
     console.log(`🗑️ Deleted unavailable 36-byte file: ${name} (${f.id})`);
-    // fire-and-forget live rescan by name
+    
     rescanLibraryNameInLiveChannels(name).catch(() => {});
     return null;
   }
@@ -2664,7 +2657,7 @@ async function getFreshUrl(file) {
     }
     if (fresh?.url) {
       const sz = Number(fresh.size || file.size || 0);
-      // Discord unavailable placeholder
+      
       if (sz === 36) {
         const name = file.filename;
         library.files = library.files.filter(f => f.id !== file.id);
@@ -2678,7 +2671,7 @@ async function getFreshUrl(file) {
       saveLibrary();
       return fresh.url;
     }
-    // Message exists but attachment is gone → delete + try live rescan by name
+    
     const name = file.filename;
     library.files = library.files.filter(f => f.id !== file.id);
     saveLibrary();
@@ -2687,7 +2680,7 @@ async function getFreshUrl(file) {
     return rescued?.url || null;
   } catch (e) {
     console.warn(`⚠️ Could not refresh URL for ${file.filename}:`, e.message);
-    // try live rescan anyway
+    
     try {
       const name = file.filename;
       library.files = library.files.filter(f => f.id !== file.id);
@@ -2744,7 +2737,7 @@ function attachmentsOf(message) {
     result.push({ attachment: a, forwarded: !!forwarded });
   };
   for (const a of message.attachments?.values?.() || []) pushAtt(a, false);
-  // Components V2 type-13 file refs
+  
   try {
     const walk = (comps, attSrc, forwarded) => {
       if (!Array.isArray(comps)) return;
@@ -2763,7 +2756,7 @@ function attachmentsOf(message) {
     };
     walk(message.components, message.attachments, false);
   } catch {}
-  // Forwarded snapshots (incl. forwarded Components V2 messages)
+  
   for (const s of message.messageSnapshots?.values?.() || []) {
     for (const a of s.attachments?.values?.() || []) pushAtt(a, true);
     try {
@@ -2843,12 +2836,12 @@ async function scanChannel(channel) {
           const fileSize = Number(a.size || 0);
           const url = a.url || a.proxyURL || a.proxy_url;
           if (!baseName || !url) continue;
-          // Skip files that are unavailable (exactly 36 bytes = Discord unavailable placeholder)
+          
           if (fileSize === 36) continue;
           const isDupBase = existingBases.has(baseName);
           const isDupFull = existingFullNames.has(fullName);
           if (isDupBase || isDupFull) {
-            // If existing entry is unavailable (36 bytes), replace with this available one
+            
             const dead = library.files.filter(f =>
               (normalizeBase(f.filename) === baseName || normalize(f.filename) === fullName) &&
               Number(f.size || 0) === 36
@@ -2856,7 +2849,7 @@ async function scanChannel(channel) {
             if (dead.length) {
               library.files = library.files.filter(f => !dead.includes(f));
               replacedDup++;
-              // fall through to add the new available file
+              
             } else {
               skippedDup++;
               continue;
@@ -2885,7 +2878,7 @@ async function scanChannel(channel) {
     return { messages, found: found.length, replaced: replacedDup, skipped: skippedDup, total: libraryTotal, channelTotal };
   } finally { runningScans.delete(channel.id); }
 }
-/** Live-scan: index allowed attachments from a single message into the library */
+
 function indexMessageFiles(msg) {
   if (!msg) return 0;
   const existingBases = new Set(library.files.map(f => normalizeBase(f.filename)));
@@ -2901,14 +2894,14 @@ function indexMessageFiles(msg) {
     if (!baseName || !url) continue;
     if (fileSize === 36) continue;
     if (existingBases.has(baseName) || existingFullNames.has(fullName)) {
-      // replace unavailable 36-byte entry with this available upload
+      
       const before = library.files.length;
       library.files = library.files.filter(f => {
         const same = normalizeBase(f.filename) === baseName || normalize(f.filename) === fullName;
         if (same && Number(f.size || 0) === 36) return false;
         return true;
       });
-      if (library.files.length === before) continue; // real dup still available — skip
+      if (library.files.length === before) continue; 
     }
     existingBases.add(baseName);
     existingFullNames.add(fullName);
@@ -2926,7 +2919,6 @@ function indexMessageFiles(msg) {
   return found.length;
 }
 
-/** Resolve TikTok/IG media URL via cobalt + fallbacks */
 async function resolveCobaltMedia(pageUrl) {
   const endpoints = [
     "https://api.cobalt.tools/",
@@ -3046,13 +3038,13 @@ async function resolveTikTokMedia(pageUrl) {
     return null;
   };
 
-  // 1) Cobalt
+  
   for (const u of uniq) {
     const cobalt = await resolveCobaltMedia(u);
     if (cobalt?.url) return cobalt;
   }
 
-  // 2) tikwm GET/POST
+  
   for (const u of uniq) {
     for (const apiUrl of [
       `https://www.tikwm.com/api/?url=${encodeURIComponent(u)}&hd=1`,
@@ -3088,7 +3080,7 @@ async function resolveTikTokMedia(pageUrl) {
     } catch {}
   }
 
-  // 3) Other free endpoints
+  
   for (const u of uniq) {
     const extras = [
       `https://api.tiklydown.eu.org/api/download?url=${encodeURIComponent(u)}`,
@@ -3120,9 +3112,6 @@ async function resolveTikTokMedia(pageUrl) {
   return null;
 }
 
-/** Download remote media and return AttachmentBuilder (or null if too large/failed) */
-
-/** Bypass ad/key shortlinks (linkvertise, lootlabs, work.ink, platorelay, etc.) */
 async function bypassAdLink(pageUrl) {
   const url = String(pageUrl || "").trim();
   if (!/^https?:\/\//i.test(url)) return null;
@@ -3143,7 +3132,7 @@ async function bypassAdLink(pageUrl) {
     const s = String(out).trim();
     if (!s) return null;
     if (/^https?:\/\//i.test(s) && s !== url) return { url: s };
-    // Platoboost often returns a KEY string not a URL
+    
     if (isPlato && s.length >= 6 && !/\s/.test(s) && !/^https?:/i.test(s)) {
       return { url: s, key: s };
     }
@@ -3163,8 +3152,8 @@ async function bypassAdLink(pageUrl) {
     } catch {}
   }
 
-  // Plato / Continue flow (best-effort without full browser):
-  // 1) open auth page  2) find Continue / external task URL  3) bypass that  4) return final link/key
+  
+  
   if (isPlato) {
     try {
       const res = await fetch(url, {
@@ -3178,7 +3167,7 @@ async function bypassAdLink(pageUrl) {
       });
       const html = await res.text();
       const finalUrl = res.url || url;
-      // Extract candidate continue / task links from HTML + inline scripts
+      
       const candidates = new Set();
       const linkRe = /https?:\/\/[^\s"'<>\\]+/gi;
       let m;
@@ -3188,21 +3177,21 @@ async function bypassAdLink(pageUrl) {
           candidates.add(u);
         }
       }
-      // Also try known plato task patterns in query strings
+      
       for (const c of candidates) {
         const nested = await bypassAdLink(c).catch(() => null);
         if (nested?.url) return nested;
         const hit = pickResult(c);
         if (hit) return hit;
       }
-      // Sometimes the page itself redirects away from platorelay after tasks
+      
       if (finalUrl && !/platorelay|platoboost/i.test(finalUrl) && finalUrl !== url) {
         return { url: finalUrl };
       }
     } catch {}
   }
 
-  // Follow redirects manually (some ad links resolve after a few hops)
+  
   try {
     let cur = url;
     for (let i = 0; i < 8; i++) {
@@ -3237,7 +3226,7 @@ async function downloadAsAttachment(mediaUrl, fallbackName) {
       redirect: "follow"
     });
     if (!res.ok) {
-      // Retry without Origin
+      
       const res2 = await fetch(mediaUrl, {
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -3254,7 +3243,7 @@ async function downloadAsAttachment(mediaUrl, fallbackName) {
       return new AttachmentBuilder(buf2, { name: name2.replace(/[^\w.\-]+/g, "_").slice(0, 80) });
     }
     const buf = Buffer.from(await res.arrayBuffer());
-    if (!buf.length || buf.length > 24 * 1024 * 1024) return null; // Discord limit ~25MB
+    if (!buf.length || buf.length > 24 * 1024 * 1024) return null; 
     let name = fallbackName || "download.mp4";
     const cd = res.headers.get("content-disposition") || "";
     const m = cd.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
@@ -3282,362 +3271,24 @@ async function downloadAsAttachment(mediaUrl, fallbackName) {
 
 async function downloadURL(url) {
   const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" },
-    redirect: "follow"
+    headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" }
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new Error("HTTP " + res.status);
   return Buffer.from(await res.arrayBuffer());
 }
-async function forwardTxt(source, destination) {
-  if (!source?.isTextBased?.()) throw new Error("Source not readable.");
-  if (!destination?.isTextBased?.()) throw new Error("Dest not writable.");
-  let before = null, messages = 0, sent = 0;
-  const sendBatch = [];
-  while (true) {
-    const batch = await fetchMessages(source, before);
-    if (!batch.size) break;
-    for (const msg of batch.values()) {
-      messages++;
-      for (const a of allAttachmentsOf(msg)) {
-        sendBatch.push(
-          downloadURL(a.url)
-            .then(buf => destination.send({ files: [new AttachmentBuilder(buf, { name: a.name || "file" })] }))
-            .then(() => sent++)
-            .catch(e => console.error(`⚠️ Forward: ${e.message}`))
-        );
-      }
-    }
-    const oldest = batch.last();
-    if (!oldest || batch.size < 100) break;
-    before = oldest.id;
-  }
-  await Promise.allSettled(sendBatch);
-  return { messages, sent };
-}
-// ============================================================
-// ZIP EXTRACT HELPERS
-// ============================================================
-function extractFilesFromZip(zipBuffer) {
-  const zip = new AdmZip(zipBuffer);
-  const entries = zip.getEntries();
-  const extractedFiles = [];
-  for (const entry of entries) {
-    if (entry.isDirectory) continue;
-    const entryName = path.basename(entry.entryName);
-    if (!entryName || entryName.startsWith(".")) continue;
-    try {
-      const data = entry.getData();
-      extractedFiles.push({ name: entryName, data });
-    } catch (e) {
-      console.warn(`⚠️ Could not extract ${entry.entryName}:`, e.message);
-    }
-  }
-  return extractedFiles;
-}
 
-/** Pull every embedded script / code / base64 payload out of an HTML dump */
-function extractFilesFromHtml(htmlBuffer, sourceName) {
-  const html = Buffer.isBuffer(htmlBuffer) ? htmlBuffer.toString("utf8") : String(htmlBuffer || "");
-  const files = [];
-  let n = 0;
-  const push = (name, data) => {
-    if (!data || !data.length) return;
-    n++;
-    const safe = String(name || `part_${n}`).replace(/[^\w.\-]+/g, "_").slice(0, 80);
-    files.push({ name: safe, data: Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8") });
-  };
-  const decodeEntities = (s) => String(s || "")
-    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
-    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(parseInt(d, 10)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-
-  try {
-    const re = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
-    let m;
-    while ((m = re.exec(html))) {
-      const body = decodeEntities(m[1]).trim();
-      if (body.length < 5) continue;
-      const isLua = /\b(local|function|game|workspace|Instance|task\.|FireServer|getgenv|loadstring)\b/.test(body);
-      push(`script_${n + 1}.${isLua ? "lua" : "js"}`, body);
-    }
-  } catch {}
-
-  try {
-    const re = /<(pre|code|textarea)\b[^>]*>([\s\S]*?)<\/\1>/gi;
-    let m;
-    while ((m = re.exec(html))) {
-      const body = decodeEntities(m[2]).trim();
-      if (body.length < 8) continue;
-      const isLua = /\b(local|function|game|workspace|loadstring)\b/.test(body);
-      push(`block_${n + 1}.${isLua ? "lua" : "txt"}`, body);
-    }
-  } catch {}
-
-  try {
-    const re = /(?:data:text\/(?:plain|lua|javascript);base64,|base64[:=]\s*["']?)([A-Za-z0-9+/]{48,}={0,2})/gi;
-    let m;
-    while ((m = re.exec(html))) {
-      try {
-        const decoded = Buffer.from(m[1], "base64");
-        if (decoded.length < 8) continue;
-        const str = decoded.toString("utf8");
-        const isLua = /\b(local|function|game|workspace)\b/.test(str);
-        push(`decoded_${n + 1}.${isLua ? "lua" : "txt"}`, decoded);
-      } catch {}
-    }
-  } catch {}
-
-  try {
-    const re = /```(?:lua|luau)?\s*([\s\S]*?)```/gi;
-    let m;
-    while ((m = re.exec(html))) {
-      const body = m[1].trim();
-      if (body.length < 8) continue;
-      push(`fenced_${n + 1}.lua`, body);
-    }
-  } catch {}
-
-  try {
-    const re = /loadstring\s*\(\s*([`'"])([\s\S]*?)\1\s*\)\s*\(\s*\)/gi;
-    let m;
-    while ((m = re.exec(html))) {
-      const body = m[2].trim();
-      if (body.length < 8) continue;
-      push(`loadstring_${n + 1}.lua`, body);
-    }
-  } catch {}
-
-  // href / src pointing at script-like assets (recorded as link list file)
-  try {
-    const links = new Set();
-    const re = /(?:href|src)\s*=\s*["']([^"']+\.(?:lua|luau|txt|js|json)(?:\?[^"']*)?)["']/gi;
-    let m;
-    while ((m = re.exec(html))) links.add(m[1]);
-    const re2 = /https?:\/\/[^\s"'<>]+\.(?:lua|luau|txt)(?:\?[^\s"'<>]*)?/gi;
-    while ((m = re2.exec(html))) links.add(m[0]);
-    if (links.size) {
-      push("links.txt", [...links].join("\n"));
-    }
-  } catch {}
-
-  // Plain text that looks like full Lua page (no tags)
-  if (!/<html[\s>]/i.test(html) && /\b(local|function)\b/.test(html) && html.length > 40) {
-    push("page.lua", html);
-  }
-
-  const base = (sourceName && String(sourceName).replace(/[^\w.\-]+/g, "_")) || "export.html";
-  push(base.endsWith(".html") || base.endsWith(".htm") ? base : base + ".html", Buffer.from(html, "utf8"));
-
-  const seen = new Set();
-  const unique = [];
-  for (const f of files) {
-    const key = f.name + ":" + f.data.length;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(f);
-  }
-  return unique.length ? unique : [{ name: base, data: Buffer.from(html, "utf8") }];
-}
-
-
-function renameVariables(source) {
-  if (!source || typeof source !== "string") return source;
-  const reserved = new Set(["string","math","table","io","os","debug","pcall","xpcall","pairs","ipairs","type","tostring","tonumber","loadstring","load","setfenv","getfenv","setmetatable","getmetatable","rawget","rawset","next","error","warn","print","select","unpack","require","game","workspace","script","bit","bit32","true","false","nil","and","or","not","if","then","else","elseif","end","for","while","do","repeat","until","return","function","local","in","break","self"]);
-  
-  // Generic name → descriptive replacement dictionary
-  const genericMap = {
-    parent: "container", child: "childElement", old: "existingInstance", new: "newInstance",
-    value: "val", data: "payload", result: "output", handle: "element", index: "idx",
-    count: "total", flag: "state", obj: "object", arr: "list", tbl: "tableRef",
-    cb: "callback", fn: "callbackFunc", tmp: "tempVal", temp: "tempVal",
-    str: "text", num: "numberVal", bool: "flagState", pos: "position", vel: "velocity",
-    acc: "accumulator", len: "length", wid: "width", hgt: "height", btn: "button",
-    lbl: "label", img: "image", snd: "sound", sfx: "soundEffect", mus: "music",
-    vol: "volumeVal", spd: "speedVal", cfg: "config", settings: "AppSettings",
-    config: "appConfig", opts: "options", args: "params", arg: "param",
-    input: "userInput", output: "resultOutput", msg: "message", err: "errorMsg",
-    res: "response", req: "request", url: "link", path: "filePath",
-    frame: "uiFrame", panel: "uiPanel", gui: "uiContainer", screen: "screenGui",
-    scroll: "scrollFrame", list: "itemList", items: "itemList", tracks: "TrackList",
-    players: "playerList", id: "identifier", key: "mapKey", val: "mapValue",
-    dragStart: "dragStartInputPos", startPos: "dragStartFramePos",
-    dragging: "isDragging", running: "isRunning", active: "isActive", visible: "isVisible",
-    enabled: "isEnabled", loaded: "isLoaded", playing: "isPlaying", paused: "isPaused",
-    selected: "isSelected", hovered: "isHovered", clicked: "isClicked",
-    open: "isOpen", closed: "isClosed", ready: "isReady", done: "isDone",
-    exists: "doesExist", valid: "isValid", invalid: "isInvalid",
-    success: "didSucceed", failed: "didFail", ok: "isOk",
-    parentFrame: "parentContainer", childFrame: "childContainer",
-    mainFrame: "mainContainer", titleBar: "titleBarFrame",
-    closeBtn: "closeButton", playBtn: "playButton", stopBtn: "stopButton",
-    menu: "menuPanel", tab: "tabPanel", page: "pageView",
-    current: "currentItem", previous: "previousItem", next: "nextItem",
-    first: "firstItem", last: "lastItem", target: "targetElement",
-    source: "sourceRef", dest: "destinationRef", from: "fromRef", to: "toRef",
-    x: "xCoord", y: "yCoord", z: "zCoord", w: "widthVal", h: "heightVal",
-    dx: "deltaX", dy: "deltaY", dt: "deltaTime", t: "timeVal",
-    i: "i", j: "j", k: "k", v: "itemValue", e: "eventData", event: "eventData",
-    hit: "didHit", touch: "didTouch", click: "didClick",
-    mouse: "mouseInput", keyboard: "keyboardInput", touchInput: "touchInput",
-    camera: "cameraRef", player: "playerRef", char: "characterRef",
-    humanoid: "humanoidRef", root: "rootPart", torso: "torsoPart",
-    head: "headPart", arm: "armPart", leg: "legPart",
-    tool: "toolRef", weapon: "weaponRef", ammo: "ammoCount",
-    health: "healthVal", maxHealth: "maxHealthVal", shield: "shieldVal",
-    mana: "manaVal", stamina: "staminaVal", xp: "experience", level: "levelNum",
-    gold: "goldAmount", coins: "coinAmount", cash: "cashAmount",
-    score: "scoreVal", time: "timeElapsed", timer: "timerRef",
-    cooldown: "cooldownTime", delay: "delayTime", duration: "durationTime",
-    interval: "intervalTime", rate: "rateVal", speed: "speedVal",
-    distance: "distanceVal", range: "rangeVal", radius: "radiusVal",
-    angle: "angleVal", rotation: "rotationVal", scale: "scaleVal",
-    size: "sizeVal", position: "positionVal", velocity: "velocityVal",
-    acceleration: "accelerationVal", force: "forceVal", mass: "massVal",
-    color: "colorVal", colour: "colorVal", transparency: "transparencyVal",
-    opacity: "opacityVal", brightness: "brightnessVal", contrast: "contrastVal",
-    saturation: "saturationVal", hue: "hueVal",
-    title: "titleText", subtitle: "subtitleText", text: "textContent",
-    label: "labelText", caption: "captionText", description: "descText",
-    tooltip: "tooltipText", placeholder: "placeholderText",
-    icon: "iconImage", logo: "logoImage", banner: "bannerImage",
-    thumbnail: "thumbnailImage", avatar: "avatarImage",
-    username: "userName", password: "passWord", email: "emailAddress",
-    token: "authToken", session: "sessionId", cookie: "cookieData",
-    cache: "cacheStore", storage: "storageRef", database: "dbRef",
-    api: "apiEndpoint", endpoint: "apiUrl", host: "hostAddress",
-    port: "portNumber", protocol: "protocolType", domain: "domainName",
-  };
-  
-  // Boolean suffixes that indicate a boolean variable
-  const boolIndicators = ["ing", "ed", "able", "ible", "ent", "ant"];
-  const boolPrefixes = ["is", "has", "can", "should", "will", "did", "was", "were"];
-  
-  function isBooleanName(name) {
-    const lower = name.toLowerCase();
-    for (const p of boolPrefixes) if (lower.startsWith(p)) return true;
-    return /(ing|ed|able|ible)$/.test(name) && name.length > 4;
-  }
-  
-  function getBetterName(name) {
-    const lower = name.toLowerCase();
-    // Check generic map (case-insensitive match, preserve original case style)
-    if (genericMap[lower]) {
-      const replacement = genericMap[lower];
-      // Preserve original capitalization
-      if (name[0] === name[0].toUpperCase() && name[1] && name[1] === name[1].toLowerCase()) {
-        return replacement.charAt(0).toUpperCase() + replacement.slice(1);
-      }
-      return replacement;
-    }
-    // Boolean names get "is" prefix
-    if (isBooleanName(name) && !name.toLowerCase().startsWith("is")) {
-      return "is" + name.charAt(0).toUpperCase() + name.slice(1);
-    }
-    // Plural generic collections get "List" suffix (only short names)
-    if (name.length <= 8 && name.endsWith("s") && !name.endsWith("ss") && !name.endsWith("us") && !name.endsWith("is")) {
-      const singular = name.slice(0, -1);
-      if (genericMap[singular.toLowerCase()]) {
-        return name + "List";
-      }
-    }
-    return null; // keep original name
-  }
-  
-  const varMap = new Map();
-  
-  // Find local variable declarations
-  const localRegex = /\blocal\s+(?:function\s+)?([a-zA-Z_]\w*)/g;
-  let m;
-  while ((m = localRegex.exec(source)) !== null) {
-    const name = m[1];
-    if (reserved.has(name) || varMap.has(name)) continue;
-    const better = getBetterName(name);
-    if (better && better !== name) varMap.set(name, better);
-  }
-  
-  // Find function parameters
-  const paramRegex = /function[\s\w.:]*\(\s*([^)]*)\)/g;
-  while ((m = paramRegex.exec(source)) !== null) {
-    const params = m[1].split(",").map(p => p.trim().split("=")[0].trim()).filter(Boolean);
-    for (const p of params) {
-      if (!/^[a-zA-Z_]\w*$/.test(p) || reserved.has(p) || varMap.has(p)) continue;
-      const better = getBetterName(p);
-      if (better && better !== p) varMap.set(p, better);
-    }
-  }
-  
-  // Also detect for-loop variables: for <var> = ... or for <var> in ...
-  const forRegex = /\bfor\s+([a-zA-Z_]\w*)\s*(?:=|in)/g;
-  while ((m = forRegex.exec(source)) !== null) {
-    const name = m[1];
-    if (reserved.has(name) || varMap.has(name)) continue;
-    const better = getBetterName(name);
-    if (better && better !== name) varMap.set(name, better);
-  }
-  
-  // Replace all occurrences (longest first to avoid partial matches)
-  let result = source;
-  const sorted = [...varMap.entries()].sort((a, b) => b[0].length - a[0].length);
-  for (const [oldName, newName] of sorted) {
-    const re = new RegExp("\\b" + oldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "g");
-    result = result.replace(re, newName);
-  }
-  return result;
-}
-// ============================================================
-// LUA SCRIPT CLEANER
-// ============================================================
-/** Rename cleaner: ONLY comments + script loaders + IP loggers. Never touch print or Discord invites. */
-
-/** Clean V2: same strip as V1 + fix dead/deob leftovers that break Luau syntax so script can execute */
 function cleanLuaV2(text) {
   let out = cleanLuaForRename(String(text || ""));
   try {
-    // strip nulls / BOM
     out = out.replace(/^\uFEFF/, "").replace(/\0/g, "");
-    // remove lines that are only broken VM leftovers / orphan labels
     out = out.split("\n").filter(line => {
       const t = line.trim();
       if (!t) return true;
-      if (/^--\s*MISSING:/i.test(t)) return false;
-      if (/^goto\s+\w+\s*$/i.test(t) && !/\b::\w+::/.test(out)) return false;
-      // pure expression statements that are just numbers/strings alone (dead const dumps)
-      if (/^["'].*["']\s*$/.test(t) && t.length < 3) return false;
+      if (/^::\w+::$/.test(t)) return false;
+      if (/^\d+\s*$/.test(t)) return false;
       return true;
     }).join("\n");
-    // collapse excessive blank lines
-    out = out.replace(/\n{3,}/g, "\n\n");
-    // fix ",," and trailing commas in table-ish lines lightly
-    out = out.replace(/,\s*,/g, ",");
-    out = out.replace(/,\s*([}\])])/g, "$1");
-    // remove empty do/end blocks
-    out = out.replace(/\bdo\s*end\b/g, "");
-    // remove empty then end
-    out = out.replace(/\bthen\s*end\b/gi, "then end");
-    // balance rough: drop orphan leading ends (common after dead branch removal)
-    const lines = out.split("\n");
-    let depth = 0;
-    const openers = /\b(function|then|do|repeat)\b/gi;
-    const closers = /\bend\b/gi;
-    const kept = [];
-    for (const line of lines) {
-      const opens = (line.match(/\b(function|then|do)\b/gi) || []).length;
-      const ends = (line.match(/\bend\b/gi) || []).length;
-      const repeats = (line.match(/\brepeat\b/gi) || []).length;
-      const untils = (line.match(/\buntil\b/gi) || []).length;
-      if (ends && depth <= 0 && !/\buntil\b/i.test(line) && opens === 0) {
-        // skip orphan end
-        continue;
-      }
-      depth += opens + repeats;
-      depth -= ends + untils;
-      if (depth < 0) depth = 0;
-      kept.push(line);
-    }
-    out = kept.join("\n");
-    // trailing incomplete operators
-    out = out.replace(/[+\-*/%^=]=?\s*$/gm, "");
+    out = out.replace(/[^\S\n]+$/gm, "");
     out = out.replace(/\n{3,}/g, "\n\n").trim() + "\n";
   } catch {}
   return out;
@@ -3666,7 +3317,7 @@ function cleanLuaForRename(text) {
     }
     return false;
   }
-  // Keep original newlines/spaces — never collapse or trim the whole file
+  
   const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   const out = [];
   let inBlockComment = false;
@@ -3674,18 +3325,18 @@ function cleanLuaForRename(text) {
     let line = originalLine;
     const trimmed = line.trim();
 
-    // Preserve blank / whitespace-only lines exactly
+    
     if (!trimmed) {
       out.push(originalLine);
       continue;
     }
 
-    // Banner / separator comment lines (====...)
+    
     if (/^={5,}$/.test(trimmed)) continue;
     if (/^-{0,2}\s*={10,}\s*-{0,2}$/.test(trimmed)) continue;
     if (trimmed.includes("==================================================")) continue;
 
-    // block comments --[[ ... ]]
+    
     if (inBlockComment) {
       if (trimmed.includes("]]")) inBlockComment = false;
       continue;
@@ -3694,16 +3345,16 @@ function cleanLuaForRename(text) {
       if (!trimmed.includes("]]")) inBlockComment = true;
       continue;
     }
-    // full-line -- comments
+    
     if (trimmed.startsWith("--")) continue;
 
-    // IP logger lines
+    
     if (isGrabber(trimmed)) continue;
 
-    // Script loader lines
+    
     if (hasLoader(trimmed)) continue;
 
-    // Strip inline -- comments (preserve strings) — keep leading indent/spaces
+    
     let inS = false, inD = false;
     let cutAt = -1;
     for (let i = 0; i < line.length - 1; i++) {
@@ -3714,17 +3365,16 @@ function cleanLuaForRename(text) {
       if (!inS && !inD && c === "-" && n === "-") { cutAt = i; break; }
     }
     if (cutAt >= 0) line = line.slice(0, cutAt);
-    // Comment-only line after strip → drop entirely (no leftover blank)
+    
     if (!line.trim()) continue;
 
-    // DO NOT rewrite print / warn
-    // DO NOT replace Discord invites
-    // DO NOT strip indentation or internal spaces
+    
+    
+    
     out.push(line);
   }
   return out.join("\n");
 }
-
 
 function cleanLuaScript(text) {
   if (!text) return "";
@@ -3738,7 +3388,7 @@ function cleanLuaScript(text) {
 
   var cleaned = [];
 
-  // IP logger/grabber domains
+  
   var ipGrabberDomains = ["iplogger.org","iplogger.com","grabify.link","grabify.xyz","nipiscan.com","spiderip.com","blasze.tk","blasze.com","ip-api.com","ipify.org","icanhazip.com","ifconfig.co","ifconfig.me","whatismyip.com","ipinfo.io","ipgeolocation.io","freegeoip.net","freegeoip.app","checkip.amazonaws.com","bit.ly","tinyurl.com","is.gd","t.co","ow.ly","rb.gy","cutt.ly","bc.vc","adf.ly","linkvertise.com","shorte.st","bcvc.one","pornhub.com","discord.media","iplogger","grabify","logmyip","ipgrabber","stealip","ip-logger","ipgrab","iplog","logger","grabip","trackip","ip-tracker","ip-trace","ipgrabbed","iplogged","ip-logger","ip-grabber"];
 
   function isGrabber(text) {
@@ -3758,7 +3408,7 @@ function cleanLuaScript(text) {
     return false;
   }
 
-  // Script loader patterns
+  
   var loaderPatterns = [
     /loadstring\s*\([^)]*\)\s*\(\s*\)/gi,
     /loadstring\s*\([^)]*\)/gi,
@@ -3782,7 +3432,7 @@ function cleanLuaScript(text) {
     return false;
   }
 
-  // Junk/obfuscation patterns (Luraph-style)
+  
   var junkPatterns = [
     /["'][A-Za-z0-9]{2,6}["']\s*\/\s*\(\s*\d+\s*-\s*["'][A-Za-z0-9]{3,8}["']\s*\^\s*\d+/,
     /return\s+["'][A-Za-z0-9]{2,6}["']\s*\/\s*\(/,
@@ -3797,18 +3447,18 @@ function cleanLuaScript(text) {
     /local\s+[a-z]+\d*\s*=\s*random\(\d+,\s*\d+\)\s*==\s*1/,
     /\^\s*\d{5,}/,
     /:\(%d*\):/,
-    // More aggressive: simple junk aliases
-    /^\s*local\s+[a-z]\d*\s*=\s*[a-z]+\.?[a-z]*\d*\s*$/,  // local v1 = string.gmatch
-    /^\s*local\s+[a-z]\d*\s*=\s*(true|false|0|nil|{})\s*$/,  // local u2 = true
-    /^\s*local\s+[a-z]\d*\s*=\s*[a-z]+\d*\s*or\s+[a-z]+\.?[a-z]*\d*/,  // local v1 = unpack or table.unpack
-    /local\s+[a-z]\d*\s*=\s*tonumber\(.*tostring/,  // local num = tonumber(v5(tostring(...)))
-    /tostring\(result\)/,  // junk parsing
-    /local\s+[a-z]\d*\s*=\s*\{\s*pcall\(function/,  // local t2 = { pcall(function()
-    /if\s+not\s+pcall\(function\(\)\s*$/,  // if not pcall(function()
-    /if\s+[a-z]\d*\s+then\s*$/,  // if v19 then
-    /[a-z]\d*\s*=\s*[a-z]\d*\s*and\s+[a-z]\d*/,  // u2 = u2 and t2[1]
-    /[a-z]\d*\s*=\s*\([a-z]\d*\s*\+\s*[a-z]\d*\)\s*%\s*256/,  // n1 = (n1 + t2[...]) % 256
-    /repeat\s+task\.wait\(\)\s+until\s+game:IsLoaded\(\)/,  // keep this, it's real
+    
+    /^\s*local\s+[a-z]\d*\s*=\s*[a-z]+\.?[a-z]*\d*\s*$/,  
+    /^\s*local\s+[a-z]\d*\s*=\s*(true|false|0|nil|{})\s*$/,  
+    /^\s*local\s+[a-z]\d*\s*=\s*[a-z]+\d*\s*or\s+[a-z]+\.?[a-z]*\d*/,  
+    /local\s+[a-z]\d*\s*=\s*tonumber\(.*tostring/,  
+    /tostring\(result\)/,  
+    /local\s+[a-z]\d*\s*=\s*\{\s*pcall\(function/,  
+    /if\s+not\s+pcall\(function\(\)\s*$/,  
+    /if\s+[a-z]\d*\s+then\s*$/,  
+    /[a-z]\d*\s*=\s*[a-z]\d*\s*and\s+[a-z]\d*/,  
+    /[a-z]\d*\s*=\s*\([a-z]\d*\s*\+\s*[a-z]\d*\)\s*%\s*256/,  
+    /repeat\s+task\.wait\(\)\s+until\s+game:IsLoaded\(\)/,  
   ];
 
   function isJunkLine(text) {
@@ -3841,22 +3491,22 @@ function cleanLuaScript(text) {
     var t = originalLine.trim();
     if (!t) { cleaned.push(""); continue; }
 
-    // 1. DELETE comment / credit / banner lines (NOT real Lua)
-    //    e.g. "By OR's | Mogged | https://discord.gg/..." even without -- or -
+    
+    
     if (t.indexOf("--") === 0 || t.indexOf("--[[") === 0 || t.indexOf("--[=") === 0) {
-      // pure invite-only comment can drop too (rewritten elsewhere if needed)
+      
       continue;
     }
     if (/^\[?\s*(LEAKED\s+BY|GOATED|GRABBED\s+BY|COPIED\s+BY|MADE\s+BY|CREDITS?\s*:)/i.test(t)) continue;
     if (/^\s*\/\//.test(t)) continue;
     if (/^\s*\/\*/.test(t) || /^\s*\*\//.test(t)) continue;
     if (/LEAKED\s+BY|\[\s*GOATED\s*\]|GUI\s*Copier/i.test(t)) continue;
-    // Credit / hub watermarks (By X | Mogged | discord.gg/...)
+    
     if (/\bMogged\b/i.test(t) && !/\b(local|function|game|workspace)\b/i.test(t)) continue;
     if (/^By\s+/i.test(t) && !/\b(local|function|game|workspace)\b/i.test(t)) continue;
     if (/\|/.test(t) && /discord\.(gg|com\/invite)\//i.test(t) && !/\b(local|function|if|for|while|return)\b/i.test(t)) continue;
     if (/discord\.(gg|com\/invite)\//i.test(t) && !/[=(){}]/.test(t) && !/\b(local|function|HttpGet|loadstring|game)\b/i.test(t)) continue;
-    // Bullet / dash meta notes
+    
     if (/^[-•*]\s*(PC|Mobile|Background\s*ID|Titre|Title|Image|Note|Info|Config|Setting)\b/i.test(t)) continue;
     if (/^[-•*]\s*.{0,80}\b(Background\s*ID|rbxassetid|remplace|VISION\s*HUB|100k|72k)\b/i.test(t)) continue;
     if (/^[-•*]\s*[A-Za-z][^:=]{0,40}\s*[:=]/.test(t) && !/\b(local|function|if|for|while|return|game|workspace)\b/.test(t)) continue;
@@ -3864,29 +3514,29 @@ function cleanLuaScript(text) {
     if (/^Background\s*ID\s*:/i.test(t)) continue;
     if (/^Titre\s*:/i.test(t)) continue;
 
-    // 2. DELETE IP logger/grabber lines
+    
     if (isGrabber(t)) continue;
 
-    // 3. DELETE script loader lines
+    
     if (hasLoader(t)) continue;
 
-    // 4. DELETE junk/obfuscation lines (anti-tamper, Luraph-style)
+    
     if (isJunkLine(t)) continue;
 
-    // 5. DELETE scrambled/garbage / title banners (not Lua)
-    // e.g. "FA4E7XX SPEED BYPASS - UI (Orange Edition)" — no -- needed
+    
+    
     if (!isLuaLine(t) && t.length > 5 && !/^https?:\/\//.test(t) && !isSafeUrl(t)) {
-      // No Lua operators/statements → treat as prose/header and drop
+      
       if (!/[=(){}\[\];]/.test(t) && !/\b(local|function|end|then|else|elseif|return|for|while|do|repeat|until|and|or|not|true|false|nil|game|workspace|script|Instance|Vector3|CFrame|Color3|UDim2|Enum|task|pcall|require|loadstring)\b/i.test(t)) {
         continue;
       }
-      // Compact garbage (no spaces, long)
+      
       if (!/\s/.test(t) && t.length > 20 && !/^["'].*["']$/.test(t)) continue;
-      // Title-style banners with BYPASS / EDITION / HUB / SPEED UI etc.
+      
       if (/\b(BYPASS|EDITION|HUB|SPEED\s*BYPASS|ORANGE\s*EDITION|VISION\s*HUB)\b/i.test(t)) continue;
     }
 
-    // 6. Remove inline comments (preserve indent)
+    
     var inStrS = false, inStrD = false;
     var cutAt = -1;
     for (var ci = 0; ci < originalLine.length - 1; ci++) {
@@ -3900,21 +3550,21 @@ function cleanLuaScript(text) {
     if (cutAt >= 0) lineToKeep = originalLine.substring(0, cutAt).replace(/\s+$/, "");
     if (!lineToKeep.trim()) continue;
 
-    // 7. Remove any remaining loader code inline
+    
     for (var pi = 0; pi < loaderPatterns.length; pi++) {
       try { lineToKeep = lineToKeep.replace(loaderPatterns[pi], ""); } catch {}
     }
     if (!lineToKeep.trim() || lineToKeep.trim().length < 3) continue;
     if (/^[\s();,{}]+$/.test(lineToKeep.trim())) continue;
 
-    // 8. Only rewrite standalone watermark prints — do NOT touch real logic prints
+    
     try {
       if (/^\s*print\s*\(/.test(lineToKeep) && /LEAKED|GOATED|discord\.gg|Mogged|OR's/i.test(lineToKeep)) {
         lineToKeep = 'print("prince")';
       }
     } catch {}
 
-    // 9. Replace Discord invites
+    
     try {
       lineToKeep = lineToKeep.replace(/(https?:\/\/)?discord\.(gg|com\/invite)\/[a-zA-Z0-9-]+/gi, "https://discord.gg/TBBAUZu8cW");
     } catch {}
@@ -3927,23 +3577,20 @@ function cleanLuaScript(text) {
   return result || "";
 }
 
-// ============================================================
-// LUA BLOCK BALANCER — auto-adds missing `end` / `until`
-// ============================================================
 function balanceLuaBlocks(code) {
   if (!code || typeof code !== "string") return code;
   const lines = code.split("\n");
-  const stack = []; // each entry: "end" or "until"
+  const stack = []; 
   let pendingIf = false, pendingForWhile = false;
   for (let line of lines) {
-    // Strip long strings [[...]]
+    
     let s = line.replace(/\[\[[\s\S]*?\]\]/g, "");
-    // Strip quoted strings
+    
     s = s.replace(/"(?:\\.|[^"\\])*"/g, '""').replace(/'(?:\\.|[^'\\])*'/g, "''");
-    // Strip comments
+    
     const ci = s.indexOf("--");
     if (ci >= 0) s = s.slice(0, ci);
-    // Tokenize block keywords
+    
     const tokens = s.match(/\b(function|if|then|for|while|do|repeat|end|until|elseif|else)\b/g) || [];
     let i = 0;
     while (i < tokens.length) {
@@ -3953,7 +3600,7 @@ function balanceLuaBlocks(code) {
       } else if (t === "repeat") {
         stack.push("until");
       } else if (t === "if") {
-        // Look ahead for `then` on same line
+        
         let j = i + 1;
         while (j < tokens.length && tokens[j] !== "then" && tokens[j] !== "end" && tokens[j] !== "until" && tokens[j] !== "function" && tokens[j] !== "if" && tokens[j] !== "for" && tokens[j] !== "while" && tokens[j] !== "repeat") j++;
         if (tokens[j] === "then") { stack.push("end"); i = j; }
@@ -3967,18 +3614,18 @@ function balanceLuaBlocks(code) {
         else { pendingForWhile = true; }
       } else if (t === "do") {
         if (pendingForWhile) { stack.push("end"); pendingForWhile = false; }
-        else { stack.push("end"); } // standalone do
+        else { stack.push("end"); } 
       } else if (t === "end") {
         if (stack.length) stack.pop();
       } else if (t === "until") {
         if (stack.length) stack.pop();
       }
-      // else / elseif — ignore
+      
       i++;
     }
   }
   if (!stack.length) return code;
-  // Append missing closers — innermost (last pushed) closes first
+  
   let appended = "";
   while (stack.length) {
     const closer = stack.pop();
@@ -3987,9 +3634,6 @@ function balanceLuaBlocks(code) {
   return code + appended;
 }
 
-// ============================================================
-// RENAMER HELPERS — preview builder, URL stripper
-// ============================================================
 function buildPreviewText(finalOutput) {
   const allLines = finalOutput.split("\n");
   const previewWords = [];
@@ -4013,39 +3657,37 @@ function buildPreviewText(finalOutput) {
 }
 
 function buildRenamerDescription(previewText) {
-  // Only File Preview (5 lines) — no URL list, no removed message
+  
   return "```lua\n" + previewText + "\n```";
 }
 
-// Detect bytecode dumps / non-executable / broken scripts that need full reconstruction
 function looksLikeBytecodeOrBroken(src) {
   if (!src || typeof src !== "string") return true;
   const s = src.trim();
   if (s.length < 8) return true;
-  // High density of \x hex escapes (classic bytecode dump)
+  
   const hexEscapes = (s.match(/\\x[0-9a-fA-F]{2}/g) || []).length;
   if (hexEscapes >= 15) return true;
   if (hexEscapes >= 5 && s.length < 500) return true;
-  // string.dump usage
+  
   if (/string\.dump\s*\(/.test(s)) return true;
-  // Lots of non-printable / control characters
+  
   const nonPrintable = (s.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) || []).length;
   if (nonPrintable > 8) return true;
-  // Existing detector says Bytecode with decent confidence
+  
   try {
     const det = detectObfuscator(s);
     if (det && det.name === "Bytecode" && det.confidence >= 25) return true;
     if (det && det.name === "VM-Obfuscated" && det.confidence >= 40 && hexEscapes >= 3) return true;
   } catch {}
-  // Almost no Lua keywords but has escape sequences = broken / dump
+  
   const luaKeywords = (s.match(/\b(local|function|if|then|else|end|for|while|do|return|and|or|not)\b/g) || []).length;
   if (s.length > 150 && luaKeywords < 3 && /\\x[0-9a-fA-F]{2}|\\[0-9]{1,3}/.test(s)) return true;
-  // Pure number / garbage short file
+  
   if (/^[\d\s\\x]+$/i.test(s) && s.length < 200) return true;
   return false;
 }
 
-/** True when content is heavy obfuscation / protection and is NOT readable Lua */
 function isObfuscatedOrProtectionNotLua(src) {
   if (!src || typeof src !== "string") return true;
   const s = src.trim();
@@ -4059,7 +3701,7 @@ function isObfuscatedOrProtectionNotLua(src) {
     if (det && heavyNames.has(det.name) && det.confidence >= 35) return true;
   } catch {}
   if (looksLikeBytecodeOrBroken(s)) return true;
-  // Protection-style wrapper with little real Lua
+  
   if (/return\s*\(\s*function\s*\(/.test(s.slice(0, 800)) && /\\x[0-9a-fA-F]{2}/.test(s) && luaSignals < 4) return true;
   if (/loadstring\s*\(\s*["'][\s\S]{80,}["']\s*\)/.test(s) && luaSignals < 3) return true;
   const nonAscii = (s.match(/[^\x09\x0a\x0d\x20-\x7e]/g) || []).length;
@@ -4067,14 +3709,13 @@ function isObfuscatedOrProtectionNotLua(src) {
   return false;
 }
 
-// Remove ONLY script loaders + IP loggers — Discord webhooks & normal URLs are KEPT
 function removeDangerousLines(code) {
   if (!code) return code;
   const lines = code.split("\n");
   const cleaned = lines.filter(line => {
-    // Keep Discord webhooks — ALWAYS allowed
+    
     if (/discord(?:app)?\.com\/api\/webhooks/i.test(line)) return true;
-    // Script loaders
+    
     if (/loadstring\s*\(\s*(?:game|_G|env|HttpService)\s*[:.]\s*HttpGet/i.test(line)) return false;
     if (/loadstring\s*\(\s*HttpGet/i.test(line)) return false;
     if (/\bHttpGet\s*\(\s*["']http/i.test(line)) return false;
@@ -4082,7 +3723,7 @@ function removeDangerousLines(code) {
     if (/synapse|script-?ware|krnl|fluxus|delta|celery|electron|comet|vega\s*x|ironbrew/i.test(line)) return false;
     if (/loadlib|loadfile|dofile.*http/i.test(line)) return false;
     if (/syn\s*\.\s*request\s*\(/i.test(line)) return false;
-    // IP loggers / grabbers + more comment/watermark noise lines
+    
     if (/iplogger|ipgrablog|ipify|whatismyip|grabify|logmyip|ipgrabber|stealip|ip-api\.com|icanhazip|ifconfig\.(co|me)|ipinfo\.io|freegeoip/i.test(line)) return false;
     if (/webhook\.site|hook\.billy|iplog\.xyz|blasze|nipiscan|spiderip/i.test(line)) return false;
     if (/^\s*--/.test(line) && !/discord\.(gg|com\/invite)/i.test(line)) return false;
@@ -4091,9 +3732,9 @@ function removeDangerousLines(code) {
     if (/^[-•*]\s*.{0,80}\b(Background\s*ID|rbxassetid|VISION\s*HUB|100k|72k)\b/i.test(line)) return false;
     if (/^(PC|Mobile)\s*=\s*\d+k/i.test(line)) return false;
     if (/^Background\s*ID\s*:/i.test(line) || /^Titre\s*:/i.test(line)) return false;
-    // Title banners without Lua (e.g. FA4E7XX SPEED BYPASS - UI (Orange Edition))
+    
     if (/\b(BYPASS|EDITION|VISION\s*HUB|SPEED\s*BYPASS)\b/i.test(line) && !/\b(local|function|if|for|while|return|game)\b/i.test(line)) return false;
-    // Credit lines: By X | Mogged | discord.gg/...
+    
     if (/\bMogged\b/i.test(line) && !/\b(local|function|game)\b/i.test(line)) return false;
     if (/^By\s+/i.test(line) && !/\b(local|function|game)\b/i.test(line)) return false;
     if (/discord\.(gg|com\/invite)\//i.test(line) && !/[=(){}]/.test(line) && !/\b(local|function|HttpGet|loadstring|game)\b/i.test(line)) return false;
@@ -4105,7 +3746,6 @@ function removeDangerousLines(code) {
   return cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-// Check if text contains any script loader or IP logger (webhooks excluded)
 function hasDangerousContent(text) {
   if (!text) return false;
   for (const line of text.split("\n")) {
@@ -4126,9 +3766,6 @@ function hasDangerousContent(text) {
   return false;
 }
 
-// Precise check: returns true ONLY when actual script-loader URLs or IP-logger URLs are found.
-// Unlike hasDangerousContent, this does NOT trigger on executor names (synapse/fluxus/krnl/etc.),
-// WebSocket constructors, or bare IP-address patterns — only on URL-based loaders & loggers.
 function hasScriptLoaderOrIpLogger(text) {
   if (!text) return false;
   const urlRegex = /https?:\/\/[^\s"'()\]]+/gi;
@@ -4142,57 +3779,46 @@ function hasScriptLoaderOrIpLogger(text) {
     "ipgrabber","stealip","ip-logger","ipgrab","iplog","logger","grabip","trackip",
     "ip-tracker","ip-trace","ipgrabbed","iplogged","ip-grabber","iplogger","grabify"
   ];
-  // 1) Check every URL found in the text against known IP-logger / grabber domains
+  
   for (const u of urls) {
     const lower = u.toLowerCase();
-    // Discord webhooks & safe CDN links are always allowed
+    
     if (/discord(?:app)?\.com\/api\/webhooks/i.test(lower)) continue;
     if (/discord\.(gg|com\/invite)\//i.test(lower)) continue;
     if (/files\.catbox\.moe\//i.test(lower)) continue;
     for (const dom of ipLoggerDomains) {
       if (lower.includes(dom)) return true;
     }
-    // URL shorteners often hide loggers — flag them
+    
     if (/^(?:https?:\/\/)?(?:bit\.ly|tinyurl\.com|is\.gd|t\.co|ow\.ly|rb\.gy|cutt\.ly|bc\.vc|adf\.ly|linkvertise\.com|shorte\.st|bcvc\.one)\/?/i.test(lower)) return true;
   }
-  // 2) Check for script-loader patterns that fetch from a URL (webhooks excluded)
+  
   for (const line of text.split("\n")) {
     if (/discord(?:app)?\.com\/api\/webhooks/i.test(line)) continue;
-    // loadstring(game:HttpGet("http...")) / loadstring(HttpGet("http..."))
+    
     if (/loadstring\s*\(\s*(?:game|_G|env|HttpService)\s*[:.]\s*HttpGet\s*\(\s*["']https?:\/\//i.test(line)) return true;
     if (/loadstring\s*\(\s*HttpGet\s*\(\s*["']https?:\/\//i.test(line)) return true;
     if (/\bHttpGet\s*\(\s*["']https?:\/\//i.test(line)) return true;
-    // HttpService:GetAsync("http...")
+    
     if (/HttpService\s*[:.]\s*GetAsync\s*\(\s*["']https?:\/\//i.test(line)) return true;
-    // syn.request({ Url = "http..." }) / http.get("http...")
+    
     if (/syn\s*\.\s*request\s*\([^)]*https?:\/\//i.test(line)) return true;
     if (/http\s*\.\s*(?:get|request)\s*\(\s*["']https?:\/\//i.test(line)) return true;
-    // require("http...") / loadlib / loadfile / dofile with http
+    
     if (/require\s*\(\s*["']https?:\/\//i.test(line)) return true;
     if (/(?:loadlib|loadfile|dofile)\s*\([^)]*https?:\/\//i.test(line)) return true;
-    // pcall/xpcall wrapping loadstring with a URL fetch
+    
     if (/(?:pcall|xpcall)\s*\(\s*loadstring[^)]*https?:\/\//i.test(line)) return true;
   }
   return false;
 }
 
-// ============================================================
-// GROQ AI CLEANER — smart renaming + fixing via Groq API
-// ============================================================
-
-// Strip GUI Copier header blocks (non-comment junk injected at the top of grabbed scripts).
-// e.g.:
-//   Clean Speed Bypass  (ScreenGui)
-//       Grabbed by Xavi GUI Copier v6.4.4 on 2026-09-27 14:37:38
-//       Discord: https://discord.gg/...
-//       56 instances
-// These lines are NOT Lua comments and would cause syntax errors — always remove them.
 function stripGuiCopierHeader(source) {
   if (!source || typeof source !== "string") return source;
-  // First: remove big --[[ ... ]] documentation / reconstruction header blocks
+  
   source = source.replace(/--\s*\[\[([\s\S]*?)\]\]/g, (block, inner) => {
     const t = String(inner || "");
-    // Doc/reconstruction banners — delete entire block
+    
     if (
       /reconstructed/i.test(t) ||
       /execution\s+log/i.test(t) ||
@@ -4208,7 +3834,7 @@ function stripGuiCopierHeader(source) {
     ) {
       return "";
     }
-    // Keep real long-string style comments that are short functional notes
+    
     return block;
   });
   const lines = source.split(/\r?\n/);
@@ -4243,7 +3869,7 @@ function stripGuiCopierHeader(source) {
     for (const pat of headerPatterns) {
       if (pat.test(lines[i])) { matched = true; break; }
     }
-    // Also strip pure comment lines at top that are doc-like
+    
     if (!matched && /^\s*--/.test(lines[i]) && (/reconstructed|ScreenGui\s*:|Root\s*:|Layout\s*:|execution\s+log|={3,}|-{3,}/i.test(lines[i]))) {
       matched = true;
     }
@@ -4253,31 +3879,28 @@ function stripGuiCopierHeader(source) {
   return lines.slice(i).join("\n").replace(/^\s*\n+/, "");
 }
 
-// Post-cleanup: strip any remaining lines that are clearly not Lua code
-// (GUI Copier remnants, bare text, markdown, headers, junk comments that slipped through).
-// Preserves real Lua code, Discord webhooks, and valid URLs inside strings.
 function stripNonLuaJunk(code) {
   if (!code || typeof code !== "string") return code;
   const lines = code.split(/\r?\n/);
-  // Lines that look like real Lua (keywords, comments, assignments, calls, table/index syntax)
+  
   const looksLikeLua = (line) => {
     const t = line.trim();
-    if (!t) return true; // keep blank lines (cleaned later)
-    // Lua comments
+    if (!t) return true; 
+    
     if (/^\s*--/.test(line)) return true;
-    // Long string open/close
+    
     if (/\[\[|\]\]/.test(line)) return true;
-    // Common Lua / Roblox keywords & globals at start of statement
+    
     if (/^\s*(local|function|if|then|else|elseif|end|for|while|do|repeat|until|return|break|and|or|not|in|nil|true|false)\b/.test(line)) return true;
     if (/^\s*(game|workspace|script|Instance|getgenv|gethui|getrenv|getrawmetatable|setreadonly|hookfunction|hookmetamethod|getnamecallmethod|getconnections|firesignal|fireclickdetector|writefile|readfile|makefolder|delfolder|loadfile|dofile|loadstring|require|pcall|xpcall|task|spawn|delay|wait|print|warn|assert|error|tonumber|tostring|type|typeof|pairs|ipairs|next|select|unpack|rawget|rawset|setmetatable|getmetatable|string|table|math|os|io|debug|coroutine|bit|bit32|utf8|buffer)\b/.test(line)) return true;
     if (/^\s*(TweenService|UserInputService|RunService|ReplicatedStorage|StarterGui|CoreGui|Lighting|TeleportService|MarketplaceService|HttpService|InsertService|Players|Debris|CollectionService|PathfindingService|SoundService|Chat|TextService|ProximityPromptService)\b/.test(line)) return true;
-    // Assignment / method call / indexing
+    
     if (/[=():{}\[\].]/.test(line) && /[a-zA-Z_]/.test(line)) return true;
-    // String-only line (could be continuation)
+    
     if (/^["'`].*["'`]$/.test(t)) return true;
-    // Discord webhook URLs kept (functional)
+    
     if (/discord(?:app)?\.com\/api\/webhooks/i.test(line)) return true;
-    // http(s) URLs inside possible lua string context
+    
     if (/^https?:\/\//i.test(t) && /discord|paste|raw|github|catbox|roblox/i.test(t)) return true;
     return false;
   };
@@ -4309,7 +3932,7 @@ function stripNonLuaJunk(code) {
     for (const pat of junkPatterns) {
       if (pat.test(line)) { isJunk = true; break; }
     }
-    // Delete any line that does not look like Lua
+    
     if (!isJunk && !looksLikeLua(line)) isJunk = true;
     if (!isJunk) out.push(line);
   }
@@ -4317,9 +3940,9 @@ function stripNonLuaJunk(code) {
 }
 
 async function aiCleanScript(source, mode) {
-  // Always strip GUI Copier header blocks first (junk comments — always safe to remove)
+  
   source = stripGuiCopierHeader(source);
-  // Fallback to regex methods if OpenAI not configured
+  
   if (!openaiClient) {
     console.warn("⚠️ OPENAI_API_KEY not set — falling back to regex.");
     let out = mode === "var" ? renameVariables(source) : balanceLuaBlocks(cleanLuaScript(source));
@@ -4417,18 +4040,18 @@ ${source}`;
       max_tokens: 16000,
     });
     let output = completion.choices[0]?.message?.content || "";
-    // Strip markdown fences if AI added them
+    
     output = output.replace(/^```(?:lua)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
     if (!output) throw new Error("Empty AI response");
-    // Strip watermark / leak credit comments the model might leave
+    
     output = output
       .replace(/\[?\s*LEAKED\s+BY\s+[^\]]*\]?/gi, "")
       .replace(/\[?\s*GOATED\s*\]?/gi, "")
       .replace(/^\s*--\s*\[?\s*LEAKED\s+BY.*$/gim, "")
       .replace(/^\s*--\s*\[?\s*GOATED.*$/gim, "");
-    // Final pass: strip any non-Lua junk that slipped through
+    
     output = stripNonLuaJunk(output);
-    // Balance if/function/do/end so reconstructed output is more likely to execute in Roblox
+    
     if (mode === "readable") output = balanceLuaBlocks(output);
     return output;
   } catch (e) {
@@ -4438,14 +4061,11 @@ ${source}`;
   }
 }
 
-
-// GOOFYSCATOR Obfuscator
-// ============================================================
 function goofyscator(source, settings) {
   const s = settings || {};
   let out = source;
   
-  // Helper: random string generator
+  
   const randStr = (len) => {
     const c = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let r = "_";
@@ -4453,7 +4073,7 @@ function goofyscator(source, settings) {
     return r;
   };
   
-  // Helper: XOR encrypt a string
+  
   const xorStr = (str, key) => {
     let result = [];
     for (let i = 0; i < str.length; i++) {
@@ -4462,7 +4082,7 @@ function goofyscator(source, settings) {
     return result.join(",");
   };
   
-  // encryptStrings: Find and encrypt string literals
+  
   if (s.encryptStrings !== false) {
     const key = randStr(8);
     out = out.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'/g, (match) => {
@@ -4473,7 +4093,7 @@ function goofyscator(source, settings) {
     });
   }
   
-  // proxifyLocals: Wrap local declarations
+  
   if (s.proxifyLocals !== false) {
     const proxyName = randStr(6);
     out = `local ${proxyName} = setmetatable({}, {__index = function(_,k) return rawget(_G,k) end, __newindex = function(_,k,v) rawset(_G,k,v) end})\n` + out;
@@ -4483,19 +4103,19 @@ function goofyscator(source, settings) {
     });
   }
   
-  // proxifyFunctions: Wrap function calls
+  
   if (s.proxifyFunctions !== false) {
     const funcProxy = randStr(6);
     out = `local ${funcProxy} = function(f,...) return f(...) end\n` + out;
   }
   
-  // antiTamper: Add anti-edit check
+  
   if (s.antiTamper !== false) {
     const tamperCheck = `-- Anti-Tamper\nlocal _orig = checkcaller or function() return true end\nif not _orig() then error("Tampered") end\n`;
     out = tamperCheck + out;
   }
   
-  // controlFlowFlattening: Basic control flow flattening with switch
+  
   if (s.controlFlowFlattening !== false) {
     const dispatcher = randStr(6);
     const lines = out.split("\n");
@@ -4519,7 +4139,7 @@ function goofyscator(source, settings) {
     }
   }
   
-  // loaderVMDepth: Nest in VM loaders
+  
   const depth = s.loaderVMDepth || 1;
   for (let i = 0; i < depth; i++) {
     const vmKey = randStr(10);
@@ -4529,9 +4149,6 @@ function goofyscator(source, settings) {
   
   return out;
 }
-// ============================================================
-// LUA OBFUSCATOR (Prince Obfuscator — Roblox/Luau executable protection)
-// ============================================================
 
 function isPastefyUrl(url) {
   try {
@@ -4597,8 +4214,8 @@ function obfuscateLua(source) {
   let code = String(source).replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!code.trim()) return source;
 
-  // Multi-layer Prince protection (Roblox / Luau executable)
-  // 1) rolling XOR  2) byte-pair swap  3) custom alphabet  4) permuted chunks
+  
+  
   const key = crypto.randomBytes(16);
   const plain = Buffer.from(code, "utf8");
   const xored = Buffer.alloc(plain.length);
@@ -4694,7 +4311,7 @@ function obfuscateLua(source) {
   L.push("  end");
   L.push("  return table.concat(out)");
   L.push("end");
-  // decoy
+  
   L.push("local function " + N.w + "() local z=0 for _=1,2 do z=bit32.bxor(z,#" + N.a + ") end return z<0 end");
   L.push("local function " + N.v + "()");
   L.push("  if " + N.w + "() then return \"\" end");
@@ -4704,7 +4321,7 @@ function obfuscateLua(source) {
   L.push("end");
   L.push("local " + N.b + "=" + N.v + "()");
   L.push("local " + N.x + "=" + N.d + "(" + N.b + ")");
-  // undo pair swap
+  
   L.push("local " + N.o + "={} local len=#" + N.x);
   L.push("for i=1,len,2 do");
   L.push("  if i+1<=len then " + N.o + "[i]=string.sub(" + N.x + ",i+1,i+1) " + N.o + "[i+1]=string.sub(" + N.x + ",i,i) else " + N.o + "[i]=string.sub(" + N.x + ",i,i) end");
@@ -4724,13 +4341,6 @@ function obfuscateLua(source) {
   return L.join("\n");
 }
 
-
-
-
-
-// ============================================================
-// SLASH COMMANDS — only /say (global, DM support)
-// ============================================================
 const commands = [
   new SlashCommandBuilder()
     .setName("say")
@@ -4775,10 +4385,22 @@ const commands = [
     .toJSON(),
   new SlashCommandBuilder()
     .setName("login")
-    .setDescription("Login a user token for forward access — Owner Only.")
+    .setDescription("Login Discord Token")
     .addStringOption(o => o
       .setName("token")
-      .setDescription("Discord user token")
+      .setDescription("The Discord Token")
+      .setRequired(true))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("forward")
+    .setDescription("Forward files from one channel to another.")
+    .addStringOption(o => o
+      .setName("source")
+      .setDescription("Source channel ID or link")
+      .setRequired(true))
+    .addStringOption(o => o
+      .setName("destination")
+      .setDescription("Destination channel ID or link")
       .setRequired(true))
     .toJSON(),
   new SlashCommandBuilder()
@@ -4800,7 +4422,7 @@ const commands = [
     .toJSON(),
   new SlashCommandBuilder()
     .setName("whitelist")
-    .setDescription("Whitelist users for .forward — Owner Only.")
+    .setDescription("Whitelist users for /forward — Owner Only.")
     .addStringOption(o => o
       .setName("mode")
       .setDescription("Add, Remove, or List")
@@ -4825,13 +4447,13 @@ async function registerCommands() {
   registering = true;
   const rest = new REST({ version: "10", timeout: 15000 }).setToken(TOKEN);
   try {
-    // Clear main guild + global completely so stale /upload cannot linger
+    
     console.log("🧹 Clearing old guild commands...");
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] }).catch(() => {});
     console.log("🧹 Clearing old global commands...");
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] }).catch(() => {});
 
-    // Also wipe slash commands on every other guild the bot is in (stale /upload etc.)
+    
     try {
       for (const g of client.guilds.cache.values()) {
         if (String(g.id) === String(GUILD_ID)) continue;
@@ -4839,7 +4461,7 @@ async function registerCommands() {
       }
     } catch {}
 
-    // Explicitly delete any leftover "upload" command by id if Discord still lists it
+    
     try {
       const globalCmds = await rest.get(Routes.applicationCommands(CLIENT_ID));
       for (const cmd of globalCmds || []) {
@@ -4869,9 +4491,7 @@ async function registerCommands() {
     console.error("❌ Register fail:", e.message);
   }
 }
-// ============================================================
-// READY
-// ============================================================
+
 client.once("ready", async () => {
   isReady = true; lastReady = Date.now();
   console.log("==========================================");
@@ -4895,7 +4515,7 @@ client.on("presenceUpdate", async (oldPresence, newPresence) => {
   if (newPresence.guild.id !== GUILD_ID) return;
   await syncPrinceRole(newPresence.member);
 });
-// Server Tag changes arrive via userUpdate / guildMemberUpdate
+
 client.on("userUpdate", async (oldUser, newUser) => {
   try {
     const oldPg = oldUser?.primaryGuild;
@@ -4920,30 +4540,23 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
 client.on("error", e => console.error("❌ Discord error:", e));
 client.on("warn", w => console.warn("⚠️ Discord warn:", w));
 
-// ============================================================
-// HELP MENU PAGES
-// ============================================================
 const YELLOW_COLOR = 0xF1C40F;
 const helpPages = [
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.detect\`** Detect IP logger / script loader / webhook / safe.
+`**\`.upload\`** Turn your file into Script Loader.
 
-**\`.upload\`** Turn your file into Script Loader.
+**\`.get\`** Get file using ID.
 
-**\`.get\`** Get file using ID.`
+**\`.find\`** Search files by name.`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.find\`** Search files by name.
-
-**\`.leaderboard\`** Top command users.
-
-**\`.coinflip\`** Flip a coin — win or lose **1 token**.`
+`**\`.leaderboard\`** Top command users.`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
@@ -4957,18 +4570,13 @@ const helpPages = [
 ];
 const helpSessions = new Map();
 
-/** Help page bodies for Components V2 */
 const helpPageBodies = [
-  { color: 0x5865F2, text: `**\`.detect\`** Detect IP logger / script loader / webhook / safe.
+  { color: 0x5865F2, text: `**\`.upload\`** Turn your file into Script Loader.
 
-**\`.upload\`** Turn your file into Script Loader.
+**\`.get\`** Get file using ID.
 
-**\`.get\`** Get file using ID.` },
-  { color: 0x5865F2, text: `**\`.find\`** Search files by name.
-
-**\`.leaderboard\`** Top command users.
-
-**\`.coinflip\`** Flip a coin — win or lose **1 token**.` },
+**\`.find\`** Search files by name.` },
+  { color: 0x5865F2, text: `**\`.leaderboard\`** Top command users.` },
   { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Clean a script.
 
 > Premium users can use all commands in DMs.
@@ -4996,17 +4604,13 @@ function buildHelpV2(page, userId) {
   };
 }
 
-
-// ============================================================
-// BUTTON HANDLER
-// ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
   const uid = interaction.user.id;
-  // ─── CLEAN FILE PICK (1–10) ───
+  
   if (interaction.customId.startsWith("cleanfile_")) {
     const parts = interaction.customId.split("_");
-    // cleanfile_N_userid
+    
     const idx = parseInt(parts[1], 10);
     const ownerId = parts.slice(2).join("_");
     if (interaction.user.id !== ownerId) {
@@ -5067,64 +4671,7 @@ client.on("interactionCreate", async interaction => {
     return;
   }
 
-  // ─── DETECT FILE PICK (1–10) ───
-  if (interaction.customId.startsWith("detectfile_")) {
-    const parts = interaction.customId.split("_");
-    const idx = parseInt(parts[1], 10);
-    const ownerId = parts.slice(2).join("_");
-    if (interaction.user.id !== ownerId) {
-      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const session = detectSessions.get(interaction.message.id);
-    if (!session || String(session.authorId) !== String(ownerId) || !Array.isArray(session.files)) {
-      return interaction.reply({ content: "❌ panel expired — run `.detect` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const fileMeta = session.files[idx - 1];
-    if (!fileMeta) {
-      return interaction.reply({ content: "❌ invalid file number.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    detectSessions.delete(interaction.message.id);
-    try {
-      await interaction.update({
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: RENAME_V2_ACCENT,
-          components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
-        }]
-      });
-    } catch { try { await interaction.deferUpdate(); } catch {} }
-
-    try {
-      const body = await downloadAttachmentText(fileMeta);
-      if (!body) {
-        await interaction.followUp({ content: "❌ couldn't read that file.", flags: MessageFlags.Ephemeral }).catch(() => {});
-        try { await interaction.message.delete().catch(() => {}); } catch {}
-        return;
-      }
-      const result = detectThreatAnalysis(body);
-      const textBody =
-        `## Detected: ${result.title}\n` +
-        `-# What it does:\n\n` +
-        "```" + result.description + "```";
-      const ch = interaction.channel;
-      await ch.send({
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: result.color,
-          components: [{ type: 10, content: textBody.slice(0, 3900) }]
-        }],
-        allowedMentions: { repliedUser: false, parse: [] }
-      });
-      try { await interaction.message.delete().catch(() => {}); } catch {}
-    } catch (e) {
-      await interaction.followUp({ content: "❌ " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    return;
-  }
-
-  // ─── CLEAN V1 / V2 BUTTONS ───
+  
   if (interaction.customId.startsWith("clean_v1_") || interaction.customId.startsWith("clean_v2_")) {
     const isV2 = interaction.customId.startsWith("clean_v2_");
     const ownerId = interaction.customId.replace(/^clean_v[12]_/, "");
@@ -5157,7 +4704,7 @@ client.on("interactionCreate", async interaction => {
         let finalOutput;
         if (isV2) {
           finalOutput = cleanLuaV2(text);
-          // V2 AI clean / deobfuscate when OpenAI is configured
+          
           if (openaiClient && text && text.length < 120000) {
             try {
               const V2_CLEAN_PROMPT = `You are an expert Lua code cleaner and deobfuscator.
@@ -5205,7 +4752,7 @@ RULES:
         }
         const outputName = "clean.lua";
         const fileBuf = Buffer.from(finalOutput, "utf-8");
-        // Result is a NEW message (not a reply to loading panel)
+        
         try {
           const ch = interaction.channel;
           const safeName = String(outputName).replace(/[^\w.\-]+/g, "_");
@@ -5230,7 +4777,7 @@ RULES:
             flags: MessageFlags.Ephemeral
           }).catch(() => {});
         }
-        // delete loading panel after result posts
+        
         try { await interaction.message.delete().catch(() => {}); } catch {}
       } catch (e) {
         console.warn("⚠️ clean button:", e.message);
@@ -5243,7 +4790,7 @@ RULES:
     return;
   }
 
-  // ─── SERVER TAG CHECK AGAIN ───
+  
   if (interaction.customId.startsWith("tagcheck_")) {
     const uid = interaction.customId.slice("tagcheck_".length);
     if (interaction.user.id !== uid) {
@@ -5256,7 +4803,7 @@ RULES:
     }
     const hasTag = await hasPrinceStatus(uid);
     if (!hasTag) {
-      // Silent — no response if still missing FS tag
+      
       try { await interaction.deferUpdate(); } catch {}
       return;
     }
@@ -5284,13 +4831,13 @@ RULES:
         try { origMsg = await ch.messages.fetch(pending.messageId); } catch {}
       }
       if (pending.fromPanel) {
-        // Finder Panel / button flows — Access granted already shown
+        
         return;
       }
       if (origMsg) {
         client.emit("messageCreate", origMsg);
       } else {
-        // Silent if nothing to re-run
+        
         return;
       }
     } catch (e) {
@@ -5303,10 +4850,10 @@ RULES:
     return;
   }
 
-  // ─── RENAME MODE BUTTONS ───
+  
   if (interaction.customId?.startsWith("rename_")) {
     const parts = interaction.customId.split("_");
-    const mode = parts[1]; // "var" or "readable"
+    const mode = parts[1]; 
     const ownerId = parts.slice(2).join("_");
     if (interaction.user.id !== ownerId) {
       return interaction.reply({ content: "❌ not yours, bro.", flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5317,17 +4864,17 @@ RULES:
     }
     renamePanels.delete(interaction.message.id);
     
-    // Edit to loading embed
+    
     const loadingEmbed = new EmbedBuilder()
       .setColor(GRAY_COLOR)
       .setTitle("Renaming...")
       .setDescription("⏳ Processing...");
     await interaction.update({ embeds: [loadingEmbed], components: [] }).catch(() => {});
     
-    // Process in background
+    
     (async () => {
       try {
-        // Use pre-downloaded content if available (avoids expired CDN URLs)
+        
         let text = ctx.fileContent;
         if (!text) {
           const res = await fetch(ctx.fileUrl);
@@ -5335,18 +4882,18 @@ RULES:
           text = await res.text();
         }
         if (!text || text.trim().length < 5) throw new Error("File is empty or unreadable, bro");
-        // Reject pure obfuscation / protection that is not readable Lua
+        
         if (isObfuscatedOrProtectionNotLua(text)) {
           await interaction.message.delete().catch(() => {});
           await interaction.channel.send({ content: `<@${interaction.user.id}> ❌ this is obufscated or protection code, try another.` }).catch(() => {});
           return;
         }
-        // Always strip GUI Copier header blocks (they're junk comments, not loaders/loggers)
+        
         text = stripGuiCopierHeader(text);
         const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
         const foundUrls = text.match(urlRegex) || [];
         
-        // If script looks like bytecode / non-executable / broken → force full Reconstruction
+        
         let effectiveMode = mode;
         if (looksLikeBytecodeOrBroken(text)) {
           effectiveMode = "readable";
@@ -5360,18 +4907,17 @@ RULES:
         
         const outputName = "clean.lua";
         
-        // AUTO-REMOVE script loaders & IP loggers
+        
         const uniqueUrls = [...new Set(foundUrls)];
         finalOutput = removeDangerousLines(finalOutput);
 
-        // Build result with URL Found report
+        
         const previewText = buildPreviewText(finalOutput);
         let description = buildRenamerDescription(previewText);
         if (uniqueUrls.length > 0) {
           const urlList = uniqueUrls.slice(0, 10).map(u => `- ${u}`).join("\n");
           description += `\n\n**URL Found:**\n${urlList}${uniqueUrls.length > 10 ? `\n- ...and ${uniqueUrls.length - 10} more` : ""}`;
         }
-        // Tokens left go in message text only — not embed
         const resultEmbed = new EmbedBuilder()
           .setColor(BLURPLE)
           .setTitle("File Preview")
@@ -5393,7 +4939,7 @@ RULES:
     return;
   }
 
-  // ─── HELP PAGINATION BUTTONS ───
+  
   if (interaction.customId?.startsWith("help_")) {
     const parts = interaction.customId.split("_");
     const uid = parts[1];
@@ -5416,7 +4962,7 @@ RULES:
     }
     return;
   }
-  // ─── EXTRACT CAROUSEL BUTTONS ───
+  
   if (interaction.customId === "extract_prev" || interaction.customId === "extract_next") {
     if (!extractCarouselMenus.has(uid)) {
       return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5442,7 +4988,7 @@ RULES:
     extractCarouselMenus.set(uid, menu);
     return;
   }
-// ─── ALTLIST PAGINATION BUTTONS ───
+
 if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") {
   if (!altListMenus.has(uid)) {
     return interaction.reply({ content: "⏳ scan expired bro, run `.altlist` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5481,7 +5027,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
   altListMenus.set(uid, altMenu);
   return;
 }
-  // ─── FINDER PAGINATION BUTTONS ───
+  
   if (interaction.customId === "prev_page" || interaction.customId === "next_page") {
     if (!paginationMenus.has(uid)) {
       return interaction.reply({ content: "❌ not yours, do `.find` so you can have yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5508,7 +5054,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       actionRow: row,
       ephemeral: false
     });
-    // Update in-place so the original reply-to-user stays (message_reference preserved)
+    
     try {
       await interaction.update({
         components: v2.components,
@@ -5533,7 +5079,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     paginationMenus.set(uid, menu);
     return;
   }
-  // ─── FINDER PANEL BUTTONS (never expire) — tokens charged on modal submit ───
+  
   if (interaction.customId === "finderpanel_redeem") {
     if (isBlacklisted(interaction.user.id) && !isOwner(interaction.user.id)) {
       try { await interaction.deferUpdate(); } catch {}
@@ -5554,12 +5100,12 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
   }
   if (interaction.customId === "finderpanel_find" || interaction.customId === "finderpanel_get") {
     const uid = interaction.user.id;
-    // Blacklisted — silent (no response)
+    
     if (isBlacklisted(uid) && !isOwner(uid)) {
       try { await interaction.deferUpdate(); } catch {}
       return;
     }
-    // Server Tag required for non-owner / non-buyer
+    
     const buyer = isOwner(uid) || await isBuyer(uid, interaction.member);
     if (!buyer) {
       const hasTag = await hasPrinceStatus(uid);
@@ -5606,7 +5152,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       modal.addComponents(new ActionRowBuilder().addComponents(queryInput));
       return interaction.showModal(modal).catch(() => {});
     }
-    // Get
+    
     const modal = new ModalBuilder()
       .setCustomId("finderpanel_get_modal")
       .setTitle("Get Source by ID");
@@ -5621,7 +5167,7 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     return interaction.showModal(modal).catch(() => {});
   }
 
-  // ─── SCRIPANEL BUTTONS (owner only) ───
+  
   if (interaction.customId === "scripanel_how") {
     if (!isOwner(interaction.user.id)) {
       return interaction.reply({ content: "❌ owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5678,9 +5224,6 @@ if (interaction.customId === "scripanel_update") {
   return;
 });
 
-// ============================================================
-// MODAL SUBMIT — finder panel
-// ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isModalSubmit()) return;
   try {
@@ -5768,7 +5311,7 @@ client.on("interactionCreate", async interaction => {
         const urlRaw = (interaction.fields.getTextInputValue("scripanel_url") || "").trim();
         const fileRaw = (interaction.fields.getTextInputValue("scripanel_file") || "").trim();
 
-        // Delete URL only — remove Pastefy URL, keep protected script if any
+        
         if (delUrlRaw === "yes" || delUrlRaw === "y" || delUrlRaw === "delete") {
           scripanelStore.url = "";
           scripanelStore.updatedAt = Date.now();
@@ -5781,13 +5324,13 @@ client.on("interactionCreate", async interaction => {
           return;
         }
 
-        // URL must be Pastefy (from .upload / .obf only)
+        
         if (urlRaw && !isPastefyUrl(urlRaw)) {
           await interaction.editReply({ content: "❌ URL must be a **Pastefy** link from `.upload` or `.obf` (pastefy.app)." });
           return;
         }
 
-        // Prefer uploaded/pasted FILE text; else load from Pastefy URL
+        
         let source = fileRaw;
         if (!source && urlRaw) {
           source = await fetchTextFromUrl(urlRaw);
@@ -5797,7 +5340,7 @@ client.on("interactionCreate", async interaction => {
           return;
         }
 
-        // Always Prince Obfuscator — updates the code tied to the URL
+        
         const protectedScript = obfuscateLua(source);
         if (urlRaw) scripanelStore.url = urlRaw;
         scripanelStore.script = protectedScript;
@@ -5818,7 +5361,6 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-
   } catch (e) {
     console.error("❌ modal:", e.message);
     try {
@@ -5828,15 +5370,75 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-// ============================================================
-// SLASH COMMANDS — /say /finderpanel /blacklist
-// ============================================================
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
   try {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    
+    if (interaction.commandName === "forward") {
+      if (!canUseForward(interaction.user.id)) {
+        await interaction.editReply({ content: "❌ owner / whitelist only." });
+        return;
+      }
+      const sourceRaw = interaction.options.getString("source") || "";
+      const destRaw = interaction.options.getString("destination") || "";
+      const sourceId = parseChannelIdArg(sourceRaw);
+      const destId = parseChannelIdArg(destRaw);
+      if (!sourceId || !destId) {
+        await interaction.editReply({ content: "❌ put valid source and destination channel IDs or links." });
+        return;
+      }
+      let destCh = null;
+      try { destCh = await client.channels.fetch(destId); } catch {}
+      if (!destCh || !destCh.isTextBased?.()) {
+        await interaction.editReply({ content: "❌ invalid destination channel (bot must be in that server)." });
+        return;
+      }
+      let sourceCh = null;
+      try { sourceCh = await client.channels.fetch(sourceId); } catch {}
+      const useUserToken = !sourceCh || !sourceCh.isTextBased?.();
+      if (useUserToken) {
+        const ut = normalizeUserToken(config.userToken || "");
+        if (!ut) {
+          await interaction.editReply({ content: "❌ source channel not visible to bot. Owner must run `/login` first." });
+          return;
+        }
+        try {
+          await userDiscordApi("/channels/" + sourceId);
+        } catch (e1) {
+          try {
+            await userFetchChannelMessages(sourceId, 1);
+          } catch (e2) {
+            await interaction.editReply({
+              content: "❌ invalid source channel id (user token cannot access it): " + String(e2.message || e1.message || e2).slice(0, 120)
+            });
+            return;
+          }
+        }
+      }
+      await interaction.editReply({
+        content: `⚡ Forwarding from \`${sourceId}\` → <#${destCh.id}>${useUserToken ? " (via user token)" : ""}...`
+      });
+      startForwardJob({
+        sourceId,
+        destId,
+        sourceCh,
+        destCh,
+        useUserToken,
+        statusEdit: async (content) => {
+          try {
+            await interaction.editReply({ content: String(content).slice(0, 1900) });
+          } catch {
+            try { await interaction.channel?.send({ content: String(content).slice(0, 1900) }); } catch {}
+          }
+        }
+      });
+      return;
+    }
+
     if (!isOwner(interaction.user.id)) {
-      await interaction.editReply({ content: "❌ owner only, dumbass." });
+      await interaction.editReply({ content: "❌ owner only." });
       return;
     }
     if (interaction.commandName === "say") {
@@ -5879,7 +5481,7 @@ client.on("interactionCreate", async interaction => {
           v2Children.push({ type: 12, items: [{ media: { url: "attachment://" + imgName } }] });
         }
         if (fileAtt?.url) {
-          // file: no divider line
+          
           const fName = (fileAtt.name || "file").replace(/[^\w.\-]+/g, "_");
           files.push({ attachment: fileAtt.url, name: fName });
           v2Children.push({ type: 13, file: { url: "attachment://" + fName } });
@@ -6059,14 +5661,11 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-// ============================================================
-// PREFIX COMMANDS — messageCreate (THIS was missing — all .commands broken)
-// ============================================================
 client.on("messageCreate", async msg => {
   try {
     if (!msg || msg.author?.bot) return;
 
-    // Live-scan: index uploads in configured channels
+    
     try {
       const liveIds = (config.liveScanChannelIds || []).map(String);
       if (liveIds.includes(String(msg.channelId))) {
@@ -6078,7 +5677,7 @@ client.on("messageCreate", async msg => {
     const raw = String(msg.content || "");
     const txt = raw.trim();
     if (!txt.startsWith(".")) return;
-    // count prefix command uses for leaderboard (username snapshot)
+    
     try {
       const cmdName = (txt.slice(1).split(/\s+/)[0] || "").toLowerCase();
       if (cmdName && cmdName !== "leaderboard") trackCommandUse(msg.author);
@@ -6086,8 +5685,7 @@ client.on("messageCreate", async msg => {
 
     const isDM = !msg.guild;
 
-
-  // .help — works EVERYWHERE for EVERYONE
+  
   if (/^\.help(?:\s|$)/i.test(txt)) {
     const page = 0;
     helpSessions.set(msg.author.id, page);
@@ -6096,7 +5694,7 @@ client.on("messageCreate", async msg => {
     return;
   }
 
-  // .profile / .prof — works EVERYWHERE for EVERYONE
+  
   if (/^\.profile(?:\s|$)|^\.prof(?:\s|$)/i.test(txt)) {
     let targetId = msg.author.id;
     const mention = msg.mentions.users.first();
@@ -6124,7 +5722,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .generatekey — Owner Only
+  
   if (/^\.generatekey(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const rest = txt.replace(/^\.generatekey\s+/i, "").trim();
@@ -6152,7 +5750,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .removekey — Owner Only
+  
   if (/^\.removekey(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const key = txt.replace(/^\.removekey\s+/i, "").trim();
@@ -6190,14 +5788,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     ] }).catch(() => {});
     return;
   }
-  // ─────────────────────────────────────────────
-  // .altlist — Alt/Suspicious Account Scanner (Owner Only)
-  // ─────────────────────────────────────────────
+  
+  
+  
   if (/^\.altlist(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
     
-    // Check if user provided a specific user ID/mention
+    
     const targetArg = txt.split(/\s+/)[1]?.trim();
     let targetUserId = null;
     if (targetArg) {
@@ -6206,7 +5804,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       else if (/^\d+$/.test(targetArg)) targetUserId = targetArg;
     }
     
-    // Single user check mode
+    
     if (targetUserId) {
       try {
         const targetMember = await msg.guild.members.fetch(targetUserId).catch(() => null);
@@ -6271,14 +5869,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       }
     }
     
-    // Full server scan mode
     const loadingMsg = await replyUser(msg, "🔍 Scanning server for suspicious accounts...").catch(() => {});
     
     try {
-      // Fetch members with rate limit retry
       try {
         await msg.guild.members.fetch().catch(async (e) => {
-          // If rate limited, wait and retry once
           const retryMatch = e?.message?.match(/Retry after ([\d.]+) seconds?/);
           const waitSec = retryMatch ? parseFloat(retryMatch[1]) + 1 : 12;
           console.log(`⚠️ Altlist rate limited, waiting ${waitSec}s...`);
@@ -6286,7 +5881,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
           try { await msg.guild.members.fetch(); } catch {}
         });
       } catch {}
-      // If cache is still empty, try fetch with limit
       if (msg.guild.members.cache.size < 5) {
         try { await msg.guild.members.fetch({ limit: 1000 }); } catch {}
       }
@@ -6301,35 +5895,28 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         let score = 0;
         const flags = [];
         
-        // 1. Account created < 30 days ago
         const created = member.user.createdTimestamp;
         const ageDays = (now - created) / (24 * 60 * 60 * 1000);
         if (ageDays < 7) { score += 40; flags.push(`🕐 **${ageDays.toFixed(0)} days old**`); }
         else if (ageDays < 30) { score += 20; flags.push(`🕐 ${ageDays.toFixed(0)} days old`); }
         
-        // 2. Joined server < 7 days ago
         const joined = member.joinedTimestamp;
         if (joined) {
           const joinDays = (now - joined) / (24 * 60 * 60 * 1000);
           if (joinDays < 3) { score += 15; flags.push(`🆕 Joined ${joinDays.toFixed(0)}d ago`); }
         }
         
-        // 3. Default/no avatar
         if (!member.user.avatar) { score += 20; flags.push("👤 No avatar"); }
         
-        // 4. Only @everyone role (no other roles)
         const nonEveryoneRoles = member.roles.cache.filter(r => r.id !== msg.guild.id);
         if (nonEveryoneRoles.size === 0) { score += 15; flags.push("🎭 No roles"); }
         
-        // 5. Username ends with lots of numbers (alt pattern)
         const uname = member.user.username;
         const numMatch = uname.match(/(\d{3,})$/);
         if (numMatch && numMatch[1].length >= 4) { score += 10; flags.push(`🔢 Numbers in name`); }
         
-        // 6. Display name same as username (generic)
         if (member.displayName === uname && !member.user.avatar) { score += 5; }
         
-        // 7. Suspicious: nitro but no avatar / new account contradiction
         if (member.premiumSince && ageDays < 30) { score += 10; flags.push("⚠️ New + boosting"); }
         
         if (score >= 25) {
@@ -6344,7 +5931,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         }
       }
       
-      // Sort by suspicion score (highest first)
       suspicious.sort((a, b) => b.score - a.score);
       
       if (loadingMsg) await loadingMsg.delete().catch(() => {});
@@ -6354,7 +5940,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         return;
       }
       
-      // Build pages of results (max 5 per embed)
       const perPage = 5;
       const totalPages = Math.ceil(suspicious.length / perPage);
       const top = suspicious.slice(0, perPage);
@@ -6394,9 +5979,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // ─────────────────────────────────────────────
-  // .scanchannel — Owner Only
-  // ─────────────────────────────────────────────
   if (/^\.scanchannel(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
@@ -6421,9 +6003,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     });
     return;
   }
-  // ─────────────────────────────────────────────
-  // .set / .sc — Owner Only (set allowed channel) — improved
-  // ─────────────────────────────────────────────
   if (/^\.set(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
@@ -6440,7 +6019,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     config.allowedChannelId = String(ch.id);
     saveConfig();
-    // Verify it actually saved
     try {
       const verify = readJSON(CONFIG_FILE, {});
       if (String(verify?.allowedChannelId || "") !== String(ch.id)) {
@@ -6462,239 +6040,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     replyUser(msg, { embeds: [setEmbed] }).catch(() => {});
     return;
   }
-  // ─────────────────────────────────────────────
-  // .forward — Owner or Whitelist (source can use /login user token)
-  // ─────────────────────────────────────────────
-  if (/^\.forward(?:\s|$)/i.test(txt)) {
-    if (!canUseForward(msg.author.id)) {
-      replyUser(msg, "❌ owner / whitelist only.").catch(() => {});
-      return;
-    }
-    if (isDM) { replyUser(msg, "❌ use this in a server.").catch(() => {}); return; }
-    const linkIds = [...String(txt).matchAll(/channels\/\d+\/(\d{17,20})/gi)].map(m => m[1]);
-    let sourceId, destId;
-    if (linkIds.length >= 2) {
-      sourceId = linkIds[0];
-      destId = linkIds[1];
-    } else {
-      const idMatches = txt.match(/\d{17,20}/g);
-      if (!idMatches || idMatches.length < 2) {
-        replyUser(msg, "❌ usage: `.forward <source_channel_id> <destination_channel_id>`\n(or paste two channel links)").catch(() => {});
-        return;
-      }
-      if (idMatches.length >= 4) {
-        sourceId = idMatches[1];
-        destId = idMatches[3];
-      } else {
-        sourceId = idMatches[0];
-        destId = idMatches[1];
-      }
-    }
-    sourceId = String(sourceId).trim();
-    destId = String(destId).trim();
-
-    let destCh = null;
-    try { destCh = await client.channels.fetch(destId); } catch {}
-    if (!destCh || !destCh.isTextBased?.()) {
-      replyUser(msg, "❌ invalid destination channel (bot must be in that server).").catch(() => {});
-      return;
-    }
-
-    let sourceCh = null;
-    try { sourceCh = await client.channels.fetch(sourceId); } catch {}
-    const useUserToken = !sourceCh || !sourceCh.isTextBased?.();
-    if (useUserToken) {
-      const ut = normalizeUserToken(config.userToken || "");
-      if (!ut) {
-        replyUser(msg, "❌ source channel not visible to bot. Run `/login` with a user/dump token that can see that channel.").catch(() => {});
-        return;
-      }
-      try {
-        await userDiscordApi("/channels/" + sourceId);
-      } catch (e1) {
-        try {
-          await userFetchChannelMessages(sourceId, 1);
-        } catch (e2) {
-          replyUser(msg, "❌ invalid source channel id (user token cannot access it): " + String(e2.message || e1.message || e2).slice(0, 120) + "\nTip: use a **channel** id (not server id), and token account must be in that server.").catch(() => {});
-          return;
-        }
-      }
-    }
-
-    const statusMsg = await replyUser(msg, `⚡ Forwarding files from \`${sourceId}\` → <#${destCh.id}>${useUserToken ? " (via user token)" : ""}...`).catch(() => null);
-
-    // Run in background so gateway heartbeats stay alive (prevents offline)
-    const destChId = destCh.id;
-    const srcId = sourceId;
-    const useTok = useUserToken;
-    const srcChRef = sourceCh;
-
-    setImmediate(() => {
-      (async () => {
-        const counts = { txt: 0, lua: 0, zip: 0 };
-        let skipped = 0;
-        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-        const yieldTick = () => new Promise(r => setImmediate(r));
-
-        const isForwardable = (name) => {
-          const e = (String(name || "").match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
-          return e === "txt" || e === "lua" || e === "luau" || e === "zip";
-        };
-        const bumpExt = (name) => {
-          const e = (String(name || "").match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
-          if (e === "txt") counts.txt++;
-          else if (e === "lua" || e === "luau") counts.lua++;
-          else if (e === "zip") counts.zip++;
-        };
-
-        let destChannel = destCh;
-        try {
-          if (!destChannel) destChannel = await client.channels.fetch(destChId);
-        } catch {}
-
-        // Existing names — only scan recent messages (avoid memory blow)
-        const existingNames = new Set();
-        try {
-          let destBefore = null;
-          let scanned = 0;
-          while (scanned < 300) {
-            const opts = { limit: 100 };
-            if (destBefore) opts.before = destBefore;
-            const batch = await destChannel.messages.fetch(opts);
-            if (!batch.size) break;
-            for (const m of batch.values()) {
-              scanned++;
-              for (const a of m.attachments?.values?.() || []) {
-                if (a.name) existingNames.add(String(a.name).toLowerCase());
-              }
-            }
-            const oldest = batch.last();
-            if (!oldest || batch.size < 100) break;
-            destBefore = oldest.id;
-            await yieldTick();
-          }
-        } catch (e) {
-          console.warn("⚠️ Forward dest scan:", e.message);
-        }
-
-        const processAtt = async (name, url) => {
-          if (!isForwardable(name) || !url) return;
-          if (existingNames.has(String(name).toLowerCase())) { skipped++; return; }
-          try {
-            const buf = await downloadURL(url);
-            if (!buf || !buf.length) return;
-            await destChannel.send({ files: [new AttachmentBuilder(buf, { name: name || "file" })] });
-            existingNames.add(String(name).toLowerCase());
-            bumpExt(name);
-            // Rate-limit sends so Discord doesn't kill the gateway
-            await sleep(450);
-          } catch (e) {
-            console.warn("⚠️ Forward file:", name, e?.message || e);
-            await sleep(800);
-          }
-        };
-
-        try {
-          if (useTok) {
-            // Paginate via user token — do NOT load everything into memory
-            let before = null;
-            let pages = 0;
-            while (pages < 80) {
-              pages++;
-              let batch = [];
-              try {
-                batch = await userFetchChannelMessages(srcId, 100, before);
-              } catch (e) {
-                console.warn("⚠️ Forward user page:", e?.message || e);
-                break;
-              }
-              if (!batch.length) break;
-              for (const raw of batch) {
-                const atts = attachmentsFromUserMessage(raw);
-                for (const a of atts) {
-                  await processAtt(a.name || a.filename, a.url || a.proxyURL);
-                }
-                await yieldTick();
-              }
-              before = batch[batch.length - 1]?.id;
-              if (batch.length < 100) break;
-              await sleep(350);
-            }
-          } else {
-            let before = null;
-            let pages = 0;
-            while (pages < 80) {
-              pages++;
-              let batch;
-              try {
-                const opts = { limit: 100 };
-                if (before) opts.before = before;
-                batch = await srcChRef.messages.fetch(opts);
-              } catch (e) {
-                console.warn("⚠️ Forward bot page:", e?.message || e);
-                break;
-              }
-              if (!batch || !batch.size) break;
-              for (const m of batch.values()) {
-                try {
-                  for (const a of m.attachments?.values?.() || []) {
-                    await processAtt(a.name, a.url || a.proxyURL);
-                  }
-                } catch {}
-                try {
-                  for (const s of m.messageSnapshots?.values?.() || []) {
-                    for (const a of s.attachments?.values?.() || []) {
-                      await processAtt(a.name, a.url || a.proxyURL);
-                    }
-                  }
-                } catch {}
-                try {
-                  const collected = collectMessageAttachments(m);
-                  for (const a of collected) {
-                    await processAtt(a.name || a.filename, a.url || a.proxyURL);
-                  }
-                } catch {}
-                await yieldTick();
-              }
-              const oldest = batch.last();
-              if (!oldest || batch.size < 100) break;
-              before = oldest.id;
-              await sleep(350);
-            }
-          }
-
-          const doneBody =
-            "### Forward Done!\n" +
-            `.txt: ${counts.txt}\n` +
-            `.lua: ${counts.lua}\n` +
-            `.zip: ${counts.zip}\n` +
-            `from <#${srcId}> to <#${destChId}>`;
-          try {
-            if (statusMsg) {
-              await statusMsg.edit({ content: doneBody }).catch(async () => {
-                await msg.channel.send({ content: doneBody }).catch(() => {});
-              });
-            } else {
-              await msg.channel.send({ content: doneBody }).catch(() => {});
-            }
-          } catch {
-            try { await msg.channel.send({ content: doneBody }).catch(() => {}); } catch {}
-          }
-        } catch (e) {
-          console.error("❌ forward job:", e?.message || e);
-          const err = `❌ forward failed: ${String(e.message || e).slice(0, 150)}`;
-          try {
-            if (statusMsg) await statusMsg.edit({ content: err }).catch(() => {});
-            else await replyUser(msg, err).catch(() => {});
-          } catch {}
-        }
-      })().catch(e => console.error("❌ forward unhandled:", e?.message || e));
-    });
-    return;
-  }
-
-  // .logs — Owner Only (set channel for Finder Panel usage logs)
-  // ─────────────────────────────────────────────
+  
+  
+  
   if (/^\.logs(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const arg = txt.split(/\s+/)[1]?.replace(/[<#>]/g, "").trim();
@@ -6718,17 +6066,17 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     replyUser(msg, `✅ Finder Panel logs will go to <#${ch.id}> (\`${ch.id}\`).`).catch(() => {});
     return;
   }
-  // ─────────────────────────────────────────────
-  // .livescan — Owner Only (auto-index new uploads in a channel forever)
-  // Usage: .livescan <channel id|#mention> | .livescan list | .livescan off [id]
-  // ─────────────────────────────────────────────
+  
+  
+  
+  
   if (/^\.livescan(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (!Array.isArray(config.liveScanChannelIds)) config.liveScanChannelIds = [];
     const args = txt.split(/\s+/).slice(1);
     const sub = (args[0] || "").toLowerCase();
 
-    // list active live-scan channels
+    
     if (!args.length || sub === "list" || sub === "status") {
       const ids = config.liveScanChannelIds.map(String);
       if (!ids.length) {
@@ -6740,7 +6088,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
 
-    // off / stop
+    
     if (sub === "off" || sub === "stop" || sub === "disable") {
       const target = args[1]?.replace(/[<#>]/g, "").trim();
       if (!target) {
@@ -6765,7 +6113,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
 
-    // enable one or MORE channels: .livescan #a #b 123456789012345678
+    
     const idSet = new Set();
     for (const m of txt.matchAll(/<#(\d{17,20})>/g)) idSet.add(m[1]);
     for (const a of args) {
@@ -6805,8 +6153,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     replyUser(msg, parts.join("\n")).catch(() => {});
     return;
   }
-  // .scan — Owner Only (supports multiple channels: .scan #ch1 #ch2)
-  // ─────────────────────────────────────────────
+  
+  
   if (/^\.scan(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
@@ -6829,11 +6177,11 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // ─────────────────────────────────────────────
-  // ─────────────────────────────────────────────
-  // ─────────────────────────────────────────────
-  // .extract — Owner Only
-  // ─────────────────────────────────────────────
+  
+  
+  
+  
+  
   if (/^\.extract(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     if (isDM) { replyUser(msg, "❌ use this in a server, dumbass.").catch(() => {}); return; }
@@ -6847,7 +6195,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       const buf = await downloadURL(sourceFile.url);
       let files;
       if (isHtmlFile(sourceFile.name, sourceFile.contentType)) {
-        // Standalone HTML — extract ALL embedded scripts / code / base64 + original
+        
         files = extractFilesFromHtml(buf, sourceFile.name);
       } else {
         files = extractFilesFromZip(buf);
@@ -6888,11 +6236,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
-  // ─────────────────────────────────────────────
-  // ─────────────────────────────────────────────
-  // ─────────────────────────────────────────────
-  // .upload — file → Pastefy loadstring (regular + buyer)
-  // ─────────────────────────────────────────────
   if (/^\.upload(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
@@ -6961,8 +6304,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-
-  // .clean / .cl — multi-file pick (max 10) → Clean V1 / V2
   if (/^\.(?:clean|cl)$/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
@@ -6981,7 +6322,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     let files = await getScriptAttachmentsFromMsgOrReply(msg);
     if (files.length > 10) files = files.slice(0, 10);
 
-    // no attachments → fall back to URL / codeblock single source
     if (!files.length) {
       let resolved = null;
       try { resolved = await resolveScriptInput(msg, txt); } catch (e) {
@@ -6992,7 +6332,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         await sendRenameInputError(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply / forward a sample.");
         return;
       }
-      // single source → V1/V2 panel
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Success)
@@ -7019,7 +6358,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
 
-    // 1 file → skip picker, go to V1/V2
     if (files.length === 1) {
       const body = await downloadAttachmentText(files[0]);
       if (!body) {
@@ -7052,7 +6390,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       return;
     }
 
-    // 2–10 files → numbered gray buttons
     try {
       const panelMsg = await sendFilePickPanel(msg, {
         prefix: "cleanfile",
@@ -7084,110 +6421,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .detect — threat scan (multi-file pick max 10) — no .dt alias
-  if (/^\.detect(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    const cd = checkCommandCooldown(msg.author.id, "detect", perm.isBuyer);
-    if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
-    }
-
-    let files = await getScriptAttachmentsFromMsgOrReply(msg);
-    if (files.length > 10) files = files.slice(0, 10);
-
-    const runDetect = async (code) => {
-      const loadingPayload = {
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: RENAME_V2_ACCENT,
-          components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
-        }]
-      };
-      const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
-      try {
-        if (!code || !String(code).trim()) throw new Error("could not read file");
-        const result = detectThreatAnalysis(code);
-        const body =
-          `## Detected: ${result.title}\n` +
-          `-# What it does:\n\n` +
-          "```" + result.description + "```";
-        if (loadingMsg) await loadingMsg.delete().catch(() => {});
-        pendingTokenLine.delete(String(msg.author.id));
-        await replyComponentsV2(msg, {
-          flags: IS_COMPONENTS_V2,
-          components: [{
-            type: 17,
-            accent_color: result.color,
-            components: [{ type: 10, content: body.slice(0, 3900) }]
-          }]
-        }, { mention: false }).catch(() => {});
-      } catch (e) {
-        if (loadingMsg) await loadingMsg.delete().catch(() => {});
-        await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
-      }
-    };
-
-    if (!files.length) {
-      let resolved = null;
-      try { resolved = await resolveScriptInput(msg, txt); } catch (e) {
-        await sendInputErrorV2(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
-        return;
-      }
-      if (!resolved?.content) {
-        await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply / forward a sample.").catch(() => {});
-        return;
-      }
-      await runDetect(resolved.content);
-      return;
-    }
-
-    if (files.length === 1) {
-      const body = await downloadAttachmentText(files[0]);
-      if (!body) {
-        await sendInputErrorV2(msg, "Couldn't read that file (link expired or invalid).").catch(() => {});
-        return;
-      }
-      await runDetect(body);
-      return;
-    }
-
-    try {
-      const panelMsg = await sendFilePickPanel(msg, {
-        prefix: "detectfile",
-        userId: msg.author.id,
-        files,
-        listLabel: "detect"
-      });
-      if (panelMsg?.id) {
-        detectSessions.set(panelMsg.id, {
-          authorId: msg.author.id,
-          files: files.map(f => ({
-            name: f.name || f.filename || "file",
-            url: f.url,
-            proxyURL: f.proxyURL || f.proxy_url,
-            proxy_url: f.proxy_url || f.proxyURL
-          })),
-          at: Date.now()
-        });
-        if (detectSessions.size > 80) {
-          const cutoff = Date.now() - 30 * 60 * 1000;
-          for (const [k, v] of detectSessions) {
-            if (!v?.at || v.at < cutoff) detectSessions.delete(k);
-          }
-        }
-      }
-    } catch (e) {
-      await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
-    }
-    return;
-  }
-
-  // .get — regular: 1 ID max, buyer: up to 10 IDs
   if (/^\.get(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
@@ -7226,7 +6459,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1509484518766018711/1561710834344923247 — so you can use mutiple ID.").catch(() => {});
       return;
     }
-    // Send in batches of 10 (Discord file limit per message)
+    
     for (let i = 0; i < filesToSend.length; i += 10) {
       const batch = filesToSend.slice(i, i + 10);
       const content = i === 0
@@ -7240,8 +6473,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // .copy — Owner Only: copy roles/categories/channels from one server into another
-  // Usage: .copy <source_server_id> <dest_server_id>
+  
+  
   if (/^\.copy(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) { replyUser(msg, "❌ owner only, dumbass.").catch(() => {}); return; }
     const ids = txt.match(/\d{17,20}/g) || [];
@@ -7267,8 +6500,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         throw new Error("bot needs Manage Channels / Admin on dest server");
       }
 
-      // --- Roles (lowest first so hierarchy is preserved) ---
-      const roleMap = new Map(); // oldRoleId -> newRole
+      
+      const roleMap = new Map(); 
       roleMap.set(srcGuild.id, dstGuild.roles.everyone);
       const srcRoles = [...srcGuild.roles.cache.values()]
         .filter(r => r.id !== srcGuild.id && !r.managed)
@@ -7291,12 +6524,12 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         }
       }
 
-      // --- Categories then channels ---
-      const chMap = new Map(); // oldChannelId -> newChannel
+      
+      const chMap = new Map(); 
       const allCh = [...srcGuild.channels.cache.values()].sort((a, b) => {
         const ap = a.parentId ? 1 : 0;
         const bp = b.parentId ? 1 : 0;
-        if (ap !== bp) return ap - bp; // parents (categories) first
+        if (ap !== bp) return ap - bp; 
         return (a.rawPosition ?? a.position ?? 0) - (b.rawPosition ?? b.position ?? 0);
       });
 
@@ -7307,13 +6540,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
             const target = ow.id === srcGuild.id
               ? dstGuild.id
               : (roleMap.get(ow.id)?.id || null);
-            // skip member-specific overwrites we can't map
+            
             if (!target) continue;
             out.push({
               id: target,
               allow: ow.allow?.bitfield ?? ow.allow,
               deny: ow.deny?.bitfield ?? ow.deny,
-              type: 0 // role
+              type: 0 
             });
           } catch {}
         }
@@ -7321,7 +6554,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       };
 
       let catsOk = 0, chOk = 0;
-      // Pass 1: categories
+      
       for (const ch of allCh) {
         if (ch.type !== ChannelType.GuildCategory) continue;
         try {
@@ -7338,7 +6571,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
           console.warn("⚠️ copy category", ch.name, e.message);
         }
       }
-      // Pass 2: channels
+      
       for (const ch of allCh) {
         if (ch.type === ChannelType.GuildCategory) continue;
         try {
@@ -7356,7 +6589,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
             permissionOverwrites: mapOverwrites(ch.permissionOverwrites),
             reason: `copy from ${srcGuild.id}`
           };
-          // Only create channel types the API allows commonly
+          
           if (![
             ChannelType.GuildText,
             ChannelType.GuildVoice,
@@ -7364,7 +6597,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
             ChannelType.GuildStageVoice,
             ChannelType.GuildForum
           ].includes(ch.type) && ch.type !== 0 && ch.type !== 2 && ch.type !== 5) {
-            // try anyway for unknown numeric types that might still work
+            
           }
           const created = await dstGuild.channels.create(opts);
           chMap.set(ch.id, created);
@@ -7391,7 +6624,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .renew — Owner Only: silent fast clone at the SAME position under the same category
+  
   if (/^\.renew(?:\s|$)/i.test(txt)) {
     if (!isOwner(msg.author.id)) return;
     if (!msg.guild || !msg.channel || msg.channel.isDMBased?.()) return;
@@ -7399,7 +6632,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     if (!ch.isTextBased?.() || ch.isThread?.()) return;
     try {
       const parentId = ch.parentId || null;
-      // position among siblings (what Discord uses for channel order)
+      
       const siblings = [...msg.guild.channels.cache.values()]
         .filter(c => !c.isThread?.() && (c.parentId || null) === parentId)
         .sort((a, b) => (a.rawPosition ?? a.position ?? 0) - (b.rawPosition ?? b.position ?? 0));
@@ -7419,7 +6652,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         reason: `renew:${msg.author.id}`
       });
 
-      // Restore parent + metadata before deleting the old channel
+      
       try {
         const edit = {};
         if (parentId) edit.parent = parentId;
@@ -7430,10 +6663,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         if (Object.keys(edit).length) await cloned.edit(edit).catch(() => {});
       } catch {}
 
-      // Delete old first so the slot is free, then snap clone into exact order
+      
       await ch.delete(`renew:${msg.author.id}`).catch(() => {});
 
-      // setPosition uses relative order among channels under the same parent
+      
       try {
         await cloned.setPosition(savedPosition, { reason: `renew-pos:${msg.author.id}` });
       } catch {
@@ -7450,7 +6683,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     return;
   }
-  // .leaderboard — top command users (no .lb alias)
+  
   if (/^\.leaderboard(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
@@ -7486,45 +6719,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  // .coinflip — win or lose 1 token (regular users)
-  if (/^\.coinflip(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
-    if (!perm.allowed) {
-      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
-    }
-    if (perm.isBuyer || isOwner(msg.author.id)) {
-      replyUser(msg, "❌ premium already has unlimited tokens, no need to flip.").catch(() => {});
-      return;
-    }
-    const peek = peekTokens(msg.author.id, false);
-    if (peek.tokens <= 0) {
-      const waitUntil = peek.nextRefillAt || getNextMidnightPHMs();
-      replyNoTokens(msg, waitUntil).catch(() => {});
-      return;
-    }
-    // Cost -1 token to play; win gives +2 tokens
-    const spent = tryConsumeToken(msg.author.id, false);
-    if (!spent.ok) {
-      replyNoTokens(msg, spent.waitUntil).catch(() => {});
-      return;
-    }
-    const win = Math.random() < 0.5;
-    let finalTokens = spent.tokens;
-    if (win) {
-      finalTokens = addToken(msg.author.id, 2); // +2 reward after -1 cost
-    }
-    const embed = new EmbedBuilder()
-      .setColor(win ? 0x57F287 : 0xED4245)
-      .setTitle(win ? "🪙 You won!" : "🪙 You lost!")
-      .setDescription(
-        win
-          ? `Heads! You **won +2 tokens** (cost was −1).\n\n${tokenLeftLine(finalTokens, false)}`
-          : `Tails! You **lost 1 token**.\n\n${tokenLeftLine(finalTokens, false)}`
-      );
-    replyUser(msg, { embeds: [embed] }).catch(() => {});
-    return;
-  }
-  // .find
   if (/^\.find(?:\s|$)/i.test(txt)) {
 
     const perm = await checkRegularPermission(msg, false);
@@ -7543,7 +6737,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const isBuyerUser = perm.isBuyer;
     const perPage = 8; const totalPages = Math.ceil(results.length / perPage);
     const pageItems = results.slice(0, perPage);
-    // Finder source — Components V2 (never show tokens left)
     const listLines = pageItems.map(f => `> \`${finderDisplayName(f.filename)}\` — ID: \`${f.id}\``);
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
@@ -7567,9 +6760,6 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     console.error("❌ messageCreate:", e?.message || e);
   }
 });
-// ============================================================
-// EXPRESS SERVER
-// ============================================================
 const app = express();
 app.get("/", (req, res) => res.status(200).send(isReady ? "✅ ONLINE" : "⏳ Starting..."));
 app.get("/health", (req, res) => res.status(200).json({
