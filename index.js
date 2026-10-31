@@ -2793,9 +2793,13 @@ function findFiles(query) {
   return library.files
     .filter(file => {
       const name = normalize(file.filename);
-      // every search token must appear in the file name (e.g. "jet" → only names containing "jet")
-      if (tokens.length) return tokens.every(tok => name.includes(tok));
-      return name.includes(query);
+      // token must appear as a whole word (space-bounded): "jet" → "jet hub", not "projectile"
+      const hasTok = (tok) => {
+        const padded = " " + name + " ";
+        return padded.includes(" " + tok + " ");
+      };
+      if (tokens.length) return tokens.every(hasTok);
+      return hasTok(query);
     })
     .map(file => {
       const name = normalize(file.filename);
@@ -3380,13 +3384,42 @@ function cleanLuaV2(text) {
   let out = cleanLuaForRename(String(text || ""));
   try {
     out = out.replace(/^\uFEFF/, "").replace(/\0/g, "");
+
+    // Remove remote loadstring / HttpGet loader blocks (like Jet Hub style)
+    // local ok, src = pcall(function() return game:HttpGet(...) end)
+    // if ok ... loadstring(src) ... end
+    out = out.replace(
+      /local\s+[\w,\s]+\s*=\s*pcall\s*\(\s*function\s*\(\s*\)\s*[\s\S]*?game\s*:\s*HttpGet[\s\S]*?end\s*\)\s*(?:if\s+[\s\S]*?loadstring[\s\S]*?end\s*)?/gi,
+      ""
+    );
+    out = out.replace(
+      /pcall\s*\(\s*function\s*\(\s*\)\s*[\s\S]{0,400}?game\s*:\s*HttpGet[\s\S]{0,200}?end\s*\)\s*/gi,
+      ""
+    );
+    out = out.replace(
+      /if\s+[\w\s]+and\s+type\s*\(\s*\w+\s*\)\s*==\s*["']string["'][\s\S]{0,120}?loadstring\s*\(\s*\w+\s*\)[\s\S]{0,200}?end\s*(?:end)?/gi,
+      ""
+    );
+    out = out.replace(/\blocal\s+fn\s*=\s*loadstring\s*\(\s*\w+\s*\)\s*/gi, "");
+    out = out.replace(/\bif\s+type\s*\(\s*fn\s*\)\s*==\s*["']function["']\s+then\s*pcall\s*\(\s*fn\s*\)\s*end/gi, "");
+    out = out.replace(/\bloadstring\s*\(\s*(?:game\s*:\s*HttpGet|HttpGet)[\s\S]*?\)\s*(?:\(\s*\))?/gi, "");
+    out = out.replace(/\bgame\s*:\s*HttpGet\s*\(\s*[^)]+\)/gi, "");
+    out = out.replace(/\b(?:loadstring|load)\s*\(\s*[^)]{0,200}\)\s*(?:\(\s*\))?/gi, (m) => {
+      const s = m[0];
+      // keep harmless local string loads of short literals only
+      if (/loadstring\s*\(\s*["'][^"']{0,40}["']\s*\)/.test(s)) return s;
+      return "";
+    });
+
     out = out.split("\n").filter(line => {
-      const t = line.trim();
-      if (!t) return true;
-      if (/^::\w+::$/.test(t)) return false;
-      if (/^\d+\s*$/.test(t)) return false;
+      const tr = line.trim();
+      if (!tr) return true;
+      if (/^::\w+::$/.test(tr)) return false;
+      if (/^\d+\s*$/.test(tr)) return false;
+      if (/\bloadstring\s*\(/.test(tr) && /HttpGet|HttpService|request|syn\.request/i.test(tr)) return false;
       return true;
     }).join("\n");
+
     out = out.replace(/[^\S\n]+$/gm, "");
     out = out.replace(/\n{3,}/g, "\n\n").trim() + "\n";
   } catch {}
@@ -4443,14 +4476,14 @@ function obfuscateLua(source) {
 const commands = [
   new SlashCommandBuilder()
     .setName("say")
-    .setDescription("Send message — Owner Only.")
+    .setDescription("Send a message here.")
     .addStringOption(o => o
       .setName("text")
       .setDescription("Message content.")
       .setRequired(true))
     .addStringOption(o => o
       .setName("type")
-      .setDescription("Message style.")
+      .setDescription("Choose what message you want to sent.")
       .setRequired(true)
       .addChoices(
         { name: "With Embed", value: "good" },
@@ -4459,28 +4492,28 @@ const commands = [
       ))
     .addStringOption(o => o
       .setName("title")
-      .setDescription("Optional embed title.")
+      .setDescription("Embed title.")
       .setRequired(false))
     .addStringOption(o => o
       .setName("footer")
-      .setDescription("Optional embed footer (omit for no footer).")
+      .setDescription("Embed footer.")
       .setRequired(false))
     .addStringOption(o => o
       .setName("color")
-      .setDescription("Optional embed color hex (e.g. #5865F2 or blurple).")
+      .setDescription("Embed color.")
       .setRequired(false))
     .addAttachmentOption(o => o
       .setName("image")
-      .setDescription("Optional image (shown below divider on Embed V2).")
+      .setDescription("Attach a image if you want.")
       .setRequired(false))
     .addAttachmentOption(o => o
       .setName("file")
-      .setDescription("Optional file attachment (no divider).")
+      .setDescription("Attach a file if you want.")
       .setRequired(false))
     .toJSON(),
   new SlashCommandBuilder()
     .setName("finderpanel")
-    .setDescription("Post Finder Source Panel — Owner Only.")
+    .setDescription("Post the Finder Panel here.")
     .toJSON(),
   new SlashCommandBuilder()
     .setName("login")
@@ -4504,10 +4537,10 @@ const commands = [
     .toJSON(),
   new SlashCommandBuilder()
     .setName("blacklist")
-    .setDescription("Manage command blacklist — Owner Only.")
+    .setDescription("Open the blacklist config.")
     .addStringOption(o => o
       .setName("mode")
-      .setDescription("Add, Remove, or List")
+      .setDescription("Choose what you want.")
       .setRequired(true)
       .addChoices(
         { name: "Add", value: "add" },
@@ -4516,15 +4549,15 @@ const commands = [
       ))
     .addUserOption(o => o
       .setName("user")
-      .setDescription("User to add/remove (required for Add/Remove)")
+      .setDescription("The user you want to blacklist or remove.")
       .setRequired(false))
     .toJSON(),
   new SlashCommandBuilder()
     .setName("whitelist")
-    .setDescription("Whitelist users for /forward — Owner Only.")
+    .setDescription("Whitelist a user.")
     .addStringOption(o => o
       .setName("mode")
-      .setDescription("Add, Remove, or List")
+      .setDescription("Choose what you want.")
       .setRequired(true)
       .addChoices(
         { name: "Add", value: "add" },
@@ -4533,11 +4566,11 @@ const commands = [
       ))
     .addUserOption(o => o
       .setName("user")
-      .setDescription("User (mention / pick)")
+      .setDescription("The user you want to whitelist or remove.")
       .setRequired(false))
     .addStringOption(o => o
       .setName("id")
-      .setDescription("User ID or username (if not using user picker)")
+      .setDescription("User ID or Username.")
       .setRequired(false))
     .toJSON()
 ].map(c => c);
@@ -4645,7 +4678,7 @@ const helpPages = [
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.detect\`** Detect IP logger / script loader / webhook / safe.
+`**\`.detect\`** Detect a risk in the file.
 
 **\`.upload\`** Turn your file into Script Loader.
 
@@ -4672,7 +4705,7 @@ const helpPages = [
 const helpSessions = new Map();
 
 const helpPageBodies = [
-  { color: 0x5865F2, text: `**\`.detect\`** Detect IP logger / script loader / webhook / safe.
+  { color: 0x5865F2, text: `**\`.detect\`** Detect a risk in the file.
 
 **\`.upload\`** Turn your file into Script Loader.
 
@@ -4874,7 +4907,8 @@ RULES:
 - Remove all obfuscation, junk code, fake control flows, and useless variables.
 - Keep the EXACT original logic and functionality - do not add or remove features.
 - Format the code with proper indentation and newlines.
-- Rename obfuscated variables (like _G, a1, lIlI) to meaningful names (player, config, etc) where possible.
+- Do NOT rename variables. Keep original variable and function names exactly as they are.
+- Remove any loadstring / game:HttpGet remote loader blocks that fetch and execute external code.
 - Convert to clean, readable, vanilla Lua (Luau compatible if it's Roblox).
 - Remove all comments or text/word that are not valid Lua or that cause of syntax errors.
 - Do not explain. Output ONLY the cleaned Lua code in a lua code block.`;
@@ -5685,13 +5719,13 @@ client.on("interactionCreate", async interaction => {
           type: 17,
           accent_color: FINDER_V2_ACCENT,
           components: [
-            { type: 10, content: "### Finder Panel\nThis panel is only for where you can find old source that you can’t find." },
+            { type: 10, content: "## Finder Panel\nThis control panel is for **Finder Panel**.\nIf you’re using server tag click the button below or if you got a key click the redeem." },
             { type: 14, spacing: SEPARATOR_SPACING_SMALL },
             panelRow.toJSON()
           ]
         }]
       });
-      await interaction.editReply({ content: "✅ Finder Source Panel posted." });
+      await interaction.editReply({ content: "Posted..." });
       return;
     }
     
