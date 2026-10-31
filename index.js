@@ -619,6 +619,7 @@ function formatCooldown(remainingSec) {
 
 const pendingTokenLine = new Map(); 
 const pendingTagRetry = new Map(); 
+const detectSessions = new Map();
 const cleanSessions = new Map(); 
 
 function tokensResultSuffix(isBuyerUser, tokensLeft) {
@@ -1888,6 +1889,98 @@ async function fetchTextFromUrl(url) {
   return text;
 }
 
+
+function detectThreatAnalysis(code) {
+  const raw = String(code || "");
+  const lines = raw.split(/\r?\n/);
+  const lowerAll = raw.toLowerCase();
+
+  const IP_DOMAINS = [
+    "iplogger", "grabify", "blasze", "ipgrabber", "ip-logger", "ipify.org",
+    "ipinfo.io", "ip-api.com", "icanhazip", "ifconfig.me", "checkip.amazonaws",
+    "wtfismyip", "ipgeolocation", "freegeoip", "myip.com", "whatismyip",
+    "grabify.link", "2no.co", "yip.su", "ps3cfw.com"
+  ];
+
+  const findLine = (testFn) => {
+    for (let i = 0; i < lines.length; i++) {
+      try {
+        if (testFn(lines[i], i)) return i + 1;
+      } catch {}
+    }
+    return null;
+  };
+
+  const lineIp = findLine((line) => {
+    const l = line.toLowerCase();
+    return IP_DOMAINS.some(d => l.includes(d)) || /https?:\/\/[^\s"'`]*?(?:ip\s*log|grabify|blasze|iplog)/i.test(line);
+  });
+
+  const webhookRe = /https?:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/i;
+  const lineWh = findLine((line) => webhookRe.test(line));
+  const stealHints = /cookie|token|password|pass\b|account|session|robloxsecurity|\.roblosecurity|authorization|steal|exfil|webhook.*send/i;
+  const webhookMalicious = lineWh != null && stealHints.test(raw);
+  const webhookBenign = lineWh != null && !stealHints.test(raw);
+
+  const loaderPatterns = [
+    /loadstring\s*\(\s*(?:game:GetService\s*\(\s*["']HttpService["']\s*\)\s*:)?HttpGet/i,
+    /loadstring\s*\(\s*(?:syn|http|fluxus|request)?[\s\S]{0,40}HttpGet/i,
+    /(?:loadstring|load)\s*\(\s*(?:game:HttpGet|http(?:s)?\.get|request\s*\()/i,
+    /HttpGet\s*\(\s*["']https?:\/\//i,
+    /syn\.request\s*\(\s*\{[\s\S]*?Url\s*=\s*["']https?:\/\//i,
+    /(?:getgenv|getrenv|getfenv).*loadstring/i,
+  ];
+  const lineLoader = findLine((line) => loaderPatterns.some(re => re.test(line)));
+  const loaderCritical = lineLoader != null && (lineWh != null || lineIp != null || /malware|backdoor|steal|keylog/i.test(raw));
+
+  if (lineIp != null) {
+    return {
+      title: "IP Logger",
+      color: 0xED4245,
+      line: lineIp,
+      description: "What it does:\n\nA link/URL that steals the target’s IP address, location, device info, and ISP when clicked. Used for doxxing, DDoS attacks, or harassment. Common in Discord DMs, fake \"free nitro\" links, or Roblox game \"asset links\"."
+    };
+  }
+  if (webhookMalicious) {
+    return {
+      title: "Discord Webhook",
+      color: 0xF26522,
+      line: lineWh,
+      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
+    };
+  }
+  if (loaderCritical) {
+    return {
+      title: "Script Loader",
+      color: 0xED4245,
+      line: lineLoader,
+      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
+    };
+  }
+  if (lineLoader != null) {
+    return {
+      title: "Script Loader",
+      color: 0xF26522,
+      line: lineLoader,
+      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
+    };
+  }
+  if (webhookBenign) {
+    return {
+      title: "Discord Webhook",
+      color: 0x5865F2,
+      line: lineWh,
+      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
+    };
+  }
+  return {
+    title: "Safe",
+    color: 0x57F287,
+    line: null,
+    description: "A clean file with no Script Loader, no IP Logger, no stealing Webhook. It will not download hidden malware, log your IP/location, or steal your Roblox cookie, account, or private data."
+  };
+}
+
 async function downloadAttachmentText(file) {
   if (!file) return null;
   const tryUrls = [file.url, file.proxyURL, file.proxy_url].filter(Boolean);
@@ -2698,19 +2791,25 @@ function findFiles(query) {
   const seenNames = new Set();
   purgeUnavailableFromLibrary();
   return library.files
+    .filter(file => {
+      const name = normalize(file.filename);
+      // every search token must appear in the file name (e.g. "jet" → only names containing "jet")
+      if (tokens.length) return tokens.every(tok => name.includes(tok));
+      return name.includes(query);
+    })
     .map(file => {
-    const name = normalize(file.filename);
-    let score = 0;
-    if (name === query) score += 5000;
-    if (name.startsWith(query)) score += 2000;
-    if (name.includes(query)) score += 1000;
-    for (const token of tokens) {
-      if (name === token) score += 500;
-      else if (name.startsWith(token)) score += 200;
-      else if (name.includes(token)) score += 100;
-    }
-    return { file, score };
-  }).filter(item => item.score > 0)
+      const name = normalize(file.filename);
+      let score = 0;
+      if (name === query) score += 5000;
+      else if (name.startsWith(query)) score += 2000;
+      else if (name.includes(query)) score += 1000;
+      for (const token of tokens) {
+        if (name === token) score += 500;
+        else if (name.startsWith(token)) score += 200;
+        else if (name.includes(token)) score += 100;
+      }
+      return { file, score };
+    })
     .sort((a, b) => b.score - a.score)
     .filter(item => {
       const normName = normalize(item.file.filename);
@@ -4546,17 +4645,19 @@ const helpPages = [
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.upload\`** Turn your file into Script Loader.
+`**\`.detect\`** Detect IP logger / script loader / webhook / safe.
 
-**\`.get\`** Get file using ID.
+**\`.upload\`** Turn your file into Script Loader.
 
-**\`.find\`** Search files by name.`
+**\`.get\`** Get file using ID.`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.leaderboard\`** Top command users.`
+`**\`.find\`** Search files by name.
+
+**\`.leaderboard\`** Top command users.`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
@@ -4571,12 +4672,14 @@ const helpPages = [
 const helpSessions = new Map();
 
 const helpPageBodies = [
-  { color: 0x5865F2, text: `**\`.upload\`** Turn your file into Script Loader.
+  { color: 0x5865F2, text: `**\`.detect\`** Detect IP logger / script loader / webhook / safe.
 
-**\`.get\`** Get file using ID.
+**\`.upload\`** Turn your file into Script Loader.
 
-**\`.find\`** Search files by name.` },
-  { color: 0x5865F2, text: `**\`.leaderboard\`** Top command users.` },
+**\`.get\`** Get file using ID.` },
+  { color: 0x5865F2, text: `**\`.find\`** Search files by name.
+
+**\`.leaderboard\`** Top command users.` },
   { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Clean a script.
 
 > Premium users can use all commands in DMs.
@@ -4672,6 +4775,62 @@ client.on("interactionCreate", async interaction => {
   }
 
   
+    if (interaction.customId.startsWith("detectfile_")) {
+    const parts = interaction.customId.split("_");
+    const idx = parseInt(parts[1], 10);
+    const ownerId = parts.slice(2).join("_");
+    if (interaction.user.id !== ownerId) {
+      return interaction.reply({ content: "❌ not yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const session = detectSessions.get(interaction.message.id);
+    if (!session || String(session.authorId) !== String(ownerId) || !Array.isArray(session.files)) {
+      return interaction.reply({ content: "❌ panel expired — run `.detect` again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const fileMeta = session.files[idx - 1];
+    if (!fileMeta) {
+      return interaction.reply({ content: "❌ invalid file number.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    detectSessions.delete(interaction.message.id);
+    try {
+      await interaction.update({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
+        }]
+      });
+    } catch { try { await interaction.deferUpdate(); } catch {} }
+
+    try {
+      const body = await downloadAttachmentText(fileMeta);
+      if (!body) {
+        await interaction.followUp({ content: "❌ couldn't read that file.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        try { await interaction.message.delete().catch(() => {}); } catch {}
+        return;
+      }
+      const result = detectThreatAnalysis(body);
+      const textBody =
+        `## Detected: ${result.title}\n` +
+        (result.line != null ? `**Line: ${result.line}**\n` : "") +
+        `-# What it does:\n\n` +
+        "```" + result.description + "```";
+      await interaction.channel.send({
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: result.color,
+          components: [{ type: 10, content: textBody.slice(0, 3900) }]
+        }],
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
+      try { await interaction.message.delete().catch(() => {}); } catch {}
+    } catch (e) {
+      await interaction.followUp({ content: "❌ " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    return;
+  }
+
   if (interaction.customId.startsWith("clean_v1_") || interaction.customId.startsWith("clean_v2_")) {
     const isV2 = interaction.customId.startsWith("clean_v2_");
     const ownerId = interaction.customId.replace(/^clean_v[12]_/, "");
@@ -6417,6 +6576,104 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       }
     } catch (e) {
       await sendRenameInputError(msg, `Failed: ${String(e.message || e).slice(0, 120)}`);
+    }
+    return;
+  }
+
+  if (/^\.detect(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false);
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    const cd = checkCommandCooldown(msg.author.id, "detect", perm.isBuyer);
+    if (cd.onCooldown) {
+      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+    }
+
+    let files = await getScriptAttachmentsFromMsgOrReply(msg);
+    if (files.length > 10) files = files.slice(0, 10);
+
+    const runDetect = async (code) => {
+      const loadingPayload = {
+        flags: IS_COMPONENTS_V2,
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [{ type: 10, content: "### Detecting...\n⏳ Processing..." }]
+        }]
+      };
+      const loadingMsg = await replyComponentsV2(msg, loadingPayload, { mention: false }).catch(() => null);
+      try {
+        if (!code || !String(code).trim()) throw new Error("could not read file");
+        const result = detectThreatAnalysis(code);
+        let body =
+          `## Detected: ${result.title}\n` +
+          (result.line != null ? `**Line: ${result.line}**\n` : "") +
+          `-# What it does:\n\n` +
+          "```" + result.description + "```";
+        if (loadingMsg) await loadingMsg.delete().catch(() => {});
+        pendingTokenLine.delete(String(msg.author.id));
+        await replyComponentsV2(msg, {
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: result.color,
+            components: [{ type: 10, content: body.slice(0, 3900) }]
+          }]
+        }, { mention: false }).catch(() => {});
+      } catch (e) {
+        if (loadingMsg) await loadingMsg.delete().catch(() => {});
+        await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
+      }
+    };
+
+    if (!files.length) {
+      let resolved = null;
+      try { resolved = await resolveScriptInput(msg, txt); } catch (e) {
+        await sendInputErrorV2(msg, `Couldn't read source: ${String(e.message || e).slice(0, 100)}`).catch(() => {});
+        return;
+      }
+      if (!resolved?.content) {
+        await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or a code block, or reply / forward a sample.").catch(() => {});
+        return;
+      }
+      await runDetect(resolved.content);
+      return;
+    }
+
+    if (files.length === 1) {
+      const body = await downloadAttachmentText(files[0]);
+      if (!body) {
+        await sendInputErrorV2(msg, "Couldn't read that file (link expired or invalid).").catch(() => {});
+        return;
+      }
+      await runDetect(body);
+      return;
+    }
+
+    // multi-file: pick first for simplicity (or run on all sequentially)
+    try {
+      const panelMsg = await sendFilePickPanel(msg, {
+        prefix: "detectfile",
+        userId: msg.author.id,
+        files,
+        listLabel: "detect"
+      });
+      if (panelMsg?.id) {
+        detectSessions.set(panelMsg.id, {
+          authorId: msg.author.id,
+          files: files.map(f => ({
+            name: f.name || f.filename || "file",
+            url: f.url,
+            proxyURL: f.proxyURL || f.proxy_url,
+            proxy_url: f.proxy_url || f.proxyURL
+          })),
+          at: Date.now()
+        });
+      }
+    } catch (e) {
+      await sendInputErrorV2(msg, `Failed: ${String(e.message || e).slice(0, 120)}`).catch(() => {});
     }
     return;
   }
