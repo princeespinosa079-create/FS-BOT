@@ -4970,11 +4970,11 @@ RULES:
         const fileBuf = Buffer.from(fileOutput, "utf-8");
         
         try {
-          const ch = interaction.channel;
           const safeName = String(outputName).replace(/[^\w.\-]+/g, "_");
           const file = new AttachmentBuilder(fileBuf, { name: safeName });
-          await ch.send({
-            flags: IS_COMPONENTS_V2,
+          const eph = (MessageFlags && MessageFlags.Ephemeral != null) ? MessageFlags.Ephemeral : 64;
+          const resultPayload = {
+            flags: IS_COMPONENTS_V2 | eph,
             files: [file],
             components: [{
               type: 17,
@@ -4984,9 +4984,14 @@ RULES:
                 { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
                 { type: 13, file: { url: "attachment://" + safeName } }
               ]
-            }],
-            allowedMentions: { repliedUser: false, parse: [] }
-          });
+            }]
+          };
+          // Always private: edit the ephemeral panel, else ephemeral followUp
+          try {
+            await interaction.editReply(resultPayload);
+          } catch {
+            await interaction.followUp(resultPayload);
+          }
           try {
             const ver = isV2 ? "Clean V2" : "Clean V1";
             const src = session.fromName ? String(session.fromName).slice(0, 80) : "script";
@@ -4998,8 +5003,6 @@ RULES:
             flags: MessageFlags.Ephemeral
           }).catch(() => {});
         }
-        
-        try { await interaction.message.delete().catch(() => {}); } catch {}
       } catch (e) {
         console.warn("⚠️ clean button:", e.message);
         await interaction.followUp({
