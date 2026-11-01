@@ -36,7 +36,7 @@ const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
 const REGULAR_COLOR = 0x2B2D31; 
 const BLURPLE = 0x5865F2;
-const CLEAN_BY_PRINCE_HEADER = "-- Clean by Prince﹘.gg/freesource"; 
+const CLEAN_BY_PRINCE_HEADER = "-- Clean by Prince|.gg/freesource"; 
 const GRAY_COLOR = 0x99AAB5; 
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
@@ -5310,6 +5310,34 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
     return interaction.showModal(modal).catch(() => {});
   }
+
+  if (interaction.customId === "finderpanel_clean") {
+    if (isBlacklisted(interaction.user.id) && !isOwner(interaction.user.id)) {
+      try { await interaction.deferUpdate(); } catch {}
+      return;
+    }
+    try {
+      const modal = new ModalBuilder()
+        .setCustomId("finderpanel_clean_modal_paste")
+        .setTitle("Upload Lua file");
+      const input = new TextInputBuilder()
+        .setCustomId("clean_paste")
+        .setLabel("Paste Lua code or file URL")
+        .setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder("Paste script text or a direct .lua/.txt URL (max 5MB)")
+        .setRequired(true)
+        .setMaxLength(4000);
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      await interaction.showModal(modal);
+    } catch (e) {
+      return interaction.reply({
+        content: "❌ could not open clean form: " + String(e.message || e).slice(0, 100),
+        flags: MessageFlags.Ephemeral
+      }).catch(() => {});
+    }
+    return;
+  }
+
   if (interaction.customId === "finderpanel_find" || interaction.customId === "finderpanel_get") {
     const uid = interaction.user.id;
     
@@ -5350,55 +5378,6 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
         }).catch(() => {});
       }
     }
-    if (interaction.customId === "finderpanel_clean") {
-      if (isBlacklisted(interaction.user.id) && !isOwner(interaction.user.id)) {
-        try { await interaction.deferUpdate(); } catch {}
-        return;
-      }
-      // Modal with file upload (Discord Label + File Upload) — max 5MB enforced on submit
-      try {
-        await interaction.showModal({
-          custom_id: "finderpanel_clean_modal",
-          title: "Upload Lua file",
-          components: [
-            {
-              type: 18,
-              label: "Lua file",
-              description: "Upload one source file to clean. Max 5 MB.",
-              component: {
-                type: 19,
-                custom_id: "clean_upload_file",
-                required: true,
-                min_values: 1,
-                max_values: 1
-              }
-            }
-          ]
-        });
-      } catch (e) {
-        // Fallback if file-upload modal unsupported: paste code
-        try {
-          const modal = new ModalBuilder()
-            .setCustomId("finderpanel_clean_modal_paste")
-            .setTitle("Upload Lua file");
-          const input = new TextInputBuilder()
-            .setCustomId("clean_paste")
-            .setLabel("Paste Lua / URL (max ~5MB worth)")
-            .setStyle(TextInputStyle.Paragraph)
-            .setRequired(true)
-            .setMaxLength(4000);
-          modal.addComponents(new ActionRowBuilder().addComponents(input));
-          await interaction.showModal(modal);
-        } catch (e2) {
-          return interaction.reply({
-            content: "❌ could not open clean form: " + String(e2.message || e.message || e2).slice(0, 100),
-            flags: MessageFlags.Ephemeral
-          }).catch(() => {});
-        }
-      }
-      return;
-    }
-
     if (interaction.customId === "finderpanel_find") {
       const modal = new ModalBuilder()
         .setCustomId("finderpanel_find_modal")
