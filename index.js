@@ -214,12 +214,44 @@ function parseChannelIdArg(raw) {
   return id ? id[1] : null;
 }
 
-function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, statusEdit }) {
+const forwardJobs = new Map();
+
+function getRetryAfterMs(err) {
+  try {
+    if (err?.retryAfter != null) {
+      const v = Number(err.retryAfter);
+      return v < 100 ? Math.ceil(v * 1000) : Math.ceil(v);
+    }
+  } catch {}
+  try {
+    const ra = err?.data?.retry_after ?? err?.rawError?.retry_after ?? err?.body?.retry_after;
+    if (ra != null) {
+      const v = Number(ra);
+      return v < 100 ? Math.ceil(v * 1000) : Math.ceil(v);
+    }
+  } catch {}
+  const msg = String(err?.message || err || "");
+  const m = msg.match(/retry.?after[:\s]*([\d.]+)/i);
+  if (m) {
+    const v = parseFloat(m[1]);
+    return v < 100 ? Math.ceil(v * 1000) : Math.ceil(v);
+  }
+  if (/rate.?limit|429/i.test(msg)) return 5000;
+  return 0;
+}
+
+function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, statusEdit, jobId }) {
+  if (jobId) forwardJobs.set(String(jobId), { stopped: false });
+  const isStopped = () => !!(jobId && forwardJobs.get(String(jobId))?.stopped);
+
   setImmediate(() => {
     (async () => {
       const counts = { txt: 0, lua: 0, zip: 0 };
+      let skipped = 0;
+      let sent = 0;
       const sleep = (ms) => new Promise(r => setTimeout(r, ms));
       const yieldTick = () => new Promise(r => setImmediate(r));
+
       const isForwardable = (name) => {
         const e = (String(name || "").match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
         return e === "txt" || e === "lua" || e === "luau" || e === "zip";
@@ -231,6 +263,36 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
         else if (e === "zip") counts.zip++;
       };
 
+      const statusText = (extra) => {
+        let body =
+          "### Forwarding...\n" +
+          "from <#" + sourceId + "> → <#" + destId + ">\n" +
+          ".txt: **" + counts.txt + "** · .lua: **" + counts.lua + "** · .zip: **" + counts.zip + "**\n" +
+          "sent: **" + sent + "** · skipped (already there): **" + skipped + "**";
+        if (extra) body += "\n" + extra;
+        return body;
+      };
+
+      const pushStatus = async (extra) => {
+        try {
+          if (typeof statusEdit === "function") await statusEdit(statusText(extra));
+        } catch {}
+      };
+
+      const waitRateLimit = async (err) => {
+        let ms = getRetryAfterMs(err) || 5000;
+        ms = Math.min(Math.max(ms, 2000), 120000);
+        const until = Date.now() + ms;
+        while (Date.now() < until) {
+          if (isStopped()) return false;
+          const left = Math.ceil((until - Date.now()) / 1000);
+          await pushStatus("⏸️ Rate limited — retry in **" + left + "s**...");
+          await sleep(Math.min(1000, Math.max(0, until - Date.now())));
+        }
+        await pushStatus("▶️ Resuming...");
+        return true;
+      };
+
       let destChannel = destCh;
       try {
         if (!destChannel) destChannel = await client.channels.fetch(destId);
@@ -240,10 +302,20 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
       try {
         let destBefore = null;
         let scanned = 0;
-        while (scanned < 300 && destChannel) {
+        while (scanned < 2000 && destChannel && !isStopped()) {
           const opts = { limit: 100 };
           if (destBefore) opts.before = destBefore;
-          const batch = await destChannel.messages.fetch(opts);
+          let batch;
+          try {
+            batch = await destChannel.messages.fetch(opts);
+          } catch (e) {
+            if (getRetryAfterMs(e)) {
+              const ok = await waitRateLimit(e);
+              if (!ok) break;
+              continue;
+            }
+            break;
+          }
           if (!batch.size) break;
           for (const m of batch.values()) {
             scanned++;
@@ -260,35 +332,62 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
         console.warn("⚠️ Forward dest scan:", e.message);
       }
 
+      await pushStatus();
+
       const processAtt = async (name, url) => {
+        if (isStopped()) return;
         if (!isForwardable(name) || !url) return;
-        if (existingNames.has(String(name).toLowerCase())) return;
-        try {
-          const buf = await downloadURL(url);
-          if (!buf || !buf.length) return;
-          await destChannel.send({ files: [new AttachmentBuilder(buf, { name: name || "file" })] });
-          existingNames.add(String(name).toLowerCase());
-          bumpExt(name);
-          await sleep(450);
-        } catch (e) {
-          console.warn("⚠️ Forward file:", name, e?.message || e);
-          await sleep(800);
+        const key = String(name).toLowerCase();
+        if (existingNames.has(key)) {
+          skipped++;
+          return;
+        }
+        let tries = 0;
+        while (tries < 6 && !isStopped()) {
+          tries++;
+          try {
+            const buf = await downloadURL(url);
+            if (!buf || !buf.length) return;
+            await destChannel.send({ files: [new AttachmentBuilder(buf, { name: name || "file" })] });
+            existingNames.add(key);
+            bumpExt(name);
+            sent++;
+            if (sent % 3 === 0) await pushStatus();
+            await sleep(500);
+            return;
+          } catch (e) {
+            if (getRetryAfterMs(e)) {
+              const ok = await waitRateLimit(e);
+              if (!ok) return;
+              continue;
+            }
+            console.warn("⚠️ Forward file:", name, e?.message || e);
+            await sleep(800);
+            return;
+          }
         }
       };
 
       try {
         if (useUserToken) {
           let before = null;
-          for (let pages = 0; pages < 80; pages++) {
+          for (let pages = 0; pages < 100 && !isStopped(); pages++) {
             let batch = [];
             try {
               batch = await userFetchChannelMessages(sourceId, 100, before);
             } catch (e) {
+              if (getRetryAfterMs(e)) {
+                const ok = await waitRateLimit(e);
+                if (!ok) break;
+                pages--;
+                continue;
+              }
               console.warn("⚠️ Forward user page:", e?.message || e);
               break;
             }
             if (!batch.length) break;
             for (const raw of batch) {
+              if (isStopped()) break;
               const atts = attachmentsFromUserMessage(raw);
               for (const a of atts) {
                 await processAtt(a.name || a.filename, a.url || a.proxyURL);
@@ -301,18 +400,25 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
           }
         } else if (sourceCh) {
           let before = null;
-          for (let pages = 0; pages < 80; pages++) {
+          for (let pages = 0; pages < 100 && !isStopped(); pages++) {
             let batch;
             try {
               const opts = { limit: 100 };
               if (before) opts.before = before;
               batch = await sourceCh.messages.fetch(opts);
             } catch (e) {
+              if (getRetryAfterMs(e)) {
+                const ok = await waitRateLimit(e);
+                if (!ok) break;
+                pages--;
+                continue;
+              }
               console.warn("⚠️ Forward bot page:", e?.message || e);
               break;
             }
             if (!batch || !batch.size) break;
             for (const m of batch.values()) {
+              if (isStopped()) break;
               try {
                 for (const a of m.attachments?.values?.() || []) {
                   await processAtt(a.name, a.url || a.proxyURL);
@@ -326,9 +432,11 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
                 }
               } catch {}
               try {
-                const collected = collectMessageAttachments(m);
-                for (const a of collected) {
-                  await processAtt(a.name || a.filename, a.url || a.proxyURL);
+                if (typeof collectMessageAttachments === "function") {
+                  const collected = collectMessageAttachments(m);
+                  for (const a of collected) {
+                    await processAtt(a.name || a.filename, a.url || a.proxyURL);
+                  }
                 }
               } catch {}
               await yieldTick();
@@ -340,26 +448,31 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
           }
         }
 
+        const stopped = isStopped();
         const doneBody =
-          "### Forward Done!\n" +
-          `.txt: ${counts.txt}\n` +
-          `.lua: ${counts.lua}\n` +
-          `.zip: ${counts.zip}\n` +
-          `from <#${sourceId}> to <#${destId}>`;
+          (stopped ? "### Forward Stopped\n" : "### Forward Done!\n") +
+          ".txt: " + counts.txt + "\n" +
+          ".lua: " + counts.lua + "\n" +
+          ".zip: " + counts.zip + "\n" +
+          "sent: **" + sent + "** · skipped: **" + skipped + "**\n" +
+          "from <#" + sourceId + "> to <#" + destId + ">";
         try {
-          if (typeof statusEdit === "function") await statusEdit(doneBody);
+          if (typeof statusEdit === "function") await statusEdit(doneBody, { done: true });
         } catch {}
       } catch (e) {
         console.error("❌ forward job:", e?.message || e);
         try {
           if (typeof statusEdit === "function") {
-            await statusEdit("❌ forward failed: " + String(e.message || e).slice(0, 150));
+            await statusEdit("❌ forward failed: " + String(e.message || e).slice(0, 150), { done: true });
           }
         } catch {}
+      } finally {
+        if (jobId) forwardJobs.delete(String(jobId));
       }
     })().catch(e => console.error("❌ forward unhandled:", e?.message || e));
   });
 }
+
 
 let library = readJSON(LIBRARY_FILE, { files: [] });
 if (Array.isArray(library)) library = { files: library };
@@ -4752,6 +4865,23 @@ function buildHelpV2(page, userId) {
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
+
+  if (interaction.customId.startsWith("forward_stop_")) {
+    const jobId = interaction.customId.slice("forward_stop_".length);
+    const job = forwardJobs.get(String(jobId));
+    if (!job) {
+      return interaction.reply({ content: "❌ forward already finished or unknown job.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const parts = String(jobId).split("_");
+    const starterId = parts.length >= 2 ? parts[1] : "";
+    if (interaction.user.id !== starterId && !isOwner(interaction.user.id)) {
+      return interaction.reply({ content: "❌ not your forward job.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    job.stopped = true;
+    forwardJobs.set(String(jobId), job);
+    return interaction.reply({ content: "🛑 Stop requested — finishing current file then stopping.", flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+
   const uid = interaction.user.id;
   
   if (interaction.customId.startsWith("cleanfile_")) {
@@ -5784,20 +5914,50 @@ client.on("interactionCreate", async interaction => {
           }
         }
       }
+      const jobId = "fwd_" + interaction.user.id + "_" + Date.now();
+      const stopRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("forward_stop_" + jobId).setLabel("Stop").setStyle(ButtonStyle.Danger)
+      );
+      const statusMsg = await interaction.channel.send({
+        content:
+          "### Forwarding...\n" +
+          `from <#${sourceId}> → <#${destCh.id}>` +
+          (useUserToken ? " *(via user token)*" : "") +
+          "\n*Starting...*",
+        components: [stopRow]
+      }).catch(() => null);
       await interaction.editReply({
-        content: `⚡ Forwarding from \`${sourceId}\` → <#${destCh.id}>${useUserToken ? " (via user token)" : ""}...`
-      });
+        content: statusMsg
+          ? `⚡ Forward started — status in ${statusMsg.url || ("<#" + interaction.channelId + ">")}`
+          : `⚡ Forwarding from \`${sourceId}\` → <#${destCh.id}>...`
+      }).catch(() => {});
+
       startForwardJob({
         sourceId,
         destId,
         sourceCh,
         destCh,
         useUserToken,
-        statusEdit: async (content) => {
+        jobId,
+        statusEdit: async (content, opts = {}) => {
+          const body = String(content || "").slice(0, 1900);
+          const done = !!opts.done;
+          const row = done
+            ? []
+            : [new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId("forward_stop_" + jobId).setLabel("Stop").setStyle(ButtonStyle.Danger)
+              )];
           try {
-            await interaction.editReply({ content: String(content).slice(0, 1900) });
+            if (statusMsg) {
+              await statusMsg.edit({ content: body, components: row }).catch(async () => {
+                if (!done) await interaction.channel?.send({ content: body, components: row }).catch(() => {});
+                else await interaction.channel?.send({ content: body }).catch(() => {});
+              });
+            } else {
+              await interaction.editReply({ content: body }).catch(() => {});
+            }
           } catch {
-            try { await interaction.channel?.send({ content: String(content).slice(0, 1900) }); } catch {}
+            try { await interaction.channel?.send({ content: body }).catch(() => {}); } catch {}
           }
         }
       });
