@@ -3381,14 +3381,11 @@ async function downloadURL(url) {
   return Buffer.from(await res.arrayBuffer());
 }
 
-function cleanLuaV2(text) {
-  let out = cleanLuaForRename(String(text || ""));
+
+function stripRemoteLoaders(src) {
+  let out = String(src || "");
   try {
     out = out.replace(/^\uFEFF/, "").replace(/\0/g, "");
-
-    // Remove remote loadstring / HttpGet loader blocks (like Jet Hub style)
-    // local ok, src = pcall(function() return game:HttpGet(...) end)
-    // if ok ... loadstring(src) ... end
     out = out.replace(
       /local\s+[\w,\s]+\s*=\s*pcall\s*\(\s*function\s*\(\s*\)\s*[\s\S]*?game\s*:\s*HttpGet[\s\S]*?end\s*\)\s*(?:if\s+[\s\S]*?loadstring[\s\S]*?end\s*)?/gi,
       ""
@@ -3407,20 +3404,32 @@ function cleanLuaV2(text) {
     out = out.replace(/\bgame\s*:\s*HttpGet\s*\(\s*[^)]+\)/gi, "");
     out = out.replace(/\b(?:loadstring|load)\s*\(\s*[^)]{0,200}\)\s*(?:\(\s*\))?/gi, (m) => {
       const s = m[0];
-      // keep harmless local string loads of short literals only
       if (/loadstring\s*\(\s*["'][^"']{0,40}["']\s*\)/.test(s)) return s;
       return "";
     });
+    out = out.split("\n").filter(line => {
+      const tr = line.trim();
+      if (!tr) return true;
+      if (/\bloadstring\s*\(/.test(tr) && /HttpGet|HttpService|request|syn\.request/i.test(tr)) return false;
+      return true;
+    }).join("\n");
+    out = out.replace(/\n{3,}/g, "\n\n").trim() + "\n";
+  } catch {}
+  return out;
+}
 
+function cleanLuaV2(text) {
+  let out = cleanLuaForRename(String(text || ""));
+  out = stripRemoteLoaders(out);
+  try {
+    out = out.replace(/^\uFEFF/, "").replace(/\0/g, "");
     out = out.split("\n").filter(line => {
       const tr = line.trim();
       if (!tr) return true;
       if (/^::\w+::$/.test(tr)) return false;
       if (/^\d+\s*$/.test(tr)) return false;
-      if (/\bloadstring\s*\(/.test(tr) && /HttpGet|HttpService|request|syn\.request/i.test(tr)) return false;
       return true;
     }).join("\n");
-
     out = out.replace(/[^\S\n]+$/gm, "");
     out = out.replace(/\n{3,}/g, "\n\n").trim() + "\n";
   } catch {}
@@ -4943,7 +4952,7 @@ RULES:
             }
           }
         } else {
-          finalOutput = cleanLuaForRename(text);
+          finalOutput = stripRemoteLoaders(cleanLuaForRename(text));
         }
         if (!finalOutput || !finalOutput.trim()) throw new Error("empty output after clean");
         const uniqueUrls = [...new Set(foundUrls)];
@@ -5569,8 +5578,10 @@ client.on("interactionCreate", async interaction => {
           new ButtonBuilder().setCustomId("clean_v1_" + interaction.user.id).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId("clean_v2_" + interaction.user.id).setLabel("Clean V2").setStyle(ButtonStyle.Success)
         );
-        const panelMsg = await interaction.channel.send({
+        const panelMsg = await interaction.editReply({
           flags: IS_COMPONENTS_V2,
+          content: null,
+          embeds: [],
           components: [{
             type: 17,
             accent_color: RENAME_V2_ACCENT,
@@ -5579,18 +5590,17 @@ client.on("interactionCreate", async interaction => {
               { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
               row.toJSON()
             ]
-          }],
-          allowedMentions: { repliedUser: false, parse: [] }
+          }]
         });
-        if (panelMsg?.id) {
-          cleanSessions.set(panelMsg.id, {
+        const panelId = panelMsg?.id;
+        if (panelId) {
+          cleanSessions.set(panelId, {
             authorId: interaction.user.id,
             content: String(content),
             at: Date.now(),
             fromName
           });
         }
-        await interaction.editReply({ content: "✅ file received — choose **Clean V1** or **Clean V2**." });
         try {
           logFinderPanel(interaction.user, "Clean", "Uploaded `" + String(fromName).slice(0, 80) + "` (" + Buffer.byteLength(content, "utf8") + " bytes) — waiting V1/V2").catch(() => {});
         } catch {}
