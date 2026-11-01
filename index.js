@@ -35,7 +35,8 @@ const BUYER_ROLE_ID = "1553385966629158963";
 const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
 const REGULAR_COLOR = 0x2B2D31; 
-const BLURPLE = 0x5865F2; 
+const BLURPLE = 0x5865F2;
+const CLEAN_BY_PRINCE_HEADER = "-- Clean by Prince﹘.gg/freesource"; 
 const GRAY_COLOR = 0x99AAB5; 
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
@@ -4868,7 +4869,16 @@ client.on("interactionCreate", async interaction => {
     const isV2 = interaction.customId.startsWith("clean_v2_");
     const ownerId = interaction.customId.replace(/^clean_v[12]_/, "");
     if (interaction.user.id !== ownerId) {
-      return interaction.reply({ content: "❌ not yours, dumbass.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return interaction.reply({ content: "❌ not yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (isV2) {
+      const buyerOk = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
+      if (!buyerOk) {
+        return interaction.reply({
+          content: "❌ buy this version 2.0 from https://discord.com/channels/1509484518766018711/1561710834344923247",
+          flags: MessageFlags.Ephemeral
+        }).catch(() => {});
+      }
     }
     const session = cleanSessions.get(interaction.message.id);
     if (!session || String(session.authorId) !== String(ownerId)) {
@@ -4944,7 +4954,11 @@ RULES:
           previewBody += "\n\n**URL Found:**\n" + urlList + (uniqueUrls.length > 10 ? "\n- ...and " + (uniqueUrls.length - 10) + " more" : "");
         }
         const outputName = "clean.lua";
-        const fileBuf = Buffer.from(finalOutput, "utf-8");
+        let fileOutput = String(finalOutput).replace(/^\uFEFF/, "");
+        if (!fileOutput.startsWith(CLEAN_BY_PRINCE_HEADER)) {
+          fileOutput = CLEAN_BY_PRINCE_HEADER + "\n" + fileOutput;
+        }
+        const fileBuf = Buffer.from(fileOutput, "utf-8");
         
         try {
           const ch = interaction.channel;
@@ -4964,6 +4978,11 @@ RULES:
             }],
             allowedMentions: { repliedUser: false, parse: [] }
           });
+          try {
+            const ver = isV2 ? "Clean V2" : "Clean V1";
+            const src = session.fromName ? String(session.fromName).slice(0, 80) : "script";
+            logFinderPanel(interaction.user, ver, "Source `" + src + "` · out `" + safeName + "` (" + fileBuf.length + " bytes)").catch(() => {});
+          } catch {}
         } catch (e) {
           await interaction.followUp({
             content: "❌ clean failed: " + String(e.message || e).slice(0, 120),
@@ -5331,6 +5350,55 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
         }).catch(() => {});
       }
     }
+    if (interaction.customId === "finderpanel_clean") {
+      if (isBlacklisted(interaction.user.id) && !isOwner(interaction.user.id)) {
+        try { await interaction.deferUpdate(); } catch {}
+        return;
+      }
+      // Modal with file upload (Discord Label + File Upload) — max 5MB enforced on submit
+      try {
+        await interaction.showModal({
+          custom_id: "finderpanel_clean_modal",
+          title: "Upload Lua file",
+          components: [
+            {
+              type: 18,
+              label: "Lua file",
+              description: "Upload one source file to clean. Max 5 MB.",
+              component: {
+                type: 19,
+                custom_id: "clean_upload_file",
+                required: true,
+                min_values: 1,
+                max_values: 1
+              }
+            }
+          ]
+        });
+      } catch (e) {
+        // Fallback if file-upload modal unsupported: paste code
+        try {
+          const modal = new ModalBuilder()
+            .setCustomId("finderpanel_clean_modal_paste")
+            .setTitle("Upload Lua file");
+          const input = new TextInputBuilder()
+            .setCustomId("clean_paste")
+            .setLabel("Paste Lua / URL (max ~5MB worth)")
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setMaxLength(4000);
+          modal.addComponents(new ActionRowBuilder().addComponents(input));
+          await interaction.showModal(modal);
+        } catch (e2) {
+          return interaction.reply({
+            content: "❌ could not open clean form: " + String(e2.message || e.message || e2).slice(0, 100),
+            flags: MessageFlags.Ephemeral
+          }).catch(() => {});
+        }
+      }
+      return;
+    }
+
     if (interaction.customId === "finderpanel_find") {
       const modal = new ModalBuilder()
         .setCustomId("finderpanel_find_modal")
@@ -5437,8 +5505,122 @@ client.on("interactionCreate", async interaction => {
         await m.roles.add(BUYER_ROLE_ID);
       } catch {}
       await interaction.editReply({ content: "✅ key redeemed successfully." });
+      try {
+        const keyShow = key.length > 8 ? (key.slice(0, 6) + "…" + key.slice(-4)) : key;
+        logFinderPanel(interaction.user, "Redeem", "Key `" + keyShow + "` redeemed successfully.").catch(() => {});
+      } catch {}
       return;
     }
+    
+    if (interaction.customId === "finderpanel_clean_modal" || interaction.customId === "finderpanel_clean_modal_paste") {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      try {
+        let content = "";
+        let fromName = "clean_input.lua";
+        const MAX_CLEAN_BYTES = 5 * 1024 * 1024;
+
+        if (interaction.customId === "finderpanel_clean_modal_paste") {
+          content = interaction.fields.getTextInputValue("clean_paste") || "";
+          if (/^https?:\/\//i.test(content.trim())) {
+            const url = content.trim().split(/\s+/)[0];
+            const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const buf = Buffer.from(await res.arrayBuffer());
+            if (buf.length > MAX_CLEAN_BYTES) {
+              await interaction.editReply({ content: "❌ file too large — max **5MB**." });
+              return;
+            }
+            content = buf.toString("utf8");
+            fromName = "from_url.lua";
+          } else if (Buffer.byteLength(content, "utf8") > MAX_CLEAN_BYTES) {
+            await interaction.editReply({ content: "❌ file too large — max **5MB**." });
+            return;
+          }
+        } else {
+          let att = null;
+          try {
+            if (typeof interaction.fields?.getUploadedFiles === "function") {
+              const ups = interaction.fields.getUploadedFiles("clean_upload_file");
+              att = (ups && typeof ups.first === "function" ? ups.first() : null) || (Array.isArray(ups) ? ups[0] : null) || ups || null;
+            }
+          } catch {}
+          try {
+            if (!att && interaction.data?.resolved?.attachments) {
+              const vals = Object.values(interaction.data.resolved.attachments);
+              if (vals.length) att = vals[0];
+            }
+          } catch {}
+          try {
+            if (!att && interaction.fields?.fields) {
+              const f = interaction.fields.fields.get("clean_upload_file");
+              if (f) att = f;
+            }
+          } catch {}
+          if (!att) {
+            await interaction.editReply({ content: "❌ no file uploaded." });
+            return;
+          }
+          const size = Number(att.size || att.file_size || 0);
+          if (size > MAX_CLEAN_BYTES) {
+            await interaction.editReply({ content: "❌ file too large — max **5MB**." });
+            return;
+          }
+          const url = att.url || att.proxyURL || att.proxy_url || att.attachment;
+          if (!url || typeof url !== "string") {
+            await interaction.editReply({ content: "❌ could not read upload." });
+            return;
+          }
+          const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          const buf = Buffer.from(await res.arrayBuffer());
+          if (buf.length > MAX_CLEAN_BYTES) {
+            await interaction.editReply({ content: "❌ file too large — max **5MB**." });
+            return;
+          }
+          content = buf.toString("utf8");
+          fromName = att.name || att.filename || "upload.lua";
+        }
+
+        if (!content || !content.trim()) {
+          await interaction.editReply({ content: "❌ empty file." });
+          return;
+        }
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("clean_v1_" + interaction.user.id).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId("clean_v2_" + interaction.user.id).setLabel("Clean V2").setStyle(ButtonStyle.Success)
+        );
+        const panelMsg = await interaction.channel.send({
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: RENAME_V2_ACCENT,
+            components: [
+              { type: 10, content: "### Choose Clean Version\nSelect a clean version below." },
+              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+              row.toJSON()
+            ]
+          }],
+          allowedMentions: { repliedUser: false, parse: [] }
+        });
+        if (panelMsg?.id) {
+          cleanSessions.set(panelMsg.id, {
+            authorId: interaction.user.id,
+            content: String(content),
+            at: Date.now(),
+            fromName
+          });
+        }
+        await interaction.editReply({ content: "✅ file received — choose **Clean V1** or **Clean V2**." });
+        try {
+          logFinderPanel(interaction.user, "Clean", "Uploaded `" + String(fromName).slice(0, 80) + "` (" + Buffer.byteLength(content, "utf8") + " bytes) — waiting V1/V2").catch(() => {});
+        } catch {}
+      } catch (e) {
+        await interaction.editReply({ content: "❌ " + String(e.message || e).slice(0, 120) }).catch(() => {});
+      }
+      return;
+    }
+
     if (interaction.customId === "finderpanel_find_modal") {
       const query = (interaction.fields.getTextInputValue("finderpanel_query") || "").trim();
       await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5709,9 +5891,10 @@ client.on("interactionCreate", async interaction => {
         return;
       }
       const panelRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("finderpanel_find").setLabel("Find").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("finderpanel_get").setLabel("Get").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId("finderpanel_redeem").setLabel("Redeem").setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId("finderpanel_find").setLabel("Find").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("finderpanel_get").setLabel("Get").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("finderpanel_redeem").setLabel("Redeem").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("finderpanel_clean").setLabel("Clean").setStyle(ButtonStyle.Secondary)
       );
       await targetChannel.send({
         flags: IS_COMPONENTS_V2,
