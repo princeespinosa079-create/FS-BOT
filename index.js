@@ -240,6 +240,23 @@ function getRetryAfterMs(err) {
   return 0;
 }
 
+function buildForwardV2Payload(body, jobId, done) {
+  const children = [{ type: 10, content: String(body || "").slice(0, 3900) }];
+  if (!done && jobId) {
+    children.push({ type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL });
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("forward_stop_" + jobId).setLabel("Stop").setStyle(ButtonStyle.Danger)
+    );
+    children.push(row.toJSON());
+  }
+  return {
+    flags: IS_COMPONENTS_V2,
+    content: null,
+    embeds: [],
+    components: [{ type: 17, accent_color: BLURPLE, components: children }]
+  };
+}
+
 function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, statusEdit, jobId }) {
   if (jobId) forwardJobs.set(String(jobId), { stopped: false });
   const isStopped = () => !!(jobId && forwardJobs.get(String(jobId))?.stopped);
@@ -830,71 +847,28 @@ async function applyAltRole(member) {
   }
 }
 async function isBuyer(userId, member) {
-  
-  
   const uid = userId || member?.id;
   if (!uid) return false;
   if (uid === OWNER_ID) return true;
-  
-  if (member?.roles?.cache?.has(BUYER_ROLE_ID)) {
-    console.log(`👑 isBuyer: ${uid} → YES (local member)`);
-    return true;
-  }
-  
+  if (member?.roles?.cache?.has(BUYER_ROLE_ID)) return true;
   try {
     let mainGuild = client.guilds.cache.get(GUILD_ID);
-    if (!mainGuild) {
-      console.log(`👑 isBuyer: fetching guild ${GUILD_ID}...`);
-      mainGuild = await client.guilds.fetch(GUILD_ID);
-    }
-    if (!mainGuild) {
-      console.warn(`⚠️ isBuyer: main guild not found`);
-      return false;
-    }
-    
+    if (!mainGuild) mainGuild = await client.guilds.fetch(GUILD_ID);
+    if (!mainGuild) return false;
     let mainMember = mainGuild.members.cache.get(uid);
-    if (!mainMember) {
-      console.log(`👑 isBuyer: fetching member ${uid} from main guild...`);
-      mainMember = await mainGuild.members.fetch({ user: uid, force: true });
-    }
-    if (!mainMember) {
-      console.log(`👑 isBuyer: ${uid} → NO (not in main guild)`);
-      return false;
-    }
-    
-    if (mainMember.roles.cache.has(BUYER_ROLE_ID)) {
-      console.log(`👑 isBuyer: ${uid} → YES (role in cache)`);
-      return true;
-    }
-    
+    if (!mainMember) mainMember = await mainGuild.members.fetch({ user: uid, force: true });
+    if (!mainMember) return false;
+    if (mainMember.roles.cache.has(BUYER_ROLE_ID)) return true;
     if (mainMember.roles.cache.size <= 1) {
-      console.log(`👑 isBuyer: force-fetching roles for ${uid}...`);
       try {
         await mainMember.roles.fetch();
-        if (mainMember.roles.cache.has(BUYER_ROLE_ID)) {
-          console.log(`👑 isBuyer: ${uid} → YES (roles fetched)`);
-          return true;
-        }
-      } catch (roleErr) {
-        console.warn(`⚠️ isBuyer roles fetch: ${roleErr.message}`);
-      }
+        if (mainMember.roles.cache.has(BUYER_ROLE_ID)) return true;
+      } catch {}
     }
-    
-    const roleIds = [...mainMember.roles.cache.keys()];
-    console.log(`👑 isBuyer: ${uid} roles = [${roleIds.join(", ")}] (looking for ${BUYER_ROLE_ID})`);
-    if (roleIds.includes(BUYER_ROLE_ID)) {
-      console.log(`👑 isBuyer: ${uid} → YES (role ID match)`);
-      return true;
-    }
-    console.log(`👑 isBuyer: ${uid} → NO (buyer role not found)`);
+    if ([...mainMember.roles.cache.keys()].includes(BUYER_ROLE_ID)) return true;
     return false;
   } catch (e) {
-    console.warn(`⚠️ isBuyer ERROR for ${uid}: ${e.message}`);
-    
-    if (member?.roles?.cache?.has(BUYER_ROLE_ID)) {
-      console.log(`👑 isBuyer: ${uid} → YES (fallback local)`);
-      return true;
-    }
+    if (member?.roles?.cache?.has(BUYER_ROLE_ID)) return true;
     return false;
   }
 }
@@ -959,49 +933,34 @@ async function syncPrinceRole(member) {
   try {
     if (!member || member.guild.id !== GUILD_ID) return;
     if (member.user.bot) return;
-    
     try { member = await member.guild.members.fetch(member.id, { force: true }); } catch {}
     const hasTag = memberHasServerTag(member);
     const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
-    console.log(`👑 Check ${member.user.tag}: hasServerTag=${hasTag} hasRole=${hasRole}`);
     if (hasTag && !hasRole) {
       await member.roles.add(PRINCE_ROLE_ID, "Server Tag adopted").catch(() => {});
-      console.log(`👑 + Prince role (Server Tag): ${member.user.tag}`);
     } else if (!hasTag && hasRole) {
       await member.roles.remove(PRINCE_ROLE_ID, "Server Tag removed").catch(() => {});
-      console.log(`👑 - Prince role (Server Tag): ${member.user.tag}`);
     }
-  } catch (e) {
-    console.warn(`⚠️ syncPrinceRole: ${e.message}`);
-  }
+  } catch {}
 }
 async function syncAllPrinceRoles() {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
     await mainGuild.members.fetch();
-    let added = 0, removed = 0, skipped = 0;
     for (const member of mainGuild.members.cache.values()) {
-      if (member.user.bot) { skipped++; continue; }
+      if (member.user.bot) continue;
       try {
         const hasTag = memberHasServerTag(member);
         const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
         if (hasTag && !hasRole) {
           await member.roles.add(PRINCE_ROLE_ID, "Startup sync: Server Tag detected").catch(() => {});
-          added++;
         } else if (!hasTag && hasRole) {
           await member.roles.remove(PRINCE_ROLE_ID, "Startup sync: no Server Tag").catch(() => {});
-          removed++;
         }
-      } catch (e) {
-        console.warn(`⚠️ syncAll member ${member.user?.tag}: ${e.message}`);
-      }
+      } catch {}
     }
-    console.log(`👑 Startup role sync done: +${added} -${removed} ~${skipped} bots`);
-  } catch (e) {
-    console.warn(`⚠️ syncAllPrinceRoles: ${e.message}`);
-  }
+  } catch {}
 }
-
 async function checkRegularPermission(msg, needsFileReply = false) {
   try {
     if (isBlacklisted(msg.author?.id) && !isOwner(msg.author?.id)) {
@@ -1706,290 +1665,6 @@ const _WEAREDEVS_SIGNALS = [
     /local\s+o\s*=\s*\{\s*"(?:\\[0-9]{2,3}){6,}"/,
 ];
 
-function calcEntropy(data) {
-    if (!data) return 0.0;
-    const freq = {};
-    for (const c of data) freq[c] = (freq[c] || 0) + 1;
-    const len = data.length;
-    return -Object.values(freq).reduce((sum, c) => {
-        const p = c / len;
-        return sum + p * Math.log2(p);
-    }, 0);
-}
-
-function statFeatures(code) {
-    const lines = code.split('\n');
-    const totalChars = code.length;
-    if (totalChars === 0) return {};
-    
-    const avgLine = lines.reduce((s, l) => s + l.length, 0) / lines.length;
-    const longLines = lines.filter(l => l.length > 500).length / lines.length;
-    const hexCount = (code.match(/0x[0-9a-fA-F]+/g) || []).length;
-    const numEsc = (code.match(/\\[0-9]{2,3}/g) || []).length;
-    const ops = (code.match(/[+\-*/%^&|]/g) || []).length;
-    const unicodeCnt = (code.match(/[\u3480-\u34c0]{3,}/g) || []).length;
-    const backtickStrings = (code.match(/`[^`]{6,}`/g) || []).length;
-    const ilNames = (code.match(/\b[lI1i]{4,}\b/g) || []).length;
-    const binLiterals = (code.match(/0[Bb][01_]{4,}/g) || []).length;
-    const underscoreHex = (code.match(/0_[bBxX][0-9a-fA-F_]{4,}/g) || []).length;
-    const dqNumescStrings = (code.match(/"(?:\\[0-9]{2,3}){6,}"/g) || []).length;
-
-    return {
-        entropy: calcEntropy(code),
-        avgLineLength: avgLine,
-        longLineRatio: longLines,
-        hexLiteralDensity: hexCount / Math.max(totalChars / 1000, 1),
-        numericEscapeDensity: numEsc / Math.max(totalChars / 1000, 1),
-        operatorDensity: ops / Math.max(totalChars / 1000, 1),
-        unicodeIdentCount: unicodeCnt,
-        backtickStringCount: backtickStrings,
-        ilNameCount: ilNames,
-        binLiteralCount: binLiterals,
-        underscoreHexCount: underscoreHex,
-        dqNumescStrings: dqNumescStrings,
-    };
-}
-
-function isWeAreDevs(code) {
-    for (const pat of _WEAREDEVS_SIGNALS) {
-        if (pat.test(code)) return true;
-    }
-    return false;
-}
-
-function statBonus(obfName, stats, isWad = false) {
-    let bonus = 0.0;
-    const ent = stats.entropy || 0;
-    const nesc = stats.numericEscapeDensity || 0;
-    const avgLine = stats.avgLineLength || 0;
-    const longLine = stats.longLineRatio || 0;
-    const unicodeCnt = stats.unicodeIdentCount || 0;
-    const backtickCnt = stats.backtickStringCount || 0;
-    const ilCnt = stats.ilNameCount || 0;
-    const binCnt = stats.binLiteralCount || 0;
-    const usHex = stats.underscoreHexCount || 0;
-    const dqNesc = stats.dqNumescStrings || 0;
-
-    switch (obfName) {
-        case 'Prometheus':
-            if (nesc > 5) bonus += 10;
-            if (ent > 4.5 && ent < 6.0) bonus += 5;
-            if (nesc > 15) bonus += 15;
-            if (isWad) bonus -= 80;
-            if (dqNesc > 10) bonus -= 40;
-            break;
-        case 'WeAreDevs':
-            if (nesc > 10) bonus += 15;
-            if (dqNesc > 20) bonus += 25;
-            if (ent > 4.0 && ent < 5.5) bonus += 8;
-            if (avgLine > 200) bonus += 10;
-            break;
-        case 'MoonSec V2':
-            if (unicodeCnt > 5) bonus += 20;
-            break;
-        case 'MoonSec V3':
-            if (avgLine > 300) bonus += 8;
-            if (ent > 5.5) bonus += 5;
-            break;
-        case 'Luraph 14':
-            if (longLine > 0.1) bonus += 8;
-            if ((stats.hexLiteralDensity || 0) > 10) bonus += 6;
-            break;
-        case 'Luraph 10':
-            if (ilCnt > 10) bonus += 10;
-            if (ent > 4.5) bonus += 5;
-            break;
-        case 'LightRay':
-            if (binCnt > 20) bonus += 15;
-            if (usHex > 10) bonus += 12;
-            if (avgLine > 1000) bonus += 10;
-            if (ent > 4.8) bonus += 5;
-            break;
-        case 'LuaObfuscator VM':
-            if (longLine > 0.5) bonus += 8;
-            break;
-        case 'WynFuscator':
-            if (avgLine > 500) bonus += 10;
-            if (ent > 5.0) bonus += 5;
-            break;
-        case 'Hercules':
-            if (avgLine > 100) bonus += 5;
-            break;
-        case 'IronBrew':
-            if ((stats.operatorDensity || 0) > 20) bonus += 5;
-            break;
-        case 'MoonVeil':
-            if (avgLine > 200) bonus += 8;
-            if (ent > 5.0) bonus += 5;
-            break;
-        case '77fuscator':
-            if (avgLine > 300) bonus += 8;
-            break;
-        case 'Lunr':
-            if (backtickCnt > 10) bonus += 15;
-            if (ilCnt > 20) bonus += 10;
-            if (ent > 4.5) bonus += 5;
-            break;
-        case '25ms Obfuscator':
-            if ((stats.numericEscapeDensity || 0) > 8) bonus += 12;
-            if ((stats.avgLineLength || 0) > 250) bonus += 10;
-            if ((stats.entropy || 0) > 5.2) bonus += 6;
-            if (isWad) bonus -= 60;
-            if (dqNesc > 10) bonus -= 30;
-            break;
-        case 'Luarmor':
-            if (ent > 4.5) bonus += 8;
-            if (avgLine > 150) bonus += 5;
-            break;
-        case 'WeAreDevs':
-            if (nesc > 10) bonus += 15;
-            if (dqNesc > 20) bonus += 25;
-            if (ent > 4.0 && ent < 5.5) bonus += 8;
-            if (avgLine > 200) bonus += 10;
-            break;
-        case 'PolSec':
-            if (ent > 5.0) bonus += 6;
-            break;
-        case 'PSU Obfuscator':
-            if (avgLine > 200) bonus += 8;
-            if (ent > 5.0) bonus += 5;
-            break;
-        case 'Synapse Xen':
-        case 'Hysteria':
-        case 'AztupBrew':
-        case 'DarkEccentric':
-        case 'Axon':
-        case 'Xeon':
-        case 'Script-Ware':
-        case 'Fluxus':
-        case 'KRNL':
-        case 'Celery':
-        case 'Panda':
-        case 'Nihon':
-        case 'Horion':
-        case 'SkidFuscator':
-        case 'Remotely':
-            if (ent > 4.8) bonus += 5;
-            if (avgLine > 180) bonus += 4;
-            break;
-        case 'Luraph':
-            if (longLine > 0.1) bonus += 6;
-            if (ent > 4.5) bonus += 5;
-            break;
-        case 'MoonSec':
-            if (unicodeCnt > 3) bonus += 10;
-            if (avgLine > 250) bonus += 5;
-            break;
-        case 'Bytecode':
-            if (ent > 5.5) bonus += 10;
-            break;
-        case 'VM-Obfuscated':
-            if (ent > 5.0) bonus += 6;
-            if (avgLine > 200) bonus += 4;
-            break;
-        case 'SimpleObfuscator':
-            if (nesc > 8) bonus += 8;
-            break;
-        case 'Faulmor':
-            if (avgLine > 100) bonus += 6;
-            if (ent > 4.5) bonus += 4;
-            break;
-        case 'Prince Obfuscator':
-            if (ent > 4.5) bonus += 5;
-            break;
-        case 'Unobfuscated':
-            if (avgLine < 120) bonus += 10;
-            if (ent < 4.5) bonus += 8;
-            if (backtickCnt > 5) bonus -= 30;
-            if (ilCnt > 10) bonus -= 25;
-            if (ent > 5.5) bonus -= 20;
-            if (avgLine > 400) bonus -= 15;
-            if (binCnt > 10) bonus -= 20;
-            if (usHex > 5) bonus -= 20;
-            break;
-    }
-    return bonus;
-}
-
-function isDefinitelyObfuscated(code) {
-    for (const pat of _DEFINITELY_OBF) {
-        if (pat.test(code)) return true;
-    }
-    return false;
-}
-
-function formatLuraphName(code, fallback) {
-    const s = String(code || "");
-    let m = s.match(/Luraph\s+Obfuscator\s+v?(\d+(?:\.\d+){0,3})/i);
-    if (!m) m = s.match(/protected\s+using\s+Luraph(?:\s+Obfuscator)?\s+v?(\d+(?:\.\d+){0,3})/i);
-    if (!m) m = s.match(/generated\s+using\s+Luraph(?:\s+Obfuscator)?\s+v?(\d+(?:\.\d+){0,3})/i);
-    if (!m) m = s.match(/Luraph\s+v(?:ersion\s*)?(\d+(?:\.\d+){0,3})/i);
-    if (!m) m = s.match(/\bLPH[_\s-]*v?(\d+(?:\.\d+){0,2})\b/i);
-    if (m) return "Luraph V" + m[1];
-    
-    if (/14/.test(fallback)) return "Luraph V14";
-    if (/10/.test(fallback)) return "Luraph V10";
-    if (/Luraph/i.test(fallback)) return "Luraph";
-    return fallback;
-}
-
-function detectObfuscatorType(code) {
-    const stats = statFeatures(code);
-    const definitelyObf = isDefinitelyObfuscated(code);
-    const wad = isWeAreDevs(code);
-    const rawScores = {};
-
-    for (const [name, patterns] of Object.entries(SIGNATURES)) {
-        let score = 0.0;
-        for (const [weight, pattern] of patterns) {
-            if (pattern.test(code)) score += weight;
-        }
-        score += statBonus(name, stats, wad);
-        if (name === 'Unobfuscated' && definitelyObf) score = 0.0;
-        rawScores[name] = Math.max(score, 0.0);
-    }
-
-    const sorted = Object.entries(rawScores).sort((a, b) => b[1] - a[1]);
-    const [topName, topScore] = sorted[0];
-    const secondScore = sorted[1]?.[1] || 0.0;
-    const total = Object.values(rawScores).reduce((a, b) => a + b, 0);
-
-    if (topScore <= 0) return [['Custom / Unknown', 0.0]];
-    if (topScore < 20) return [['Custom / Unknown', 0.0]];
-
-    const gapRatio = topScore / Math.max(secondScore, 1);
-    const results = [];
-
-    for (const [name, score] of Object.entries(rawScores)) {
-        let confidence;
-        if (score <= 0) {
-            confidence = 0.0;
-        } else if (name === topName) {
-            const dominance = score / Math.max(total, 1);
-            const gapBonus = Math.min(gapRatio / 3, 1.0);
-            const strength = Math.min(score / 120, 1.0);
-            confidence = dominance * 55 + gapBonus * 25 + strength * 20;
-        } else {
-            const relative = score / Math.max(topScore, 1);
-            const suppress = Math.min(gapRatio / 2, 1.0);
-            confidence = relative * 45 * (1 - suppress);
-        }
-        confidence = Math.round(Math.max(0, Math.min(99.9, confidence)) * 10) / 10;
-        let displayName = name;
-        if (/Luraph/i.test(name)) displayName = formatLuraphName(code, name);
-        results.push([displayName, confidence]);
-    }
-    return results.sort((a, b) => b[1] - a[1]);
-}
-
-function printReport(results) {
-    if (!results?.length) return 'Detected: Custom / Unknown (score 1)';
-    const [topName, topPct] = results[0];
-    const score = Math.max(1, Math.min(10, Math.round(topPct / 10)));
-    if (topName === 'Custom / Unknown') return 'Detected: Custom / Unknown (score 1)';
-    return `Detected: ${topName} (score ${score})`;
-}
-
 async function fetchTextFromUrl(url) {
   const u = String(url || "").trim();
   if (!/^https?:\/\//i.test(u)) return null;
@@ -2305,73 +1980,6 @@ async function sendRenameLoading(message) {
   } catch (e) {
     console.warn("⚠️ Components V2 loading fallback:", e.message?.slice(0, 120));
     return message.reply({ content: "### Cleaning...\n⏳ Processing..." }).catch(() => null);
-  }
-}
-
-async function sendObfLoading(message) {
-  const payload = {
-    flags: IS_COMPONENTS_V2,
-    components: [{
-      type: 17,
-      accent_color: RENAME_V2_ACCENT,
-      components: [
-        { type: 10, content: "### Obfuscating...\n⏳ Processing..." }
-      ]
-    }]
-  };
-  try {
-    return await replyComponentsV2(message, payload);
-  } catch (e) {
-    return message.reply({ content: "### Obfuscating...\n⏳ Processing..." }).catch(() => null);
-  }
-}
-
-async function sendObfResult(message, { loadstring, fileBuffer, fileName }) {
-  const safeName = String(fileName || "obfuscated.lua").replace(/[^\w.\-]+/g, "_");
-  const file = new AttachmentBuilder(fileBuffer, { name: safeName });
-  const ls = String(loadstring || "").slice(0, 1800);
-  const body = ("**PC COPY:**\n```lua\n" + ls + "\n```\n\n**MOBILE COPY:**\n`" + ls + "`").slice(0, 3900);
-
-  const v2Payload = {
-    flags: IS_COMPONENTS_V2,
-    files: [file],
-    components: [{
-      type: 17,
-      accent_color: RENAME_V2_ACCENT,
-      components: [
-        { type: 10, content: body },
-        { type: 14, spacing: SEPARATOR_SPACING_SMALL },
-        { type: 13, file: { url: "attachment://" + safeName } }
-      ]
-    }]
-  };
-  try {
-    return await replyComponentsV2(message, v2Payload);
-  } catch (e) {
-    console.warn("⚠️ Components V2 obf fallback:", e.message?.slice(0, 120));
-    return message.reply({
-      content: body,
-      files: [file],
-      allowedMentions: { repliedUser: true, users: [message.author.id] }
-    }).catch(() => null);
-  }
-}
-
-async function sendUploadLoading(message) {
-  const payload = {
-    flags: IS_COMPONENTS_V2,
-    components: [{
-      type: 17,
-      accent_color: RENAME_V2_ACCENT,
-      components: [
-        { type: 10, content: "### Uploading...\n⏳ Processing..." }
-      ]
-    }]
-  };
-  try {
-    return await replyComponentsV2(message, payload, { mention: false });
-  } catch (e) {
-    return message.reply({ content: "### Uploading...\n⏳ Processing...", allowedMentions: { repliedUser: false, parse: [] } }).catch(() => null);
   }
 }
 
@@ -5915,17 +5523,14 @@ client.on("interactionCreate", async interaction => {
         }
       }
       const jobId = "fwd_" + interaction.user.id + "_" + Date.now();
-      const stopRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("forward_stop_" + jobId).setLabel("Stop").setStyle(ButtonStyle.Danger)
-      );
-      const statusMsg = await interaction.channel.send({
-        content:
-          "### Forwarding...\n" +
-          `from <#${sourceId}> → <#${destCh.id}>` +
-          (useUserToken ? " *(via user token)*" : "") +
-          "\n*Starting...*",
-        components: [stopRow]
-      }).catch(() => null);
+      const startBody =
+        "### Forwarding...\n" +
+        `from <#${sourceId}> → <#${destCh.id}>` +
+        (useUserToken ? " *(via user token)*" : "") +
+        "\n*Starting...*";
+      const statusMsg = await interaction.channel.send(
+        buildForwardV2Payload(startBody, jobId, false)
+      ).catch(() => null);
       await interaction.editReply({
         content: statusMsg
           ? `⚡ Forward started — status in ${statusMsg.url || ("<#" + interaction.channelId + ">")}`
@@ -5940,27 +5545,22 @@ client.on("interactionCreate", async interaction => {
         useUserToken,
         jobId,
         statusEdit: async (content, opts = {}) => {
-          const body = String(content || "").slice(0, 1900);
+          const body = String(content || "").slice(0, 3900);
           const done = !!opts.done;
-          const row = done
-            ? []
-            : [new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId("forward_stop_" + jobId).setLabel("Stop").setStyle(ButtonStyle.Danger)
-              )];
+          const payload = buildForwardV2Payload(body, jobId, done);
           try {
             if (statusMsg) {
-              await statusMsg.edit({ content: body, components: row }).catch(async () => {
-                if (!done) await interaction.channel?.send({ content: body, components: row }).catch(() => {});
-                else await interaction.channel?.send({ content: body }).catch(() => {});
+              await statusMsg.edit(payload).catch(async () => {
+                await interaction.channel?.send(payload).catch(() => {});
               });
             } else {
-              await interaction.editReply({ content: body }).catch(() => {});
+              await interaction.editReply({ content: body.slice(0, 1900) }).catch(() => {});
             }
           } catch {
-            try { await interaction.channel?.send({ content: body }).catch(() => {}); } catch {}
+            try { await interaction.channel?.send(payload).catch(() => {}); } catch {}
           }
         }
-      });
+      })
       return;
     }
 
