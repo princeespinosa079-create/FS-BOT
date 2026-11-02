@@ -37,7 +37,7 @@ const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
 const REGULAR_COLOR = 0x2B2D31; 
 const BLURPLE = 0x5865F2;
-const CLEAN_BY_PRINCE_HEADER = "-- Clean by Prince|.gg/freesource"; 
+const CLEAN_BY_PRINCE_HEADER = "-- This File Has Clean by Prince Bot | .gg/freesource"; 
 const GRAY_COLOR = 0x99AAB5; 
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
@@ -1717,23 +1717,31 @@ function detectThreatAnalysis(code) {
   const webhookMalicious = lineWh != null && stealHints.test(raw);
   const webhookBenign = lineWh != null && !stealHints.test(raw);
 
-  const remoteLoaderPatterns = [
-    /loadstring\s*\(\s*(?:game:GetService\s*\(\s*["']HttpService["']\s*\)\s*:)?HttpGet/i,
-    /loadstring\s*\(\s*(?:syn|http|fluxus|request)?[\s\S]{0,40}HttpGet/i,
-    /(?:loadstring|load)\s*\(\s*(?:game:HttpGet|http(?:s)?\.get|request\s*\()/i,
-    /HttpGet\s*\(\s*["']https?:\/\//i,
-    /game\s*:\s*HttpGet\s*\(/i,
-    /syn\.request\s*\(\s*\{[\s\S]*?Url\s*=\s*["']https?:\/\//i,
-    /pcall\s*\(\s*function\s*\(\s*\)\s*[\s\S]{0,120}?HttpGet/i,
-    /(?:getgenv|getrenv|getfenv).*loadstring/i,
-  ];
-  const lineRemote = findLine((line) => remoteLoaderPatterns.some(re => re.test(line)));
-
+  // Script Loader = URL-based script loaders (loadstring+URL / require https)
   const scriptLoaderPatterns = [
+    /loadstring\s*\(\s*game\s*:\s*HttpGet\s*\(\s*["']https?:\/\//i,
+    /loadstring\s*\(\s*(?:game:GetService\s*\(\s*["']HttpService["']\s*\)\s*:)\s*HttpGet\s*\(\s*["']https?:\/\//i,
+    /(?:loadstring|load)\s*\(\s*["']https?:\/\//i,
     /require\s*\(\s*["']https?:\/\//i,
-    /\bloadstring\s*\(\s*["']/i,
+    /loadstring\s*\(\s*(?:game:HttpGet|HttpGet)\s*\(\s*["'][^"']+["']\s*\)\s*\)\s*(?:\(\s*\))?/i,
   ];
   const lineScriptLoader = findLine((line) => scriptLoaderPatterns.some(re => re.test(line)));
+
+  // Remote Loader = remote fetch/execute (HttpGet, request, pcall remote) — not the classic URL script-loader one-liner
+  const remoteLoaderPatterns = [
+    /game\s*:\s*HttpGet\s*\(/i,
+    /HttpGet\s*\(\s*["']https?:\/\//i,
+    /HttpService\s*:\s*(?:GetAsync|RequestAsync)\s*\(/i,
+    /syn\.request\s*\(\s*\{[\s\S]*?Url\s*=\s*["']https?:\/\//i,
+    /pcall\s*\(\s*function\s*\(\s*\)\s*[\s\S]{0,200}?HttpGet/i,
+    /local\s+[\w,\s]+\s*=\s*pcall\s*\([\s\S]{0,120}?HttpGet/i,
+    /(?:getgenv|getrenv|getfenv).*loadstring/i,
+    /(?:request|http\.request|fluxus\.request)\s*\(\s*\{[\s\S]*?(?:Url|url)\s*=/i,
+  ];
+  const lineRemote = findLine((line) => {
+    if (scriptLoaderPatterns.some(re => re.test(line))) return false;
+    return remoteLoaderPatterns.some(re => re.test(line));
+  });
 
   if (lineIp != null) {
     return {
@@ -1743,20 +1751,21 @@ function detectThreatAnalysis(code) {
       description: "A link/URL that steals the target's IP, location, device info, and ISP when clicked. Used for doxxing or harassment."
     };
   }
-  if (lineRemote != null) {
-    return {
-      title: "Remote Loader",
-      color: 0xED4245,
-      line: lineRemote,
-      description: "Fetches and runs hidden code from the internet at runtime (loadstring/HttpGet). Can steal tokens, cookies, or install a backdoor."
-    };
-  }
+  // URL Script Loader first when it matches
   if (lineScriptLoader != null) {
     return {
       title: "Script Loader",
       color: 0xF26522,
       line: lineScriptLoader,
-      description: "Loads external or encoded script code into the game. Often used to hide malware or pull updates from an unknown source."
+      description: "URL script loader — pulls a script from a link (loadstring + HttpGet URL / require https) and runs it."
+    };
+  }
+  if (lineRemote != null) {
+    return {
+      title: "Remote Loader",
+      color: 0xED4245,
+      line: lineRemote,
+      description: "Remote code fetch/execute (HttpGet, request, pcall remote). Runs hidden code from the internet at runtime."
     };
   }
   if (webhookMalicious) {
