@@ -15,7 +15,8 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  ActivityType
 } = require("discord.js");
 const express = require("express");
 const fs = require("fs");
@@ -303,10 +304,10 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
         while (Date.now() < until) {
           if (isStopped()) return false;
           const left = Math.ceil((until - Date.now()) / 1000);
-          await pushStatus("⏸️ Rate limited — retry in **" + left + "s**...");
+          await pushStatus("⚠️ Hit Discord rate limit — waiting **" + left + "s** before continuing...");
           await sleep(Math.min(1000, Math.max(0, until - Date.now())));
         }
-        await pushStatus("▶️ Resuming...");
+        await pushStatus("✅ Limit cleared — continuing...");
         return true;
       };
 
@@ -369,8 +370,9 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
             existingNames.add(key);
             bumpExt(name);
             sent++;
-            if (sent % 3 === 0) await pushStatus();
-            await sleep(500);
+            if (sent % 2 === 0) await pushStatus();
+            await sleep(1600);
+            await yieldTick();
             return;
           } catch (e) {
             if (getRetryAfterMs(e)) {
@@ -379,7 +381,8 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
               continue;
             }
             console.warn("⚠️ Forward file:", name, e?.message || e);
-            await sleep(800);
+            await sleep(1500);
+            await yieldTick();
             return;
           }
         }
@@ -413,7 +416,7 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
             }
             before = batch[batch.length - 1]?.id;
             if (batch.length < 100) break;
-            await sleep(350);
+            await sleep(900);
           }
         } else if (sourceCh) {
           let before = null;
@@ -461,7 +464,7 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
             const oldest = batch.last();
             if (!oldest || batch.size < 100) break;
             before = oldest.id;
-            await sleep(350);
+            await sleep(900);
           }
         }
 
@@ -739,7 +742,7 @@ setInterval(cleanupExpiredKeys, 10 * 1000);
 const commandCooldowns = new Map(); 
 const COOLDOWNS = {}; 
 
-const TOKEN_FREE_CMDS = new Set(["redeem", "help", "find", "leaderboard"]);
+const TOKEN_FREE_CMDS = new Set(["redeem", "help", "find", "leaderboard", "upload"]);
 function formatCooldown(remainingSec) {
   const m = Math.floor(remainingSec / 60);
   const s = remainingSec % 60;
@@ -1682,7 +1685,6 @@ async function fetchTextFromUrl(url) {
 function detectThreatAnalysis(code) {
   const raw = String(code || "");
   const lines = raw.split(/\r?\n/);
-  const lowerAll = raw.toLowerCase();
 
   const IP_DOMAINS = [
     "iplogger", "grabify", "blasze", "ipgrabber", "ip-logger", "ipify.org",
@@ -1711,47 +1713,54 @@ function detectThreatAnalysis(code) {
   const webhookMalicious = lineWh != null && stealHints.test(raw);
   const webhookBenign = lineWh != null && !stealHints.test(raw);
 
-  const loaderPatterns = [
+  const remoteLoaderPatterns = [
     /loadstring\s*\(\s*(?:game:GetService\s*\(\s*["']HttpService["']\s*\)\s*:)?HttpGet/i,
     /loadstring\s*\(\s*(?:syn|http|fluxus|request)?[\s\S]{0,40}HttpGet/i,
     /(?:loadstring|load)\s*\(\s*(?:game:HttpGet|http(?:s)?\.get|request\s*\()/i,
     /HttpGet\s*\(\s*["']https?:\/\//i,
+    /game\s*:\s*HttpGet\s*\(/i,
     /syn\.request\s*\(\s*\{[\s\S]*?Url\s*=\s*["']https?:\/\//i,
+    /pcall\s*\(\s*function\s*\(\s*\)\s*[\s\S]{0,120}?HttpGet/i,
     /(?:getgenv|getrenv|getfenv).*loadstring/i,
   ];
-  const lineLoader = findLine((line) => loaderPatterns.some(re => re.test(line)));
-  const loaderCritical = lineLoader != null && (lineWh != null || lineIp != null || /malware|backdoor|steal|keylog/i.test(raw));
+  const lineRemote = findLine((line) => remoteLoaderPatterns.some(re => re.test(line)));
+
+  const scriptLoaderPatterns = [
+    /require\s*\(\s*["']https?:\/\//i,
+    /\bloadstring\s*\(\s*["']/i,
+  ];
+  const lineScriptLoader = findLine((line) => scriptLoaderPatterns.some(re => re.test(line)));
 
   if (lineIp != null) {
     return {
       title: "IP Logger",
       color: 0xED4245,
       line: lineIp,
-      description: "What it does:\n\nA link/URL that steals the target’s IP address, location, device info, and ISP when clicked. Used for doxxing, DDoS attacks, or harassment. Common in Discord DMs, fake \"free nitro\" links, or Roblox game \"asset links\"."
+      description: "A link/URL that steals the target's IP, location, device info, and ISP when clicked. Used for doxxing or harassment."
+    };
+  }
+  if (lineRemote != null) {
+    return {
+      title: "Remote Loader",
+      color: 0xED4245,
+      line: lineRemote,
+      description: "Fetches and runs hidden code from the internet at runtime (loadstring/HttpGet). Can steal tokens, cookies, or install a backdoor."
+    };
+  }
+  if (lineScriptLoader != null) {
+    return {
+      title: "Script Loader",
+      color: 0xF26522,
+      line: lineScriptLoader,
+      description: "Loads external or encoded script code into the game. Often used to hide malware or pull updates from an unknown source."
     };
   }
   if (webhookMalicious) {
     return {
       title: "Discord Webhook",
-      color: 0xF26522,
-      line: lineWh,
-      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
-    };
-  }
-  if (loaderCritical) {
-    return {
-      title: "Script Loader",
       color: 0xED4245,
-      line: lineLoader,
-      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
-    };
-  }
-  if (lineLoader != null) {
-    return {
-      title: "Script Loader",
-      color: 0xF26522,
-      line: lineLoader,
-      description: "What it does:\n\nA tiny piece of code that fetches and runs hidden malicious code from the internet (never stores the payload in the file itself). Common in Roblox exploits, Discord bots, and phishing files — it can steal tokens, log keystrokes, or backdoor your device."
+      line: lineWh,
+      description: "Sends private data to a scammer's Discord channel (cookies, tokens, IPs, inventory)."
     };
   }
   if (webhookBenign) {
@@ -1759,14 +1768,14 @@ function detectThreatAnalysis(code) {
       title: "Discord Webhook",
       color: 0x5865F2,
       line: lineWh,
-      description: "What it does:\n\nA URL hidden in scripts that sends your private data to a scammer’s Discord channel. Used to steal Roblox cookies, account tokens, IPs, Robux, or inventory details. Common in fake exploits, free \"OP\" scripts, or backdoored Roblox modules."
+      description: "Contains a Discord webhook URL. May be logging or data-sending — review before running."
     };
   }
   return {
     title: "Safe",
     color: 0x57F287,
     line: null,
-    description: "A clean file with no Script Loader, no IP Logger, no stealing Webhook. It will not download hidden malware, log your IP/location, or steal your Roblox cookie, account, or private data."
+    description: "No IP Logger, Remote Loader, Script Loader, or stealing Webhook found."
   };
 }
 
@@ -4366,6 +4375,14 @@ client.once("ready", async () => {
   console.log(`📡 LiveScan channels: ${liveN}${liveN ? " → " + config.liveScanChannelIds.map(String).join(", ") : ""}`);
   console.log("⚡ Bot ready!");
   console.log("==========================================");
+  try {
+    await client.user.setPresence({
+      activities: [{ name: ".gg/freesource", type: ActivityType.Playing }],
+      status: "online"
+    });
+  } catch (e) {
+    console.warn("⚠️ presence:", e.message);
+  }
   registerCommands().catch(e => console.error("❌ Register:", e.message));
   setTimeout(() => syncAllPrinceRoles(), 3000);
 });
@@ -4594,7 +4611,6 @@ client.on("interactionCreate", async interaction => {
       const textBody =
         `## Detected: ${result.title}\n` +
         (result.line != null ? `**Line: ${result.line}**\n` : "") +
-        `-# What it does:\n\n` +
         "```" + result.description + "```";
       await interaction.channel.send({
         flags: IS_COMPONENTS_V2,
@@ -6378,9 +6394,8 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
     if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
     const file = attachments[0];
-    const maxUploadSize = isBuyerUser ? 25 * 1024 * 1024 : 200 * 1024;
-    const maxUploadLabel = isBuyerUser ? "25MB" : "200KB";
-    if (file.size > maxUploadSize) { replyUser(msg, `❌ max is ${maxUploadLabel} lol.`).catch(() => {}); return; }
+    const maxUploadSize = 5 * 1024 * 1024;
+    if (file.size > maxUploadSize) { replyUser(msg, "❌ max is **5MB**.").catch(() => {}); return; }
     const savedTokLine = pendingTokenLine.get(String(msg.author.id)) || "";
     pendingTokenLine.delete(String(msg.author.id));
     const sentMsg = await sendUploadLoading(msg).catch(() => null);
@@ -6579,7 +6594,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         let body =
           `## Detected: ${result.title}\n` +
           (result.line != null ? `**Line: ${result.line}**\n` : "") +
-          `-# What it does:\n\n` +
+          
           "```" + result.description + "```";
         if (loadingMsg) await loadingMsg.delete().catch(() => {});
         pendingTokenLine.delete(String(msg.author.id));
