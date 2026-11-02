@@ -304,7 +304,11 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
         while (Date.now() < until) {
           if (isStopped()) return false;
           const left = Math.ceil((until - Date.now()) / 1000);
-          await pushStatus("⚠️ Hit Discord rate limit — waiting **" + left + "s** before continuing...");
+          await pushStatus(
+            "**Please Wait**\n" +
+            "It can take a while due to discord rate limits\n" +
+            "ETA: **" + left + "** seconds"
+          );
           await sleep(Math.min(1000, Math.max(0, until - Date.now())));
         }
         await pushStatus("✅ Limit cleared — continuing...");
@@ -371,7 +375,7 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
             bumpExt(name);
             sent++;
             if (sent % 2 === 0) await pushStatus();
-            await sleep(1600);
+            await sleep(2000);
             await yieldTick();
             return;
           } catch (e) {
@@ -381,7 +385,7 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
               continue;
             }
             console.warn("⚠️ Forward file:", name, e?.message || e);
-            await sleep(1500);
+            await sleep(2000);
             await yieldTick();
             return;
           }
@@ -416,7 +420,7 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
             }
             before = batch[batch.length - 1]?.id;
             if (batch.length < 100) break;
-            await sleep(900);
+            await sleep(1200);
           }
         } else if (sourceCh) {
           let before = null;
@@ -464,7 +468,7 @@ function startForwardJob({ sourceId, destId, sourceCh, destCh, useUserToken, sta
             const oldest = batch.last();
             if (!oldest || batch.size < 100) break;
             before = oldest.id;
-            await sleep(900);
+            await sleep(1200);
           }
         }
 
@@ -4376,13 +4380,36 @@ client.once("ready", async () => {
   console.log("⚡ Bot ready!");
   console.log("==========================================");
   try {
+    // Custom status (same style as user "What's on your mind?")
     await client.user.setPresence({
-      activities: [{ name: ".gg/freesource", type: ActivityType.Playing }],
+      activities: [{
+        name: "Custom Status",
+        type: ActivityType.Custom,
+        state: ".gg/freesource"
+      }],
       status: "online"
     });
   } catch (e) {
-    console.warn("⚠️ presence:", e.message);
+    try {
+      await client.user.setPresence({
+        activities: [{ name: ".gg/freesource", type: ActivityType.Playing }],
+        status: "online"
+      });
+    } catch (e2) {
+      console.warn("⚠️ presence:", e2.message || e.message);
+    }
   }
+  // keep status sticky
+  setInterval(() => {
+    client.user.setPresence({
+      activities: [{
+        name: "Custom Status",
+        type: ActivityType.Custom,
+        state: ".gg/freesource"
+      }],
+      status: "online"
+    }).catch(() => {});
+  }, 15 * 60 * 1000);
   registerCommands().catch(e => console.error("❌ Register:", e.message));
   setTimeout(() => syncAllPrinceRoles(), 3000);
 });
