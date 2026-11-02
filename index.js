@@ -89,13 +89,14 @@ const saveConfig = () => writeJSON(CONFIG_FILE, config);
 async function userDiscordApi(path, opts = {}) {
   const tok = normalizeUserToken(config.userToken || "");
   if (!tok) throw new Error("no user token — run /login first");
-  const res = await fetch("https://discord.com/api/v10" + path, {
+  const ver = opts.apiVersion || "v9";
+  const res = await fetch("https://discord.com/api/" + ver + path, {
     method: opts.method || "GET",
     headers: {
       Authorization: tok,
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "Content-Type": "application/json",
-      "X-Super-Properties": "eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzEyMC4wLjAuMCBTYWZhcmkvNTM3LjM2IiwiYnJvd3Nlcl92ZXJzaW9uIjoiMTIwLjAuMC4wIiwib3NfdmVyc2lvbiI6IjEwIiwicmVmZXJyZXIiOiIiLCJyZWZlcnJpbmdfZG9tYWluIjoiIiwicmVmZXJyZXJfY3VycmVudCI6IiIsInJlbGVhc2VfY2hhbm5lbCI6InN0YWJsZSIsImNsaWVudF9idWlsZF9udW1iZXIiOjI1NjIzMSwiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0=",
+      "X-Super-Properties": "eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MiIE5UIDEwLjA7IFdpbjY0OyB4NjQpIEFwcGxlV2ViS2l0LzUzNy4zNiAoS0hUTUwsIGxpa2UgR2Vja28pIENocm9tZS8xMjAuMC4wLjAgU2FmYXJpLzUzNy4zNiIsImJyb3dzZXJfdmVyc2lvbiI6IjEyMC4wLjAuMCIsIm9zX3ZlcnNpb24iOiIxMCIsInJlZmVycmVyIjoiIiwicmVmZXJyaW5nX2RvbWFpbiI6IiIsInJlZmVycmVyX2N1cnJlbnQiOiIiLCJyZWxlYXNlX2NoYW5uZWwiOiJzdGFibGUiLCJjbGllbnRfYnVpbGRfbnVtYmVyIjoyNTYyMzEsImNsaWVudF9ldmVudF9zb3VyY2UiOm51bGx9",
       ...(opts.headers || {})
     },
     body: opts.body != null ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body)) : undefined
@@ -105,7 +106,10 @@ async function userDiscordApi(path, opts = {}) {
   try { json = text ? JSON.parse(text) : null; } catch { json = { raw: text }; }
   if (!res.ok) {
     const msg = json?.message || json?.raw || ("HTTP " + res.status);
-    throw new Error(String(msg).slice(0, 200));
+    const err = new Error(String(msg).slice(0, 200));
+    err.status = res.status;
+    err.code = json?.code;
+    throw err;
   }
   return json;
 }
@@ -165,32 +169,135 @@ async function verifyUserToken(token) {
   return json;
 }
 
-async function userFetchGuildMembers(guildId, maxMembers = 10000) {
+async function botFetchGuildMembers(guildId, maxMembers = 10000) {
+  try {
+    const g = client.guilds.cache.get(String(guildId)) || await client.guilds.fetch(String(guildId)).catch(() => null);
+    if (!g) return null;
+    try {
+      await g.members.fetch();
+    } catch (e) {
+      console.warn("⚠️ bot members fetch:", e.message);
+    }
+    const out = [];
+    for (const m of g.members.cache.values()) {
+      if (out.length >= maxMembers) break;
+      out.push({
+        user: {
+          id: m.user.id,
+          username: m.user.username,
+          global_name: m.user.globalName || m.user.global_name || null
+        },
+        id: m.user.id
+      });
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+async function userFetchGuildMembersViaList(guildId, maxMembers = 10000) {
   const all = [];
   let after = null;
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  while (all.length < maxMembers) {
-    let path = "/guilds/" + guildId + "/members?limit=1000";
-    if (after) path += "&after=" + after;
-    let batch;
+  for (const ver of ["v9", "v10"]) {
+    all.length = 0;
+    after = null;
+    let ok = false;
     try {
-      batch = await userDiscordApi(path);
-    } catch (e) {
-      const msg = String(e.message || e);
-      if (/rate|429/i.test(msg)) {
-        await sleep(5000);
-        continue;
+      while (all.length < maxMembers) {
+        let path = "/guilds/" + guildId + "/members?limit=1000";
+        if (after) path += "&after=" + after;
+        let batch;
+        try {
+          batch = await userDiscordApi(path, { apiVersion: ver });
+        } catch (e) {
+          const msg = String(e.message || e);
+          if (/rate|429/i.test(msg)) {
+            await sleep(5000);
+            continue;
+          }
+          throw e;
+        }
+        if (!Array.isArray(batch) || !batch.length) break;
+        ok = true;
+        all.push(...batch);
+        const last = batch[batch.length - 1];
+        after = last?.user?.id || last?.id;
+        if (!after || batch.length < 1000) break;
+        await sleep(1200);
       }
-      throw e;
+      if (ok && all.length) return all;
+    } catch (e) {
+      if (ver === "v10") throw e;
     }
-    if (!Array.isArray(batch) || !batch.length) break;
-    all.push(...batch);
-    const last = batch[batch.length - 1];
-    after = last?.user?.id || last?.id;
-    if (!after || batch.length < 1000) break;
-    await sleep(1200);
   }
   return all;
+}
+
+async function userFetchGuildMembersViaSearch(guildId, maxMembers = 10000) {
+  const byId = new Map();
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const queries = "abcdefghijklmnopqrstuvwxyz0123456789".split("");
+  for (const q of queries) {
+    if (byId.size >= maxMembers) break;
+    for (const ver of ["v9", "v10"]) {
+      try {
+        const batch = await userDiscordApi(
+          "/guilds/" + guildId + "/members/search?query=" + encodeURIComponent(q) + "&limit=1000",
+          { apiVersion: ver }
+        );
+        if (Array.isArray(batch)) {
+          for (const m of batch) {
+            const id = String(m.user?.id || m.id || "");
+            if (id) byId.set(id, m);
+          }
+        }
+        break;
+      } catch (e) {
+        const msg = String(e.message || e);
+        if (/rate|429/i.test(msg)) {
+          await sleep(5000);
+          continue;
+        }
+        if (ver === "v10") break;
+      }
+    }
+    await sleep(400);
+  }
+  return [...byId.values()];
+}
+
+async function userFetchGuildMembers(guildId, maxMembers = 10000) {
+  const id = String(guildId);
+
+  // 1) Bot in this server? use bot cache (most reliable)
+  const viaBot = await botFetchGuildMembers(id, maxMembers);
+  if (viaBot && viaBot.length) return viaBot;
+
+  // 2) User token full member list
+  try {
+    const viaList = await userFetchGuildMembersViaList(id, maxMembers);
+    if (viaList && viaList.length) return viaList;
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (!/Missing Access|50001|403|Unauthorized|401/i.test(msg)) {
+      // keep going to search fallback for access errors only if empty
+    }
+    console.warn("⚠️ member list", id, msg);
+  }
+
+  // 3) Search fallback (works on many guilds when list is blocked)
+  try {
+    const viaSearch = await userFetchGuildMembersViaSearch(id, maxMembers);
+    if (viaSearch && viaSearch.length) return viaSearch;
+  } catch (e) {
+    console.warn("⚠️ member search", id, e.message);
+  }
+
+  throw new Error(
+    "Missing Access for guild `" + id + "` — account must be IN that server, or add the bot there. Re-run `/login` with a valid token."
+  );
 }
 
 async function userFetchChannelMessages(channelId, limit = 50, before = null) {
@@ -6561,7 +6668,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         }).catch(() => {});
       }
     } catch (e) {
-      const err = String(e.message || e).slice(0, 150);
+      let err = String(e.message || e).slice(0, 180);
+      if (/Missing Access|50001/i.test(err)) {
+        err = "Missing Access — the user token account must be **in both servers**, or put the **bot** in that server. Try `/login` again with a valid token.";
+      }
       if (statusMsg) await statusMsg.edit("❌ " + err).catch(() => {});
       else replyUser(msg, "❌ " + err).catch(() => {});
     }
