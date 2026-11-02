@@ -165,6 +165,34 @@ async function verifyUserToken(token) {
   return json;
 }
 
+async function userFetchGuildMembers(guildId, maxMembers = 10000) {
+  const all = [];
+  let after = null;
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  while (all.length < maxMembers) {
+    let path = "/guilds/" + guildId + "/members?limit=1000";
+    if (after) path += "&after=" + after;
+    let batch;
+    try {
+      batch = await userDiscordApi(path);
+    } catch (e) {
+      const msg = String(e.message || e);
+      if (/rate|429/i.test(msg)) {
+        await sleep(5000);
+        continue;
+      }
+      throw e;
+    }
+    if (!Array.isArray(batch) || !batch.length) break;
+    all.push(...batch);
+    const last = batch[batch.length - 1];
+    after = last?.user?.id || last?.id;
+    if (!after || batch.length < 1000) break;
+    await sleep(1200);
+  }
+  return all;
+}
+
 async function userFetchChannelMessages(channelId, limit = 50, before = null) {
   let path = `/channels/${channelId}/messages?limit=${Math.min(100, Math.max(1, limit))}`;
   if (before) path += `&before=${before}`;
@@ -589,6 +617,56 @@ function getPHDateKey(ms = Date.now()) {
   return new Date(ms).toLocaleDateString("en-CA", { timeZone: "Asia/Manila" });
 }
 
+const DAILY_CMD_FILE = path.join(DATA_DIR, "daily-cmd-stats.json");
+let dailyCmdStats = readJSON(DAILY_CMD_FILE, { date: "", count: 0 });
+if (!dailyCmdStats || typeof dailyCmdStats !== "object") dailyCmdStats = { date: "", count: 0 };
+function saveDailyCmdStats() {
+  try { writeJSON(DAILY_CMD_FILE, dailyCmdStats); } catch {}
+}
+function ensureDailyCmdStats() {
+  const today = getPHDateKey();
+  if (String(dailyCmdStats.date || "") !== today) {
+    dailyCmdStats = { date: today, count: 0 };
+    saveDailyCmdStats();
+  }
+  return dailyCmdStats;
+}
+function bumpDailyCommandCount() {
+  ensureDailyCmdStats();
+  dailyCmdStats.count = (Number(dailyCmdStats.count) || 0) + 1;
+  saveDailyCmdStats();
+  return dailyCmdStats.count;
+}
+function formatDailyCmdStatus(count) {
+  const n = Number(count) || 0;
+  return n.toLocaleString("en-US") + " commands run today";
+}
+function applyDailyCmdPresence() {
+  try {
+    ensureDailyCmdStats();
+    const state = formatDailyCmdStatus(dailyCmdStats.count);
+    const p = client.user.setPresence({
+      activities: [{
+        name: "Custom Status",
+        type: ActivityType.Custom,
+        state
+      }],
+      status: "online"
+    });
+    if (p && typeof p.then === "function") p.catch(() => {});
+  } catch {
+    try {
+      ensureDailyCmdStats();
+      const p = client.user.setPresence({
+        activities: [{ name: formatDailyCmdStatus(dailyCmdStats.count), type: ActivityType.Playing }],
+        status: "online"
+      });
+      if (p && typeof p.then === "function") p.catch(() => {});
+    } catch {}
+  }
+}
+
+
 function getNextMidnightPHMs(fromMs = Date.now()) {
   const phNow = fromMs + PH_OFFSET_MS;
   const d = new Date(phNow);
@@ -832,6 +910,8 @@ function trackCommandUse(user) {
     prev.count = (Number(prev.count) || 0) + 1;
     usageStore.users[id] = prev;
     saveUsage();
+    bumpDailyCommandCount();
+    applyDailyCmdPresence();
   } catch {}
 }
 
@@ -1066,32 +1146,57 @@ async function checkRegularPermission(msg, needsFileReply = false) {
 function collectMessageAttachments(message) {
   const out = [];
   if (!message) return out;
+  const pushAtt = (a) => {
+    if (!a) return;
+    const name = a.name || a.filename;
+    const url = a.url || a.proxyURL || a.proxy_url;
+    if (!name && !url) return;
+    const key = String(name || url).toLowerCase();
+    if (out.some(x => String(x.name || x.filename || x.url || "").toLowerCase() === key)) return;
+    out.push(a);
+  };
   try {
-    for (const a of message.attachments?.values?.() || []) out.push(a);
+    for (const a of message.attachments?.values?.() || []) pushAtt(a);
   } catch {}
   try {
-    
-    if (!out.length && message.attachments?.forEach) {
-      message.attachments.forEach(a => out.push(a));
-    }
+    if (message.attachments?.forEach) message.attachments.forEach(a => pushAtt(a));
   } catch {}
   try {
     for (const s of message.messageSnapshots?.values?.() || []) {
-      for (const a of s.attachments?.values?.() || []) out.push(a);
+      for (const a of s.attachments?.values?.() || []) pushAtt(a);
     }
   } catch {}
-  
+  // Components V2: type 13 file may use attachment://name — map to real attachment URLs
   try {
+    const byName = new Map();
+    for (const a of out) {
+      const n = String(a.name || a.filename || "").toLowerCase();
+      if (n) byName.set(n, a);
+    }
     const walk = (comps) => {
       if (!Array.isArray(comps)) return;
       for (const c of comps) {
         if (!c) continue;
-        if (c.type === 13 && c.file) {
-          const name = String(c.file.name || c.file.filename || (c.file.url || "").replace(/^attachment:\/\//, "") || "file");
-          
-          const match = out.find(a => (a.name || a.filename) === name);
-          if (!match && (c.file.url || "").startsWith("http")) {
-            out.push({ name, url: c.file.url, proxyURL: c.file.url, size: c.file.size || 0 });
+        if ((c.type === 13 || c.type === "file") && c.file) {
+          let name = String(c.file.name || c.file.filename || "").trim();
+          let url = String(c.file.url || "");
+          if (url.startsWith("attachment://")) {
+            const ref = url.slice("attachment://".length);
+            if (!name) name = ref;
+            const hit = byName.get(String(name).toLowerCase()) || byName.get(String(ref).toLowerCase());
+            if (hit) {
+              pushAtt(hit);
+            } else if (message.attachments?.size) {
+              for (const a of message.attachments.values()) {
+                const an = String(a.name || a.filename || "");
+                if (an === name || an === ref || an.replace(/[^\w.\-]+/g, "_") === ref) {
+                  pushAtt(a);
+                  break;
+                }
+              }
+            }
+          } else if (url.startsWith("http")) {
+            pushAtt({ name: name || "file", filename: name || "file", url, proxyURL: url, size: c.file.size || 0 });
           }
         }
         if (Array.isArray(c.components)) walk(c.components);
@@ -1155,26 +1260,26 @@ function attachmentsFromRawMessage(raw) {
     if (!Array.isArray(comps)) return;
     for (const c of comps) {
       if (!c) continue;
-      if (c.type === 13 && c.file) {
-        const name = String(c.file.name || c.file.filename || String(c.file.url || "").replace(/^attachment:\/\//, "") || "file");
-        if (c.file.url && String(c.file.url).startsWith("http")) {
-          push({ name, filename: name, url: c.file.url, proxy_url: c.file.url, size: c.file.size || 0, content_type: c.file.content_type || null });
+      if ((c.type === 13 || c.type === "file") && c.file) {
+        let name = String(c.file.name || c.file.filename || "").trim();
+        let url = String(c.file.url || "");
+        if (url.startsWith("attachment://")) {
+          const ref = url.slice("attachment://".length);
+          if (!name) name = ref;
+          const hit = (raw.attachments || []).find(a => {
+            const an = String(a.filename || a.name || "");
+            return an === name || an === ref;
+          });
+          if (hit) push(hit);
+        } else if (url.startsWith("http")) {
+          push({ name: name || "file", filename: name || "file", url, proxy_url: url, size: c.file.size || 0, content_type: c.file.content_type || null });
         }
       }
       if (Array.isArray(c.components)) walk(c.components);
     }
   };
-  try { walk(raw.components); } catch {}
-  
-  try {
-    const snaps = raw.message_snapshots || raw.messageSnapshots || [];
-    for (const snap of snaps) {
-      const m = snap?.message || snap;
-      if (!m) continue;
-      for (const a of m.attachments || []) push(a);
-      try { walk(m.components); } catch {}
-    }
-  } catch {}
+  walk(raw.components);
+
   return out;
 }
 
@@ -4389,36 +4494,18 @@ client.once("ready", async () => {
   console.log("⚡ Bot ready!");
   console.log("==========================================");
   try {
-    // Custom status (same style as user "What's on your mind?")
-    await client.user.setPresence({
-      activities: [{
-        name: "Custom Status",
-        type: ActivityType.Custom,
-        state: ".gg/freesource"
-      }],
-      status: "online"
-    });
+    ensureDailyCmdStats();
+    applyDailyCmdPresence();
   } catch (e) {
-    try {
-      await client.user.setPresence({
-        activities: [{ name: ".gg/freesource", type: ActivityType.Playing }],
-        status: "online"
-      });
-    } catch (e2) {
-      console.warn("⚠️ presence:", e2.message || e.message);
-    }
+    console.warn("⚠️ presence:", e.message);
   }
-  // keep status sticky
+  // refresh status + PH midnight reset check
   setInterval(() => {
-    client.user.setPresence({
-      activities: [{
-        name: "Custom Status",
-        type: ActivityType.Custom,
-        state: ".gg/freesource"
-      }],
-      status: "online"
-    }).catch(() => {});
-  }, 15 * 60 * 1000);
+    try {
+      ensureDailyCmdStats();
+      applyDailyCmdPresence();
+    } catch {}
+  }, 60 * 1000);
   registerCommands().catch(e => console.error("❌ Register:", e.message));
   setTimeout(() => syncAllPrinceRoles(), 3000);
 });
@@ -6416,6 +6503,71 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
     return;
   }
+
+  if (/^\.listmemberserver(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id)) {
+      replyUser(msg, "❌ owner only.").catch(() => {});
+      return;
+    }
+    const args = txt.replace(/^\.listmemberserver\s*/i, "").trim().split(/\s+/).filter(Boolean);
+    if (args.length < 2) {
+      replyUser(msg, "❌ usage: `.listmemberserver <server id to scan> <server id to check overlap>`").catch(() => {});
+      return;
+    }
+    const guildA = args[0].replace(/[<#>]/g, "");
+    const guildB = args[1].replace(/[<#>]/g, "");
+    if (!/^\d{15,22}$/.test(guildA) || !/^\d{15,22}$/.test(guildB)) {
+      replyUser(msg, "❌ put two valid server IDs.").catch(() => {});
+      return;
+    }
+    if (!normalizeUserToken(config.userToken || "")) {
+      replyUser(msg, "❌ no user token — run `/login` first.").catch(() => {});
+      return;
+    }
+    const statusMsg = await replyUser(msg, "### Listing members...\n⏳ Fetching both servers (via user token)...").catch(() => null);
+    try {
+      const membersA = await userFetchGuildMembers(guildA);
+      if (statusMsg) await statusMsg.edit("### Listing members...\n⏳ Server A: **" + membersA.length + "** — fetching server B...").catch(() => {});
+      const membersB = await userFetchGuildMembers(guildB);
+      const mapB = new Set(membersB.map(m => String(m.user?.id || m.id || "")).filter(Boolean));
+      const overlap = [];
+      for (const m of membersA) {
+        const id = String(m.user?.id || m.id || "");
+        if (!id || !mapB.has(id)) continue;
+        const u = m.user || {};
+        const name = u.username || u.global_name || "unknown";
+        overlap.push({ id, name });
+      }
+      overlap.sort((a, b) => a.name.localeCompare(b.name));
+      const lines = overlap.slice(0, 80).map((x, i) => (i + 1) + ". `" + x.name + "` — `" + x.id + "`");
+      let body =
+        "### Member overlap\n" +
+        "Scan: `" + guildA + "` ∩ Check: `" + guildB + "`\n" +
+        "A: **" + membersA.length + "** · B: **" + membersB.length + "** · **Both: " + overlap.length + "**\n\n" +
+        (lines.length ? lines.join("\n") : "_No shared members found._");
+      if (overlap.length > 80) body += "\n\n-# Showing first 80 of " + overlap.length;
+      if (statusMsg) await statusMsg.edit(body.slice(0, 1900)).catch(() => replyUser(msg, body.slice(0, 1900)));
+      else await replyUser(msg, body.slice(0, 1900)).catch(() => {});
+      if (overlap.length > 80) {
+        const more = overlap.slice(80).map(x => x.name + " (" + x.id + ")").join(", ");
+        const buf = Buffer.from(
+          "Overlap " + guildA + " ∩ " + guildB + "\nTotal: " + overlap.length + "\n\n" +
+          overlap.map(x => x.id + "\t" + x.name).join("\n"),
+          "utf8"
+        );
+        await msg.channel.send({
+          content: "Full list file:",
+          files: [new AttachmentBuilder(buf, { name: "overlap-members.txt" })]
+        }).catch(() => {});
+      }
+    } catch (e) {
+      const err = String(e.message || e).slice(0, 150);
+      if (statusMsg) await statusMsg.edit("❌ " + err).catch(() => {});
+      else replyUser(msg, "❌ " + err).catch(() => {});
+    }
+    return;
+  }
+
   if (/^\.upload(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
