@@ -949,25 +949,32 @@ function tokensResultSuffix(isBuyerUser, tokensLeft) {
   if (isBuyerUser || tokensLeft === null || tokensLeft === undefined) return "";
   return `\n-# You have ${tokensLeft} Tokens left.`;
 }
+const COMMAND_COOLDOWNS_SEC = {
+  detect: 15,
+  find: 15,
+  get: 25,
+  upload: 60
+  // help, leaderboard: no cooldown
+};
+const commandCooldownUntil = new Map(); // key userId:cmd -> timestamp ms
+
 function checkCommandCooldown(userId, cmd, isBuyerUser) {
-  const free = TOKEN_FREE_CMDS.has(cmd);
-  
   if (isBuyerUser || isOwner(userId)) {
-    pendingTokenLine.delete(String(userId));
-    return { onCooldown: false, unlimited: true, tokensLeft: null, free };
+    return { onCooldown: false, unlimited: true, remaining: null };
   }
-  if (free) {
-    const peek = peekTokens(userId, false);
-    pendingTokenLine.set(String(userId), tokenLeftLine(peek.tokens, false));
-    return { onCooldown: false, unlimited: false, tokensLeft: peek.tokens, free: true };
+  const sec = COMMAND_COOLDOWNS_SEC[cmd];
+  if (sec == null || sec <= 0) {
+    return { onCooldown: false, unlimited: false, remaining: null };
   }
-  const r = tryConsumeToken(userId, false);
-  if (!r.ok) {
-    pendingTokenLine.delete(String(userId));
-    return { onCooldown: true, noTokens: true, waitUntil: r.waitUntil, tokensLeft: 0 };
+  const key = String(userId) + ":" + String(cmd);
+  const until = commandCooldownUntil.get(key) || 0;
+  const now = Date.now();
+  if (until > now) {
+    const left = Math.max(1, Math.ceil((until - now) / 1000));
+    return { onCooldown: true, remaining: left + "s", remainingSec: left };
   }
-  pendingTokenLine.set(String(userId), tokenLeftLine(r.tokens, false));
-  return { onCooldown: false, unlimited: false, tokensLeft: r.tokens, free: false };
+  commandCooldownUntil.set(key, now + sec * 1000);
+  return { onCooldown: false, unlimited: false, remaining: null };
 }
 
 function replyNoTokens(msg, waitUntil) {
@@ -1155,7 +1162,7 @@ async function syncAllPrinceRoles() {
     }
   } catch {}
 }
-async function checkRegularPermission(msg, needsFileReply = false) {
+async function checkRegularPermission(msg, needsFileReply = false, opts = {}) {
   try {
     if (isBlacklisted(msg.author?.id) && !isOwner(msg.author?.id)) {
       return { allowed: false, reason: null, silent: true, isBuyer: false, blacklisted: true };
@@ -1173,11 +1180,42 @@ async function checkRegularPermission(msg, needsFileReply = false) {
   }
 
   const isDM = !msg.guild;
+  const skipChannel = !!(opts && opts.skipChannelCheck);
 
   
   if (isDM) {
-    sendInputErrorV2(msg, "Buy a Premium on https://discord.com/channels/1509484518766018711/1561710834344923247 — to use this command or use command in DMs.").catch(() => {});
-    return { allowed: false, reason: null, silent: true, isBuyer: false };
+    const hasTag = await hasPrinceStatus(msg.author.id);
+    if (!hasTag) {
+      try {
+        pendingTagRetry.set(String(msg.author.id), {
+          content: String(msg.content || ""),
+          channelId: String(msg.channelId || msg.channel?.id || ""),
+          guildId: String(GUILD_ID || ""),
+          messageId: String(msg.id || ""),
+          at: Date.now()
+        });
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("tagcheck_" + msg.author.id)
+            .setLabel("Check again")
+            .setStyle(ButtonStyle.Success)
+        );
+        await replyComponentsV2(msg, {
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: 0xED4245,
+            components: [
+              { type: 10, content: "## Server tag required\nWear the `FS` server tag, then click check again." },
+              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+              row.toJSON()
+            ]
+          }]
+        }, { mention: false }).catch(() => {});
+      } catch {}
+      return { allowed: false, reason: null, silent: true, isBuyer: false };
+    }
+    return { allowed: true, isBuyer: false };
   }
 
   
@@ -1223,7 +1261,7 @@ async function checkRegularPermission(msg, needsFileReply = false) {
     return { allowed: false, reason: null, silent: true, isBuyer: false };
   }
   
-  if (!channelAllowed(msg)) {
+  if (!skipChannel && !channelAllowed(msg)) {
     const allowedMention = config.allowedChannelId ? ("<#" + config.allowedChannelId + ">") : "the allowed channel";
     sendInputErrorV2(msg, "**Tips:**\n- Go to " + allowedMention + ", make sure you're using our server tag.").catch(() => {});
     return { allowed: false, reason: null, silent: true, isBuyer: false };
@@ -4481,26 +4519,6 @@ const commands = [
     .setDescription("Post the Finder Panel here.")
     .toJSON(),
   new SlashCommandBuilder()
-    .setName("login")
-    .setDescription("Login Discord Token")
-    .addStringOption(o => o
-      .setName("token")
-      .setDescription("The Discord Token")
-      .setRequired(true))
-    .toJSON(),
-  new SlashCommandBuilder()
-    .setName("forward")
-    .setDescription("Forward files from one channel to another.")
-    .addStringOption(o => o
-      .setName("source")
-      .setDescription("Source channel ID or link")
-      .setRequired(true))
-    .addStringOption(o => o
-      .setName("destination")
-      .setDescription("Destination channel ID or link")
-      .setRequired(true))
-    .toJSON(),
-  new SlashCommandBuilder()
     .setName("blacklist")
     .setDescription("Open the blacklist config.")
     .addStringOption(o => o
@@ -4515,27 +4533,6 @@ const commands = [
     .addUserOption(o => o
       .setName("user")
       .setDescription("The user you want to blacklist or remove.")
-      .setRequired(false))
-    .toJSON(),
-  new SlashCommandBuilder()
-    .setName("whitelist")
-    .setDescription("Whitelist a user.")
-    .addStringOption(o => o
-      .setName("mode")
-      .setDescription("Choose what you want.")
-      .setRequired(true)
-      .addChoices(
-        { name: "Add", value: "add" },
-        { name: "Remove", value: "remove" },
-        { name: "List", value: "list" }
-      ))
-    .addUserOption(o => o
-      .setName("user")
-      .setDescription("The user you want to whitelist or remove.")
-      .setRequired(false))
-    .addStringOption(o => o
-      .setName("id")
-      .setDescription("User ID or Username.")
       .setRequired(false))
     .toJSON()
 ].map(c => c);
@@ -4658,17 +4655,19 @@ const helpPages = [
     .setDescription(
 `**\`.detect\`** Detect a risk in the file.
 
-**\`.upload\`** Turn your file into Script Loader.
+**\`.upload\`** Upload your file from pastefy.
 
-**\`.get\`** Get file using ID.`
+**\`.get\`** Get the file using it's ID.`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
     .setColor(BLURPLE)
     .setDescription(
-`**\`.find\`** Search files by name.
+`**\`.find\`** Search a file by it's name.
 
-**\`.leaderboard\`** Top command users.`
+**\`.leaderboard\`** Show top user uses commands.
+
+**\`.help\`** Show this message.`
     ),
   new EmbedBuilder()
     .setTitle("🤖 Bot Commands")
@@ -4677,7 +4676,7 @@ const helpPages = [
 `**\`.clean\`** [\`.cl\`] Clean a script.
 
 > Premium users can use all commands in DMs.
-> Premium users have unlimited tokens.`
+> Premium users bypass cooldown.`
     )
 ];
 const helpSessions = new Map();
@@ -4685,16 +4684,18 @@ const helpSessions = new Map();
 const helpPageBodies = [
   { color: 0x5865F2, text: `**\`.detect\`** Detect a risk in the file.
 
-**\`.upload\`** Turn your file into Script Loader.
+**\`.upload\`** Upload your file from pastefy.
 
-**\`.get\`** Get file using ID.` },
-  { color: 0x5865F2, text: `**\`.find\`** Search files by name.
+**\`.get\`** Get the file using it's ID.` },
+  { color: 0x5865F2, text: `**\`.find\`** Search a file by it's name.
 
-**\`.leaderboard\`** Top command users.` },
+**\`.leaderboard\`** Show top user uses commands.
+
+**\`.help\`** Show this message.` },
   { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Clean a script.
 
 > Premium users can use all commands in DMs.
-> Premium users have unlimited tokens.` }
+> Premium users bypass cooldown.` }
 ];
 
 function buildHelpV2(page, userId) {
@@ -4785,7 +4786,7 @@ client.on("interactionCreate", async interaction => {
           type: 17,
           accent_color: RENAME_V2_ACCENT,
           components: [
-            { type: 10, content: "### Choose Clean Version\nSelect a clean version below." },
+            { type: 10, content: "### Choose a Clean Version\nSelect a clean version below." },
             { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
             row.toJSON()
           ]
@@ -5573,7 +5574,7 @@ client.on("interactionCreate", async interaction => {
             type: 17,
             accent_color: RENAME_V2_ACCENT,
             components: [
-              { type: 10, content: "### Choose Clean Version\nSelect a clean version below." },
+              { type: 10, content: "### Choose a Clean Version\nSelect a clean version below." },
               { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
               row.toJSON()
             ]
@@ -5601,38 +5602,9 @@ client.on("interactionCreate", async interaction => {
       const query = (interaction.fields.getTextInputValue("finderpanel_query") || "").trim();
       await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
       const isBuyerUser = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
-      const tok = tryConsumeToken(interaction.user.id, isBuyerUser);
-      if (!tok.ok && !isBuyerUser) {
-        const leftMs = Math.max(0, (tok.waitUntil || getNextMidnightPHMs()) - Date.now());
-        await interaction.editReply({ content: `❌ You need to wait **${formatTokenWait(leftMs)}**` });
-        return;
-      }
-      const results = findFiles(query);
-      if (!results.length) { await interaction.editReply({ content: "❌ no found." }); return; }
-      const perPage = 8;
-      const totalPages = Math.ceil(results.length / perPage);
-      const pageItems = results.slice(0, perPage);
-      const listLines = pageItems.map(f => `> \`${finderDisplayName(f.filename)}\` — ID: \`${f.id}\``);
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("prev_page").setLabel("Back").setStyle(ButtonStyle.Secondary).setDisabled(true),
-        new ButtonBuilder().setCustomId("next_page").setLabel("Next").setStyle(ButtonStyle.Success).setDisabled(totalPages <= 1)
-      );
-      const v2 = buildFinderV2Payload({ listLines, pageLabel: `Pages 1/${totalPages}`, actionRow: row, ephemeral: true });
-      const sent = await interaction.editReply({ ...v2, content: null });
-      if (sent) paginationMenus.set(interaction.user.id, {
-        results, page: 1, totalPages, messageId: sent.id,
-        authorId: interaction.user.id, createdAt: Date.now(), isBuyer: isBuyerUser
-      });
-      return;
-    }
-    if (interaction.customId === "finderpanel_get_modal") {
-      const raw = (interaction.fields.getTextInputValue("finderpanel_ids") || "").trim();
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      const isBuyerUser = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
-      const tok = tryConsumeToken(interaction.user.id, isBuyerUser);
-      if (!tok.ok && !isBuyerUser) {
-        const leftMs = Math.max(0, (tok.waitUntil || getNextMidnightPHMs()) - Date.now());
-        await interaction.editReply({ content: `❌ You need to wait **${formatTokenWait(leftMs)}**` });
+      const cd = checkCommandCooldown(interaction.user.id, "get", isBuyerUser);
+      if (cd.onCooldown) {
+        await interaction.editReply({ content: `❌ you're on ${cd.remaining} cooldown, please wait.` });
         return;
       }
       const ids = raw.split(/[\s,]+/).filter(Boolean);
@@ -5727,94 +5699,7 @@ client.on("interactionCreate", async interaction => {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     
-    if (interaction.commandName === "forward") {
-      if (!canUseForward(interaction.user.id)) {
-        await interaction.editReply({ content: "❌ owner / whitelist only." });
-        return;
-      }
-      const sourceRaw = interaction.options.getString("source") || "";
-      const destRaw = interaction.options.getString("destination") || "";
-      const sourceId = parseChannelIdArg(sourceRaw);
-      const destId = parseChannelIdArg(destRaw);
-      if (!sourceId || !destId) {
-        await interaction.editReply({ content: "❌ put valid source and destination channel IDs or links." });
-        return;
-      }
-      let destCh = null;
-      try { destCh = await client.channels.fetch(destId); } catch {}
-      if (!destCh || !destCh.isTextBased?.()) {
-        await interaction.editReply({ content: "❌ invalid destination channel (bot must be in that server)." });
-        return;
-      }
-      let sourceCh = null;
-      try { sourceCh = await client.channels.fetch(sourceId); } catch {}
-      const useUserToken = !sourceCh || !sourceCh.isTextBased?.();
-      if (useUserToken) {
-        const ut = normalizeUserToken(config.userToken || "");
-        if (!ut) {
-          await interaction.editReply({ content: "❌ source channel not visible to bot. Owner must run `/login` first." });
-          return;
-        }
-        try {
-          await userDiscordApi("/channels/" + sourceId);
-        } catch (e1) {
-          try {
-            await userFetchChannelMessages(sourceId, 1);
-          } catch (e2) {
-            await interaction.editReply({
-              content: "❌ invalid source channel id (user token cannot access it): " + String(e2.message || e1.message || e2).slice(0, 120)
-            });
-            return;
-          }
-        }
-      }
-      const jobId = "fwd_" + interaction.user.id + "_" + Date.now();
-      const startBody =
-        "### Forwarding...\n" +
-        `from <#${sourceId}> → <#${destCh.id}>` +
-        (useUserToken ? " *(via user token)*" : "") +
-        "\n*Starting...*";
-      const statusMsg = await interaction.channel.send(
-        buildForwardV2Payload(startBody, jobId, false)
-      ).catch(() => null);
-      await interaction.editReply({
-        content: statusMsg
-          ? `⚡ Forward started — status in ${statusMsg.url || ("<#" + interaction.channelId + ">")}`
-          : `⚡ Forwarding from \`${sourceId}\` → <#${destCh.id}>...`
-      }).catch(() => {});
-
-      startForwardJob({
-        sourceId,
-        destId,
-        sourceCh,
-        destCh,
-        useUserToken,
-        jobId,
-        statusEdit: async (content, opts = {}) => {
-          const body = String(content || "").slice(0, 3900);
-          const done = !!opts.done;
-          const payload = buildForwardV2Payload(body, jobId, done);
-          try {
-            if (statusMsg) {
-              await statusMsg.edit(payload).catch(async () => {
-                await interaction.channel?.send(payload).catch(() => {});
-              });
-            } else {
-              await interaction.editReply({ content: body.slice(0, 1900) }).catch(() => {});
-            }
-          } catch {
-            try { await interaction.channel?.send(payload).catch(() => {}); } catch {}
-          }
-        }
-      })
-      return;
-    }
-
-    if (!isOwner(interaction.user.id)) {
-      await interaction.editReply({ content: "❌ owner only." });
-      return;
-    }
-    if (interaction.commandName === "say") {
+if (interaction.commandName === "say") {
       const text = interaction.options.getString("text");
       const type = interaction.options.getString("type") || "good";
       const title = interaction.options.getString("title");
@@ -5910,33 +5795,7 @@ client.on("interactionCreate", async interaction => {
       return;
     }
     
-    if (interaction.commandName === "login") {
-      if (!isOwner(interaction.user.id)) {
-        await interaction.editReply({ content: "❌ owner only." });
-        return;
-      }
-      const raw = (interaction.options.getString("token") || "").trim();
-      if (!raw) {
-        await interaction.editReply({ content: "❌ put a token." });
-        return;
-      }
-      try {
-        const normalized = normalizeUserToken(raw);
-        const me = await verifyUserToken(normalized);
-        config.userToken = normalized;
-        saveConfig();
-        const tag = me.username
-          ? (me.discriminator && me.discriminator !== "0" ? `${me.username}#${me.discriminator}` : me.username)
-          : "unknown";
-        await interaction.editReply({
-          content: "✅ Logged in as **" + tag + "** (`" + me.id + "`).\nUser token saved — bot can forward/fetch where this account is present."
-        });
-      } catch (e) {
-        await interaction.editReply({ content: "❌ login failed: " + String(e.message || e).slice(0, 150) });
-      }
-      return;
-    }
-    if (interaction.commandName === "blacklist") {
+if (interaction.commandName === "blacklist") {
       const mode = (interaction.options.getString("mode") || "").toLowerCase();
       const targetUser = interaction.options.getUser("user");
       if (mode === "list") {
@@ -5956,70 +5815,6 @@ client.on("interactionCreate", async interaction => {
       if (mode === "remove") {
         const ok = blacklistRemove(targetUser.id);
         await interaction.editReply({ content: ok ? `✅ removed <@${targetUser.id}>.` : `⚠️ was not blacklisted.` });
-        return;
-      }
-      await interaction.editReply({ content: "❌ mode must be Add, Remove, or List." });
-      return;
-    }
-    if (interaction.commandName === "whitelist") {
-      const mode = (interaction.options.getString("mode") || "").toLowerCase();
-      const targetUser = interaction.options.getUser("user");
-      const idOrName = (interaction.options.getString("id") || "").trim();
-      if (mode === "list") {
-        const list = whitelistList();
-        if (!list.length) { await interaction.editReply({ content: "📋 Whitelist is empty." }); return; }
-        const lines = list.slice(0, 50).map((id, i) => `${i + 1}. <@${id}> (\`${id}\`)`);
-        await interaction.editReply({ content: `📋 **Whitelist (${list.length}):**\n${lines.join("\n")}` });
-        return;
-      }
-      let targetId = targetUser?.id || null;
-      let label = targetUser ? `<@${targetUser.id}>` : null;
-      if (!targetId && idOrName) {
-        if (/^\d{17,20}$/.test(idOrName)) {
-          targetId = idOrName;
-          label = `<@${targetId}> (\`${targetId}\`)`;
-        } else {
-          const name = idOrName.replace(/^@/, "").toLowerCase();
-          let found = client.users.cache.find(u =>
-            u.username?.toLowerCase() === name ||
-            u.globalName?.toLowerCase() === name ||
-            `${u.username}`.toLowerCase() === name
-          );
-          if (!found && interaction.guild) {
-            try {
-              const members = await interaction.guild.members.fetch({ query: idOrName, limit: 5 }).catch(() => null);
-              if (members?.size) {
-                const m = members.find(mm =>
-                  mm.user.username?.toLowerCase() === name ||
-                  mm.user.globalName?.toLowerCase() === name ||
-                  mm.displayName?.toLowerCase() === name
-                ) || members.first();
-                if (m) found = m.user;
-              }
-            } catch {}
-          }
-          if (found) {
-            targetId = found.id;
-            label = `<@${found.id}> (\`${found.username}\`)`;
-          }
-        }
-      }
-      if (!targetId) {
-        await interaction.editReply({ content: "❌ pick a user or put an ID / username." });
-        return;
-      }
-      if (isOwner(targetId)) {
-        await interaction.editReply({ content: "❌ owner is always allowed — no need to whitelist." });
-        return;
-      }
-      if (mode === "add") {
-        const ok = whitelistAdd(targetId);
-        await interaction.editReply({ content: ok ? `✅ whitelisted ${label} — can use \`.forward\`.` : `⚠️ already whitelisted.` });
-        return;
-      }
-      if (mode === "remove") {
-        const ok = whitelistRemove(targetId);
-        await interaction.editReply({ content: ok ? `✅ removed ${label} from whitelist.` : `⚠️ was not on whitelist.` });
         return;
       }
       await interaction.editReply({ content: "❌ mode must be Add, Remove, or List." });
@@ -6611,82 +6406,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  if (/^\.listmemberserver(?:\s|$)/i.test(txt)) {
-    if (!isOwner(msg.author.id)) {
-      replyUser(msg, "❌ owner only.").catch(() => {});
-      return;
-    }
-    const args = txt.replace(/^\.listmemberserver\s*/i, "").trim().split(/\s+/).filter(Boolean);
-    if (args.length < 2) {
-      replyUser(msg, "❌ usage: `.listmemberserver <server id to scan> <server id to check overlap>`").catch(() => {});
-      return;
-    }
-    const guildA = args[0].replace(/[<#>]/g, "");
-    const guildB = args[1].replace(/[<#>]/g, "");
-    if (!/^\d{15,22}$/.test(guildA) || !/^\d{15,22}$/.test(guildB)) {
-      replyUser(msg, "❌ put two valid server IDs.").catch(() => {});
-      return;
-    }
-    if (!normalizeUserToken(config.userToken || "")) {
-      replyUser(msg, "❌ no user token — run `/login` first.").catch(() => {});
-      return;
-    }
-    const statusMsg = await replyUser(msg, "### Listing members...\n⏳ Fetching both servers (via user token)...").catch(() => null);
-    try {
-      const membersA = await userFetchGuildMembers(guildA);
-      if (statusMsg) await statusMsg.edit("### Listing members...\n⏳ Server A: **" + membersA.length + "** — fetching server B...").catch(() => {});
-      const membersB = await userFetchGuildMembers(guildB);
-      const mapB = new Set(membersB.map(m => String(m.user?.id || m.id || "")).filter(Boolean));
-      const overlap = [];
-      for (const m of membersA) {
-        const id = String(m.user?.id || m.id || "");
-        if (!id || !mapB.has(id)) continue;
-        const u = m.user || {};
-        const name = u.username || u.global_name || "unknown";
-        overlap.push({ id, name });
-      }
-      overlap.sort((a, b) => a.name.localeCompare(b.name));
-      const lines = overlap.slice(0, 80).map((x, i) => (i + 1) + ". `" + x.name + "` — `" + x.id + "`");
-      let body =
-        "### Member overlap\n" +
-        "Scan: `" + guildA + "` ∩ Check: `" + guildB + "`\n" +
-        "A: **" + membersA.length + "** · B: **" + membersB.length + "** · **Both: " + overlap.length + "**\n\n" +
-        (lines.length ? lines.join("\n") : "_No shared members found._");
-      if (overlap.length > 80) body += "\n\n-# Showing first 80 of " + overlap.length;
-      if (statusMsg) await statusMsg.edit(body.slice(0, 1900)).catch(() => replyUser(msg, body.slice(0, 1900)));
-      else await replyUser(msg, body.slice(0, 1900)).catch(() => {});
-      if (overlap.length > 80) {
-        const more = overlap.slice(80).map(x => x.name + " (" + x.id + ")").join(", ");
-        const buf = Buffer.from(
-          "Overlap " + guildA + " ∩ " + guildB + "\nTotal: " + overlap.length + "\n\n" +
-          overlap.map(x => x.id + "\t" + x.name).join("\n"),
-          "utf8"
-        );
-        await msg.channel.send({
-          content: "Full list file:",
-          files: [new AttachmentBuilder(buf, { name: "overlap-members.txt" })]
-        }).catch(() => {});
-      }
-    } catch (e) {
-      let err = String(e.message || e).slice(0, 180);
-      if (/Missing Access|50001/i.test(err)) {
-        err = "Missing Access — the user token account must be **in both servers**, or put the **bot** in that server. Try `/login` again with a valid token.";
-      }
-      if (statusMsg) await statusMsg.edit("❌ " + err).catch(() => {});
-      else replyUser(msg, "❌ " + err).catch(() => {});
-    }
-    return;
-  }
-
-  if (/^\.upload(?:\s|$)/i.test(txt)) {
+    if (/^\.upload(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "upload", perm.isBuyer);
     if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown, please wait.`).catch(() => {}); return;
     }
     const isBuyerUser = perm.isBuyer;
     let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
@@ -6750,14 +6477,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
-    if (!perm.isBuyer && !isOwner(msg.author.id)) {
-      await sendInputErrorV2(msg, "Buy a Premium on https://discord.com/channels/1509484518766018711/1561710834344923247 — to use this command or use command in DMs.").catch(() => {});
-      return;
-    }
     const cd = checkCommandCooldown(msg.author.id, "clean", perm.isBuyer);
     if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown, please wait.`).catch(() => {}); return;
     }
 
     let files = await getScriptAttachmentsFromMsgOrReply(msg);
@@ -6784,7 +6506,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
             type: 17,
             accent_color: RENAME_V2_ACCENT,
             components: [
-              { type: 10, content: "### Choose Clean Version\nSelect a clean version below." },
+              { type: 10, content: "### Choose a Clean Version\nSelect a clean version below." },
               { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
               row.toJSON()
             ]
@@ -6816,7 +6538,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
             type: 17,
             accent_color: RENAME_V2_ACCENT,
             components: [
-              { type: 10, content: "### Choose Clean Version\nSelect a clean version below." },
+              { type: 10, content: "### Choose a Clean Version\nSelect a clean version below." },
               { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
               row.toJSON()
             ]
@@ -6863,14 +6585,13 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
   }
 
   if (/^\.detect(?:\s|$)/i.test(txt)) {
-    const perm = await checkRegularPermission(msg, false);
+    const perm = await checkRegularPermission(msg, false, { skipChannelCheck: true });
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
     }
     const cd = checkCommandCooldown(msg.author.id, "detect", perm.isBuyer);
     if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown, please wait.`).catch(() => {}); return;
     }
 
     let files = await getScriptAttachmentsFromMsgOrReply(msg);
@@ -6968,8 +6689,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     const isBuyerUser = perm.isBuyer;
     const cd = checkCommandCooldown(msg.author.id, "get", isBuyerUser);
     if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown, please wait.`).catch(() => {}); return;
     }
     const args = txt.split(/\s+/).slice(1).filter(Boolean);
     if (!args.length) { await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1509484518766018711/1561710834344923247 — so you can use mutiple ID.").catch(() => {}); return; }
@@ -7266,8 +6986,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     const cd = checkCommandCooldown(msg.author.id, "find", perm.isBuyer);
     if (cd.onCooldown) {
-      if (cd.noTokens) { replyNoTokens(msg, cd.waitUntil).catch(() => {}); return; }
-      replyUser(msg, `❌ you're on ${cd.remaining} cooldown.`).catch(() => {}); return;
+      replyUser(msg, `❌ you're on ${cd.remaining} cooldown, please wait.`).catch(() => {}); return;
     }
     const query = txt.slice(5).trim();
     if (!query) { replyUser(msg, "❌ usage: `.find <file name>`.").catch(() => {}); return; }
