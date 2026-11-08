@@ -37,8 +37,8 @@ const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
 const REGULAR_COLOR = 0x2B2D31; 
 const BLURPLE = 0x5865F2;
-const CLEAN_BY_PRINCE_HEADER = "-- This File Has Clean by Prince Bot | .gg/freesource";
-const RENAME_BY_PRINCE_HEADER = "-- This File Was Rename by Prince Bot | .gg/freesource"; 
+const CLEAN_BY_PRINCE_HEADER = "-- Clean by Prince Bot | .gg/freesource";
+const RENAME_BY_PRINCE_HEADER = "-- Rename by Prince Bot | .gg/freesource"; 
 const GRAY_COLOR = 0x99AAB5; 
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
@@ -746,16 +746,18 @@ function buildProtectionPanel(guildId) {
     "Anti Advertise / Promote: " + onOff(g.antiAdvertise) + "\n" +
     "Ignore Role: " + ignoreTxt;
   const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("prot_nuke_on_" + guildId).setLabel("Anti Nuke ON").setStyle(g.antiNuke ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("prot_nuke_off_" + guildId).setLabel("Anti Nuke OFF").setStyle(!g.antiNuke ? ButtonStyle.Danger : ButtonStyle.Secondary)
-  );
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("prot_bot_on_" + guildId).setLabel("Anti Bot ON").setStyle(g.antiBot ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("prot_bot_off_" + guildId).setLabel("Anti Bot OFF").setStyle(!g.antiBot ? ButtonStyle.Danger : ButtonStyle.Secondary)
-  );
-  const row3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("prot_ad_on_" + guildId).setLabel("Anti Ad ON").setStyle(g.antiAdvertise ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("prot_ad_off_" + guildId).setLabel("Anti Ad OFF").setStyle(!g.antiAdvertise ? ButtonStyle.Danger : ButtonStyle.Secondary)
+    new ButtonBuilder()
+      .setCustomId("prot_nuke_" + guildId)
+      .setLabel("Anti Nuke: " + (g.antiNuke ? "ON" : "OFF"))
+      .setStyle(g.antiNuke ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("prot_bot_" + guildId)
+      .setLabel("Anti Bot: " + (g.antiBot ? "ON" : "OFF"))
+      .setStyle(g.antiBot ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("prot_ad_" + guildId)
+      .setLabel("Anti Ad: " + (g.antiAdvertise ? "ON" : "OFF"))
+      .setStyle(g.antiAdvertise ? ButtonStyle.Success : ButtonStyle.Secondary)
   );
   const row4 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("prot_ignore_" + guildId).setLabel("Set Ignore Role").setStyle(ButtonStyle.Secondary),
@@ -770,8 +772,6 @@ function buildProtectionPanel(guildId) {
         { type: 10, content: body },
         { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
         row1.toJSON(),
-        row2.toJSON(),
-        row3.toJSON(),
         row4.toJSON()
       ]
     }]
@@ -4844,12 +4844,9 @@ client.on("interactionCreate", async interaction => {
       modal.addComponents(new ActionRowBuilder().addComponents(input));
       return interaction.showModal(modal).catch(() => {});
     }
-    if (parts[1] === "nuke" && parts[2] === "on") g.antiNuke = true;
-    if (parts[1] === "nuke" && parts[2] === "off") g.antiNuke = false;
-    if (parts[1] === "bot" && parts[2] === "on") g.antiBot = true;
-    if (parts[1] === "bot" && parts[2] === "off") g.antiBot = false;
-    if (parts[1] === "ad" && parts[2] === "on") g.antiAdvertise = true;
-    if (parts[1] === "ad" && parts[2] === "off") g.antiAdvertise = false;
+    if (parts[1] === "nuke") g.antiNuke = !g.antiNuke;
+    else if (parts[1] === "bot") g.antiBot = !g.antiBot;
+    else if (parts[1] === "ad") g.antiAdvertise = !g.antiAdvertise;
     saveProtection();
     return interaction.update(buildProtectionPanel(guildId)).catch(() => {});
   }
@@ -6083,8 +6080,16 @@ client.on("messageCreate", async msg => {
           const ignore = protectionIgnoresMember(msg.member, msg.guild.id);
           if (!ignore) {
             const c = String(msg.content || "");
-            if (/(discord\.gg\/|discord\.com\/invite\/|discordapp\.com\/invite\/)/i.test(c) ||
-                /\b(free\s*nitro|join\s*my\s*server|check\s*my\s*server)\b/i.test(c)) {
+            const embedsTxt = (msg.embeds || []).map(e =>
+              [e.title, e.description, e.url, ...((e.fields || []).map(f => (f.name || "") + " " + (f.value || "")))]
+                .filter(Boolean).join(" ")
+            ).join(" ");
+            const hay = (c + " " + embedsTxt);
+            const isAd =
+              /(discord\.gg\/|discord\.com\/invite\/|discordapp\.com\/invite\/|discord\.me\/)/i.test(hay) ||
+              /\b(free\s*nitro|join\s*(my|our|this)\s*server|check\s*(my|our|this)\s*server|dm\s*me\s*for|join\s*now|invite\s*link)\b/i.test(hay) ||
+              /\b(promote|promotion|advertis(?:e|ing)|giveaway\s*dm|selling\s*(robux|accounts?))\b/i.test(hay);
+            if (isAd) {
               await msg.delete().catch(() => {});
               return;
             }
