@@ -37,7 +37,8 @@ const PRINCE_ROLE_ID = "1547849774676316181";
 const BUYER_COLOR = 0xFFFFFF;
 const REGULAR_COLOR = 0x2B2D31; 
 const BLURPLE = 0x5865F2;
-const CLEAN_BY_PRINCE_HEADER = "-- This File Has Clean by Prince Bot | .gg/freesource"; 
+const CLEAN_BY_PRINCE_HEADER = "-- This File Has Clean by Prince Bot | .gg/freesource";
+const RENAME_BY_PRINCE_HEADER = "-- This File Was Rename by Prince Bot | .gg/freesource"; 
 const GRAY_COLOR = 0x99AAB5; 
 const PORT = Number(process.env.PORT) || 10000;
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
@@ -710,6 +711,71 @@ function whitelistRemove(userId) {
 }
 function whitelistList() {
   return [...whitelistStore.users];
+}
+
+
+const PROTECTION_FILE = path.join(DATA_DIR, "protection.json");
+let protectionStore = readJSON(PROTECTION_FILE, { guilds: {} });
+if (!protectionStore || typeof protectionStore !== "object") protectionStore = { guilds: {} };
+if (!protectionStore.guilds || typeof protectionStore.guilds !== "object") protectionStore.guilds = {};
+const saveProtection = () => writeJSON(PROTECTION_FILE, protectionStore);
+function getGuildProtection(guildId) {
+  const id = String(guildId);
+  if (!protectionStore.guilds[id]) {
+    protectionStore.guilds[id] = {
+      antiNuke: false,
+      antiBot: false,
+      antiAdvertise: false,
+      ignoreRoleIds: []
+    };
+  }
+  const g = protectionStore.guilds[id];
+  if (!Array.isArray(g.ignoreRoleIds)) g.ignoreRoleIds = [];
+  return g;
+}
+function onOff(v) { return v ? "**ON**" : "**OFF**"; }
+function buildProtectionPanel(guildId) {
+  const g = getGuildProtection(guildId);
+  const ignoreTxt = g.ignoreRoleIds.length
+    ? g.ignoreRoleIds.map(r => "<@&" + r + ">").join(" ")
+    : "_none_";
+  const body =
+    "### Server Protection\n" +
+    "Anti Nuke: " + onOff(g.antiNuke) + "\n" +
+    "Anti Bot: " + onOff(g.antiBot) + "\n" +
+    "Anti Advertise / Promote: " + onOff(g.antiAdvertise) + "\n" +
+    "Ignore Role: " + ignoreTxt;
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("prot_nuke_on_" + guildId).setLabel("Anti Nuke ON").setStyle(g.antiNuke ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("prot_nuke_off_" + guildId).setLabel("Anti Nuke OFF").setStyle(!g.antiNuke ? ButtonStyle.Danger : ButtonStyle.Secondary)
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("prot_bot_on_" + guildId).setLabel("Anti Bot ON").setStyle(g.antiBot ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("prot_bot_off_" + guildId).setLabel("Anti Bot OFF").setStyle(!g.antiBot ? ButtonStyle.Danger : ButtonStyle.Secondary)
+  );
+  const row3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("prot_ad_on_" + guildId).setLabel("Anti Ad ON").setStyle(g.antiAdvertise ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("prot_ad_off_" + guildId).setLabel("Anti Ad OFF").setStyle(!g.antiAdvertise ? ButtonStyle.Danger : ButtonStyle.Secondary)
+  );
+  const row4 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("prot_ignore_" + guildId).setLabel("Set Ignore Role").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("prot_ignore_clear_" + guildId).setLabel("Clear Ignore").setStyle(ButtonStyle.Secondary)
+  );
+  return {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: BLURPLE,
+      components: [
+        { type: 10, content: body },
+        { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+        row1.toJSON(),
+        row2.toJSON(),
+        row3.toJSON(),
+        row4.toJSON()
+      ]
+    }]
+  };
 }
 
 const TOKENS_FILE = path.join(DATA_DIR, "tokens.json");
@@ -4534,6 +4600,10 @@ const commands = [
       .setName("user")
       .setDescription("The user you want to blacklist or remove.")
       .setRequired(false))
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("protection")
+    .setDescription("Open a protection panel for the server.")
     .toJSON()
 ].map(c => c);
 async function registerCommands() {
@@ -4639,6 +4709,26 @@ client.on("userUpdate", async (oldUser, newUser) => {
     console.warn(`⚠️ userUpdate tag sync: ${e.message}`);
   }
 });
+
+const nukeActionWindow = new Map();
+function protectionIgnoresMember(member, guildId) {
+  try {
+    const g = getGuildProtection(guildId);
+    if (!g.ignoreRoleIds?.length || !member?.roles?.cache) return false;
+    return g.ignoreRoleIds.some(rid => member.roles.cache.has(rid));
+  } catch { return false; }
+}
+client.on("guildMemberAdd", async (member) => {
+  try {
+    if (!member?.guild) return;
+    const g = getGuildProtection(member.guild.id);
+    if (!g.antiBot) return;
+    if (!member.user?.bot) return;
+    if (protectionIgnoresMember(member, member.guild.id)) return;
+    await member.kick("Anti Bot protection").catch(() => {});
+  } catch {}
+});
+
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   if (!newMember || newMember.guild.id !== GUILD_ID) return;
   await syncPrinceRole(newMember);
@@ -4722,6 +4812,49 @@ function buildHelpV2(page, userId) {
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
 
+  if (interaction.customId.startsWith("prot_")) {
+    const parts = interaction.customId.split("_");
+    // prot_nuke_on_GUILD / prot_bot_off_GUILD / prot_ad_on_GUILD / prot_ignore_GUILD / prot_ignore_clear_GUILD
+    const guildId = parts[parts.length - 1];
+    if (!/^\d{15,22}$/.test(guildId)) {
+      return interaction.reply({ content: "❌ invalid panel.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (!interaction.guild || String(interaction.guild.id) !== String(guildId)) {
+      return interaction.reply({ content: "❌ use this in the same server.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (interaction.guild.ownerId !== interaction.user.id && !isOwner(interaction.user.id)) {
+      return interaction.reply({ content: "❌ server owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    const g = getGuildProtection(guildId);
+    if (interaction.customId.startsWith("prot_ignore_clear_")) {
+      g.ignoreRoleIds = [];
+      saveProtection();
+      return interaction.update(buildProtectionPanel(guildId)).catch(() => {});
+    }
+    if (interaction.customId.startsWith("prot_ignore_")) {
+      const modal = new ModalBuilder()
+        .setCustomId("prot_ignore_modal_" + guildId)
+        .setTitle("Set Ignore Role");
+      const input = new TextInputBuilder()
+        .setCustomId("role_id")
+        .setLabel("Role ID (or mention id)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder("123456789012345678");
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      return interaction.showModal(modal).catch(() => {});
+    }
+    if (parts[1] === "nuke" && parts[2] === "on") g.antiNuke = true;
+    if (parts[1] === "nuke" && parts[2] === "off") g.antiNuke = false;
+    if (parts[1] === "bot" && parts[2] === "on") g.antiBot = true;
+    if (parts[1] === "bot" && parts[2] === "off") g.antiBot = false;
+    if (parts[1] === "ad" && parts[2] === "on") g.antiAdvertise = true;
+    if (parts[1] === "ad" && parts[2] === "off") g.antiAdvertise = false;
+    saveProtection();
+    return interaction.update(buildProtectionPanel(guildId)).catch(() => {});
+  }
+
+
   if (interaction.customId.startsWith("forward_stop_")) {
     const jobId = interaction.customId.slice("forward_stop_".length);
     const job = forwardJobs.get(String(jobId));
@@ -4776,8 +4909,9 @@ client.on("interactionCreate", async interaction => {
         return;
       }
       const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("clean_v1_" + ownerId).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("clean_v2_" + ownerId).setLabel("Clean V2").setStyle(ButtonStyle.Success)
+        new ButtonBuilder().setCustomId("clean_v1_" + ownerId).setLabel("Clean V1").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("clean_v2_" + ownerId).setLabel("Clean V2").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("clean_rename_" + ownerId).setLabel("Rename").setStyle(ButtonStyle.Secondary)
       );
       const ch = interaction.channel;
       const panelMsg = await ch.send({
@@ -4859,9 +4993,10 @@ client.on("interactionCreate", async interaction => {
     return;
   }
 
-  if (interaction.customId.startsWith("clean_v1_") || interaction.customId.startsWith("clean_v2_")) {
+  if (interaction.customId.startsWith("clean_v1_") || interaction.customId.startsWith("clean_v2_") || interaction.customId.startsWith("clean_rename_")) {
     const isV2 = interaction.customId.startsWith("clean_v2_");
-    const ownerId = interaction.customId.replace(/^clean_v[12]_/, "");
+    const isRename = interaction.customId.startsWith("clean_rename_");
+    const ownerId = interaction.customId.replace(/^clean_(?:v[12]|rename)_/, "");
     if (interaction.user.id !== ownerId) {
       return interaction.reply({ content: "❌ not yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
@@ -4898,7 +5033,43 @@ client.on("interactionCreate", async interaction => {
         const urlRegex = /https?:\/\/[^\s"'()\]]+/g;
         const foundUrls = text.match(urlRegex) || [];
         let finalOutput;
-        if (isV2) {
+        if (isRename) {
+          finalOutput = String(text || "");
+          if (openaiClient && text && text.length < 120000) {
+            try {
+              const RENAME_PROMPT = `You are an expert Lua/Luau renamer for already-deobfuscated code.
+
+TASK: Rename only obfuscated/meaningless identifiers to clear names.
+
+RULES:
+- ONLY rename variables, locals, and functions that have meaningless names (a1, _G2, lIlI, v0, etc).
+- Keep EXACT original logic, control flow, strings, numbers, and comments.
+- Do NOT remove comments.
+- Do NOT remove any code, loaders, URLs, or risk-related lines.
+- Do NOT strip features or rewrite structure.
+- Preserve Roblox APIs, RemoteEvents, and all side effects exactly.
+- Output ONLY the full renamed Lua source in a lua code block. No explanations.`;
+              const completion = await openaiClient.chat.completions.create({
+                model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+                temperature: 0.1,
+                max_tokens: 8000,
+                messages: [
+                  { role: "system", content: RENAME_PROMPT },
+                  { role: "user", content: String(text).slice(0, 100000) }
+                ]
+              });
+              const aiOut = (completion.choices?.[0]?.message?.content || "").trim();
+              if (aiOut && aiOut.length > 20) {
+                finalOutput = aiOut
+                  .replace(/^```(?:lua|luau)?\s*\n?/i, "")
+                  .replace(/\n?```\s*$/i, "")
+                  .trim() + "\n";
+              }
+            } catch (e) {
+              console.warn("⚠️ rename AI:", e.message?.slice?.(0, 100));
+            }
+          }
+        } else if (isV2) {
           finalOutput = cleanLuaV2(text);
           
           if (openaiClient && text && text.length < 120000) {
@@ -4939,7 +5110,7 @@ RULES:
         } else {
           finalOutput = stripRemoteLoaders(cleanLuaForRename(text));
         }
-        if (!finalOutput || !finalOutput.trim()) throw new Error("empty output after clean");
+        if (!finalOutput || !finalOutput.trim()) throw new Error(isRename ? "empty output after rename" : "empty output after clean");
         const uniqueUrls = [...new Set(foundUrls)];
         const previewText = buildPreviewText(finalOutput);
         let previewBody = "### File Preview\n```lua\n" + previewText + "\n```";
@@ -4949,7 +5120,11 @@ RULES:
         }
         const outputName = "clean.lua";
         let fileOutput = String(finalOutput).replace(/^\uFEFF/, "");
-        if (!fileOutput.startsWith(CLEAN_BY_PRINCE_HEADER)) {
+        if (isRename) {
+          if (!fileOutput.startsWith(RENAME_BY_PRINCE_HEADER)) {
+            fileOutput = RENAME_BY_PRINCE_HEADER + "\n" + fileOutput;
+          }
+        } else if (!fileOutput.startsWith(CLEAN_BY_PRINCE_HEADER)) {
           fileOutput = CLEAN_BY_PRINCE_HEADER + "\n" + fileOutput;
         }
         const fileBuf = Buffer.from(fileOutput, "utf-8");
@@ -5464,6 +5639,32 @@ if (interaction.customId === "scripanel_update") {
 client.on("interactionCreate", async interaction => {
   if (!interaction.isModalSubmit()) return;
   try {
+    if (interaction.customId.startsWith("prot_ignore_modal_")) {
+      const guildId = interaction.customId.replace("prot_ignore_modal_", "");
+      if (!interaction.guild || String(interaction.guild.id) !== String(guildId)) {
+        await interaction.reply({ content: "❌ wrong server.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        return;
+      }
+      if (interaction.guild.ownerId !== interaction.user.id && !isOwner(interaction.user.id)) {
+        await interaction.reply({ content: "❌ server owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        return;
+      }
+      let roleId = (interaction.fields.getTextInputValue("role_id") || "").trim();
+      roleId = roleId.replace(/[<@&>]/g, "");
+      if (!/^\d{15,22}$/.test(roleId)) {
+        await interaction.reply({ content: "❌ invalid role id.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        return;
+      }
+      const g = getGuildProtection(guildId);
+      if (!g.ignoreRoleIds.includes(roleId)) g.ignoreRoleIds.push(roleId);
+      saveProtection();
+      await interaction.reply({ content: "✅ Ignore role set: <@&" + roleId + ">", flags: MessageFlags.Ephemeral }).catch(() => {});
+      try {
+        // refresh panel message if possible - user may need to re-open
+      } catch {}
+      return;
+    }
+
     if (interaction.customId === "finderpanel_redeem_modal") {
       const key = (interaction.fields.getTextInputValue("finderpanel_key") || "").trim();
       await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5563,8 +5764,9 @@ client.on("interactionCreate", async interaction => {
         }
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("clean_v1_" + interaction.user.id).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId("clean_v2_" + interaction.user.id).setLabel("Clean V2").setStyle(ButtonStyle.Success)
+          new ButtonBuilder().setCustomId("clean_v1_" + interaction.user.id).setLabel("Clean V1").setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId("clean_v2_" + interaction.user.id).setLabel("Clean V2").setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId("clean_rename_" + interaction.user.id).setLabel("Rename").setStyle(ButtonStyle.Secondary)
         );
         const panelMsg = await interaction.editReply({
           flags: IS_COMPONENTS_V2,
@@ -5820,6 +6022,22 @@ if (interaction.commandName === "blacklist") {
       await interaction.editReply({ content: "❌ mode must be Add, Remove, or List." });
       return;
     }
+
+    if (interaction.commandName === "protection") {
+      if (!interaction.guild) {
+        await interaction.editReply({ content: "❌ use this in a server." });
+        return;
+      }
+      if (interaction.guild.ownerId !== interaction.user.id && !isOwner(interaction.user.id)) {
+        await interaction.editReply({ content: "❌ server owner only." });
+        return;
+      }
+      await interaction.deleteReply().catch(() => {});
+      await interaction.channel.send(buildProtectionPanel(interaction.guild.id)).catch(async (e) => {
+        await interaction.followUp({ content: "❌ failed to post panel: " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
+      });
+      return;
+    }
   } catch (e) {
     console.error("❌ slash:", e.message);
     try {
@@ -5830,9 +6048,51 @@ if (interaction.commandName === "blacklist") {
   }
 });
 
+
+client.on("channelDelete", async (channel) => {
+  try {
+    const guild = channel.guild;
+    if (!guild) return;
+    const g = getGuildProtection(guild.id);
+    if (!g.antiNuke) return;
+    const logs = await guild.fetchAuditLogs({ type: 12, limit: 1 }).catch(() => null); // CHANNEL_DELETE
+    const entry = logs?.entries?.first?.();
+    if (!entry || !entry.executor || entry.executor.bot) return;
+    if (entry.executor.id === guild.ownerId || isOwner(entry.executor.id)) return;
+    const member = await guild.members.fetch(entry.executor.id).catch(() => null);
+    if (member && protectionIgnoresMember(member, guild.id)) return;
+    const key = guild.id + ":" + entry.executor.id;
+    const now = Date.now();
+    const win = nukeActionWindow.get(key) || { n: 0, at: now };
+    if (now - win.at > 20000) { win.n = 0; win.at = now; }
+    win.n++;
+    nukeActionWindow.set(key, win);
+    if (win.n >= 3) {
+      await member?.ban?.({ reason: "Anti Nuke: mass channel delete" }).catch(() => {});
+    }
+  } catch {}
+});
+
 client.on("messageCreate", async msg => {
   try {
     if (!msg || msg.author?.bot) return;
+    try {
+      if (msg.guild) {
+        const pg = getGuildProtection(msg.guild.id);
+        if (pg.antiAdvertise && !msg.author.bot) {
+          const ignore = protectionIgnoresMember(msg.member, msg.guild.id);
+          if (!ignore) {
+            const c = String(msg.content || "");
+            if (/(discord\.gg\/|discord\.com\/invite\/|discordapp\.com\/invite\/)/i.test(c) ||
+                /\b(free\s*nitro|join\s*my\s*server|check\s*my\s*server)\b/i.test(c)) {
+              await msg.delete().catch(() => {});
+              return;
+            }
+          }
+        }
+      }
+    } catch {}
+
 
     
     try {
@@ -6496,8 +6756,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         return;
       }
       const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Success)
+        new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("clean_rename_" + msg.author.id).setLabel("Rename").setStyle(ButtonStyle.Secondary)
       );
       try {
         const panelMsg = await replyComponentsV2(msg, {
@@ -6528,8 +6789,9 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         return;
       }
       const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Success)
+        new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("clean_rename_" + msg.author.id).setLabel("Rename").setStyle(ButtonStyle.Secondary)
       );
       try {
         const panelMsg = await replyComponentsV2(msg, {
