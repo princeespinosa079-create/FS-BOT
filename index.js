@@ -678,6 +678,57 @@ function blacklistList() {
   return [...blacklistStore.users];
 }
 
+const WORD_BLACKLIST_FILE = path.join(DATA_DIR, "word-blacklist.json");
+let wordBlacklistStore = readJSON(WORD_BLACKLIST_FILE, { words: [] });
+if (!wordBlacklistStore || typeof wordBlacklistStore !== "object") wordBlacklistStore = { words: [] };
+if (!Array.isArray(wordBlacklistStore.words)) wordBlacklistStore.words = [];
+const saveWordBlacklist = () => writeJSON(WORD_BLACKLIST_FILE, wordBlacklistStore);
+function parseWordListArg(raw) {
+  return String(raw || "")
+    .split(/[,\n]+|\s+/)
+    .map(w => w.trim().toLowerCase())
+    .filter(w => w.length >= 1 && w.length <= 64);
+}
+function wordBlacklistAdd(words) {
+  let added = 0;
+  for (const w of words) {
+    if (!wordBlacklistStore.words.includes(w)) {
+      wordBlacklistStore.words.push(w);
+      added++;
+    }
+  }
+  if (added) saveWordBlacklist();
+  return added;
+}
+function wordBlacklistRemove(words) {
+  let removed = 0;
+  const set = new Set(words);
+  wordBlacklistStore.words = wordBlacklistStore.words.filter(w => {
+    if (set.has(w)) { removed++; return false; }
+    return true;
+  });
+  if (removed) saveWordBlacklist();
+  return removed;
+}
+function wordBlacklistList() {
+  return [...wordBlacklistStore.words];
+}
+function messageHasBlacklistedWord(content) {
+  const text = String(content || "").toLowerCase();
+  if (!text || !wordBlacklistStore.words.length) return null;
+  for (const w of wordBlacklistStore.words) {
+    if (!w) continue;
+    try {
+      const re = new RegExp("(?:^|[^a-z0-9_])" + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?:[^a-z0-9_]|$)", "i");
+      if (re.test(text)) return w;
+    } catch {
+      if (text.includes(w)) return w;
+    }
+  }
+  return null;
+}
+
+
 const WHITELIST_FILE = path.join(DATA_DIR, "whitelist.json");
 let whitelistStore = readJSON(WHITELIST_FILE, { users: [] });
 if (!whitelistStore || typeof whitelistStore !== "object") whitelistStore = { users: [] };
@@ -5071,19 +5122,19 @@ RULES:
           
           if (openaiClient && text && text.length < 120000) {
             try {
-              const V2_CLEAN_PROMPT = `You are an expert Lua code cleaner and deobfuscator.
+              const V2_CLEAN_PROMPT = `You are an expert Lua/Luau formatter that makes scrambled code readable.
 
-TASK: Clean and refactor the provided Lua code.
+TASK: If the Lua code is scrambled, minified, or hard to read, unscramble it into clean readable form.
 
 RULES:
-- Remove all obfuscation, junk code, fake control flows, and useless variables.
-- Keep the EXACT original logic and functionality - do not add or remove features.
-- Format the code with proper indentation and newlines.
-- Do NOT rename variables. Keep original variable and function names exactly as they are.
-- Remove any loadstring / game:HttpGet remote loader blocks that fetch and execute external code.
-- Convert to clean, readable, vanilla Lua (Luau compatible if it's Roblox).
-- Remove all comments or text/word that are not valid Lua or that cause of syntax errors.
-- Do not explain. Output ONLY the cleaned Lua code in a lua code block.`;
+- ONLY improve readability (spacing, indentation, newlines, line breaks).
+- Do NOT change logic, behavior, or functionality at all.
+- Do NOT rename variables or functions.
+- Do NOT remove comments, strings, loaders, URLs, or any code.
+- Do NOT add or remove features.
+- Preserve every statement and side effect exactly.
+- If already readable, still format neatly with consistent indentation.
+- Output ONLY the full Lua source in a lua code block. No explanations.`;
               const completion = await openaiClient.chat.completions.create({
                 model: process.env.OPENAI_MODEL || "gpt-4o-mini",
                 temperature: 0.1,
@@ -6098,8 +6149,16 @@ client.on("messageCreate", async msg => {
       }
     } catch {}
 
+    try {
+      if (msg.guild && !msg.author.bot) {
+        const hitWord = messageHasBlacklistedWord(msg.content);
+        if (hitWord) {
+          await msg.delete().catch(() => {});
+          return;
+        }
+      }
+    } catch {}
 
-    
     try {
       const liveIds = (config.liveScanChannelIds || []).map(String);
       if (liveIds.includes(String(msg.channelId))) {
@@ -6668,6 +6727,67 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       if (guild.id === GUILD_ID) { replyUser(msg, "❌ can't leave main server, dumbass.").catch(() => {}); return; }
       await guild.leave(); replyUser(msg, `✅ left **${guild.name}**, bro.`).catch(() => {});
     } catch { replyUser(msg, "❌ invalid server id, dumbass.").catch(() => {}); }
+    return;
+  }
+
+
+  if (/^\.blacklistwords(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id) && !(msg.guild && msg.guild.ownerId === msg.author.id)) {
+      replyUser(msg, "❌ owner only.").catch(() => {});
+      return;
+    }
+    const arg = txt.replace(/^\.blacklistwords\s*/i, "").trim();
+    if (!arg) {
+      replyUser(msg, "❌ usage: `.blacklistwords dog, cat, bird`").catch(() => {});
+      return;
+    }
+    const words = parseWordListArg(arg);
+    if (!words.length) {
+      replyUser(msg, "❌ put words like: `.blacklistwords dog, cat, bird`").catch(() => {});
+      return;
+    }
+    const added = wordBlacklistAdd(words);
+    replyUser(msg, "✅ blacklisted **" + added + "** word(s). Total: **" + wordBlacklistList().length + "**").catch(() => {});
+    return;
+  }
+
+  if (/^\.blacklistwordsremove(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id) && !(msg.guild && msg.guild.ownerId === msg.author.id)) {
+      replyUser(msg, "❌ owner only.").catch(() => {});
+      return;
+    }
+    const arg = txt.replace(/^\.blacklistwordsremove\s*/i, "").trim();
+    if (!arg) {
+      replyUser(msg, "❌ usage: `.blacklistwordsremove dog, cat, bird`").catch(() => {});
+      return;
+    }
+    const words = parseWordListArg(arg);
+    if (!words.length) {
+      replyUser(msg, "❌ put words like: `.blacklistwordsremove dog, cat, bird`").catch(() => {});
+      return;
+    }
+    const removed = wordBlacklistRemove(words);
+    replyUser(msg, "✅ removed **" + removed + "** word(s). Total: **" + wordBlacklistList().length + "**").catch(() => {});
+    return;
+  }
+
+  if (/^\.blacklistwordslist(?:\s|$)/i.test(txt)) {
+    if (!isOwner(msg.author.id) && !(msg.guild && msg.guild.ownerId === msg.author.id)) {
+      replyUser(msg, "❌ owner only.").catch(() => {});
+      return;
+    }
+    const list = wordBlacklistList();
+    const body = list.length
+      ? ("### Blacklist Words\n" + list.map((w, i) => (i + 1) + ". `" + w + "`").join("\n"))
+      : "### Blacklist Words\n_No words blacklisted._";
+    await replyComponentsV2(msg, {
+      flags: IS_COMPONENTS_V2,
+      components: [{
+        type: 17,
+        accent_color: BLURPLE,
+        components: [{ type: 10, content: body.slice(0, 3900) }]
+      }]
+    }, { mention: false }).catch(() => {});
     return;
   }
 
