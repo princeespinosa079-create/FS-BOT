@@ -3528,6 +3528,32 @@ function stripRemoteLoaders(src) {
   return out;
 }
 
+function normalizeLuaSpacing(src) {
+  let s = String(src || "").replace(/^\uFEFF/, "").replace(/\0/g, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  let lines = s.split("\n").map(l => l.replace(/[ \t]+$/g, ""));
+  const total = lines.length || 1;
+  const blankCount = lines.filter(l => !l.trim()).length;
+  const blankRatio = blankCount / total;
+  // Scrambled style: blank line between almost every statement → drop empty lines
+  if (blankRatio >= 0.3) {
+    lines = lines.filter(l => l.trim() !== "");
+  } else {
+    const out = [];
+    let blankRun = 0;
+    for (const line of lines) {
+      if (!line.trim()) {
+        blankRun++;
+        if (blankRun === 1) out.push("");
+      } else {
+        blankRun = 0;
+        out.push(line);
+      }
+    }
+    lines = out;
+  }
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
+}
+
 function cleanLuaV2(text) {
   let out = cleanLuaForRename(String(text || ""));
   out = stripRemoteLoaders(out);
@@ -3540,9 +3566,10 @@ function cleanLuaV2(text) {
       if (/^\d+\s*$/.test(tr)) return false;
       return true;
     }).join("\n");
-    out = out.replace(/[^\S\n]+$/gm, "");
-    out = out.replace(/\n{3,}/g, "\n\n").trim() + "\n";
-  } catch {}
+    out = normalizeLuaSpacing(out);
+  } catch {
+    try { out = normalizeLuaSpacing(out); } catch {}
+  }
   return out;
 }
 
@@ -5118,22 +5145,22 @@ RULES:
             }
           }
         } else if (isV2) {
-          finalOutput = cleanLuaV2(text);
+          finalOutput = normalizeLuaSpacing(cleanLuaV2(text));
           
           if (openaiClient && text && text.length < 120000) {
             try {
               const V2_CLEAN_PROMPT = `You are an expert Lua/Luau formatter that makes scrambled code readable.
 
-TASK: If the Lua code is scrambled, minified, or hard to read, unscramble it into clean readable form.
+TASK: Unscramble scrambled/minified Lua into readable form using spacing only.
 
 RULES:
-- ONLY improve readability (spacing, indentation, newlines, line breaks).
+- ONLY fix spacing: remove extra blank lines between every statement, fix indentation, trim trailing spaces.
+- Keep ONE statement per line when it was split by empty lines.
 - Do NOT change logic, behavior, or functionality at all.
 - Do NOT rename variables or functions.
 - Do NOT remove comments, strings, loaders, URLs, or any code.
 - Do NOT add or remove features.
 - Preserve every statement and side effect exactly.
-- If already readable, still format neatly with consistent indentation.
 - Output ONLY the full Lua source in a lua code block. No explanations.`;
               const completion = await openaiClient.chat.completions.create({
                 model: process.env.OPENAI_MODEL || "gpt-4o-mini",
@@ -5146,10 +5173,12 @@ RULES:
               });
               const aiOut = (completion.choices?.[0]?.message?.content || "").trim();
               if (aiOut && aiOut.length > 20) {
-                finalOutput = aiOut
+                finalOutput = normalizeLuaSpacing(
+                  aiOut
                   .replace(/^```(?:lua|luau)?\s*\n?/i, "")
                   .replace(/\n?```\s*$/i, "")
-                  .trim() + "\n";
+                  .trim() + "\n"
+                );
               }
             } catch (e) {
               console.warn("⚠️ clean V2 AI pass:", e.message?.slice?.(0, 100));
@@ -6153,8 +6182,12 @@ client.on("messageCreate", async msg => {
       if (msg.guild && !msg.author.bot) {
         const hitWord = messageHasBlacklistedWord(msg.content);
         if (hitWord) {
-          await msg.delete().catch(() => {});
-          return;
+          if (protectionIgnoresMember(msg.member, msg.guild.id)) {
+            // Ignore Role from /protection — skip delete
+          } else {
+            await msg.delete().catch(() => {});
+            return;
+          }
         }
       }
     } catch {}
