@@ -2372,6 +2372,24 @@ async function sendRenameLoading(message) {
   }
 }
 
+
+async function sendUploadLoading(message) {
+  const payload = {
+    flags: IS_COMPONENTS_V2,
+    components: [{
+      type: 17,
+      accent_color: RENAME_V2_ACCENT,
+      components: [{ type: 10, content: "### Uploading...\n⏳ Processing..." }]
+    }]
+  };
+  try {
+    return await replyComponentsV2(message, payload, { mention: false });
+  } catch (e) {
+    console.warn("⚠️ upload loading:", e.message?.slice?.(0, 120));
+    return message.reply({ content: "### Uploading...\n⏳ Processing..." }).catch(() => null);
+  }
+}
+
 async function sendUploadResult(message, { loadstring, tokLine }) {
   const ls = String(loadstring || "").slice(0, 1800);
   let body = ("**PC COPY:**\n```lua\n" + ls + "\n```\n\n**MOBILE COPY:**\n`" + ls + "`");
@@ -3534,8 +3552,8 @@ function normalizeLuaSpacing(src) {
   const total = lines.length || 1;
   const blankCount = lines.filter(l => !l.trim()).length;
   const blankRatio = blankCount / total;
-  // Scrambled style: blank line between almost every statement → drop empty lines
-  if (blankRatio >= 0.3) {
+  // Scrambled (blank between every line): drop empty lines only
+  if (blankRatio >= 0.25) {
     lines = lines.filter(l => l.trim() !== "");
   } else {
     const out = [];
@@ -3551,7 +3569,54 @@ function normalizeLuaSpacing(src) {
     }
     lines = out;
   }
-  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
+  // Apply expert-style indent if code is mostly flush-left
+  const codeLines = lines.filter(l => l.trim());
+  const alreadyIndented = codeLines.filter(l => /^[\t ]{2,}/.test(l) || /^\t/.test(l)).length;
+  if (codeLines.length && alreadyIndented < codeLines.length * 0.2) {
+    let indent = 0;
+    const out = [];
+    for (const raw of lines) {
+      const tr = raw.trim();
+      if (!tr) {
+        out.push("");
+        continue;
+      }
+      const dec = /^(end|else|elseif|until)\b/.test(tr) || /^}/.test(tr) || /^\)/.test(tr);
+      if (dec) indent = Math.max(0, indent - 1);
+      out.push("  ".repeat(indent) + tr);
+      const opens =
+        /\b(then|do)\s*$/.test(tr) ||
+        /\bfunction\b[\s\S]*\)\s*$/.test(tr) ||
+        /\belse\s*$/.test(tr) ||
+        /\belseif\b.*\bthen\s*$/.test(tr) ||
+        /\brepeat\s*$/.test(tr) ||
+        /\{\s*$/.test(tr) ||
+        /\(\s*$/.test(tr);
+      // same-line end/then should not net-increase
+      const closesSame = /\bend\b/.test(tr) && /\b(then|do|function)\b/.test(tr);
+      if (opens && !closesSame) indent++;
+      if (/\bend\b/.test(tr) && !dec && !closesSame) {
+        // end mid-line already counted via dec only when starts with end
+      }
+    }
+    lines = out;
+  }
+  // Keep a blank line before top-level-looking blocks for readability
+  const pretty = [];
+  for (let i = 0; i < lines.length; i++) {
+    const tr = lines[i].trim();
+    const prev = pretty.length ? pretty[pretty.length - 1].trim() : "";
+    if (
+      tr &&
+      prev &&
+      /^(local\s+function\b|function\b)/.test(tr) &&
+      pretty[pretty.length - 1] !== ""
+    ) {
+      pretty.push("");
+    }
+    pretty.push(lines[i]);
+  }
+  return pretty.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
 }
 
 function cleanLuaV2(text) {
@@ -4920,7 +4985,10 @@ client.on("interactionCreate", async interaction => {
         .setRequired(true)
         .setPlaceholder("123456789012345678");
       modal.addComponents(new ActionRowBuilder().addComponents(input));
-      return interaction.showModal(modal).catch(() => {});
+      return interaction.showModal(modal).catch((e) => {
+      console.warn("⚠️ showModal:", e.message);
+      return interaction.reply({ content: "❌ could not open form: " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
+    });
     }
     if (parts[1] === "nuke") g.antiNuke = !g.antiNuke;
     else if (parts[1] === "bot") g.antiBot = !g.antiBot;
@@ -5151,11 +5219,12 @@ RULES:
             try {
               const V2_CLEAN_PROMPT = `You are an expert Lua/Luau formatter that makes scrambled code readable.
 
-TASK: Unscramble scrambled/minified Lua into readable form using spacing only.
+TASK: Format Lua into normal expert-readable source (like a skilled developer wrote it).
 
 RULES:
-- ONLY fix spacing: remove extra blank lines between every statement, fix indentation, trim trailing spaces.
-- Keep ONE statement per line when it was split by empty lines.
+- Use normal spacing and 2-space indentation (if/then/end, functions, loops).
+- Remove ONLY excessive blank lines (e.g. a blank line between every statement); keep one blank line between logical sections.
+- Do NOT minify. Do NOT strip all spaces.
 - Do NOT change logic, behavior, or functionality at all.
 - Do NOT rename variables or functions.
 - Do NOT remove comments, strings, loaders, URLs, or any code.
@@ -5557,7 +5626,10 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       .setRequired(true)
       .setMaxLength(80);
     modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
-    return interaction.showModal(modal).catch(() => {});
+    return interaction.showModal(modal).catch((e) => {
+      console.warn("⚠️ showModal:", e.message);
+      return interaction.reply({ content: "❌ could not open form: " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
+    });
   }
 
   if (interaction.customId === "finderpanel_clean") {
@@ -5639,7 +5711,10 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
         .setRequired(true)
         .setMaxLength(100);
       modal.addComponents(new ActionRowBuilder().addComponents(queryInput));
-      return interaction.showModal(modal).catch(() => {});
+      return interaction.showModal(modal).catch((e) => {
+      console.warn("⚠️ showModal:", e.message);
+      return interaction.reply({ content: "❌ could not open form: " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
+    });
     }
     
     const modal = new ModalBuilder()
@@ -5653,7 +5728,10 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
       .setRequired(true)
       .setMaxLength(120);
     modal.addComponents(new ActionRowBuilder().addComponents(idInput));
-    return interaction.showModal(modal).catch(() => {});
+    return interaction.showModal(modal).catch((e) => {
+      console.warn("⚠️ showModal:", e.message);
+      return interaction.reply({ content: "❌ could not open form: " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
+    });
   }
 
   
@@ -5707,7 +5785,10 @@ if (interaction.customId === "scripanel_update") {
       new ActionRowBuilder().addComponents(fileInput),
       new ActionRowBuilder().addComponents(delUrlInput)
     );
-    return interaction.showModal(modal).catch(() => {});
+    return interaction.showModal(modal).catch((e) => {
+      console.warn("⚠️ showModal:", e.message);
+      return interaction.reply({ content: "❌ could not open form: " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
+    });
   }
 
   return;
@@ -6058,18 +6139,26 @@ if (interaction.commandName === "say") {
         new ButtonBuilder().setCustomId("finderpanel_redeem").setLabel("Redeem").setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId("finderpanel_clean").setLabel("Clean").setStyle(ButtonStyle.Secondary)
       );
-      await targetChannel.send({
-        flags: IS_COMPONENTS_V2,
-        components: [{
-          type: 17,
-          accent_color: FINDER_V2_ACCENT,
-          components: [
-            { type: 10, content: "## Finder Panel\nThis control panel is for **Finder Panel**.\nIf you’re using server tag click the button below or if you got a key click the redeem." },
-            { type: 14, spacing: SEPARATOR_SPACING_SMALL },
-            panelRow.toJSON()
-          ]
-        }]
-      });
+      try {
+        await targetChannel.send({
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: FINDER_V2_ACCENT,
+            components: [
+              { type: 10, content: "## Finder Panel\nThis control panel is for **Finder Panel**.\nIf you're using server tag click the button below or if you got a key click the redeem." },
+              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+              panelRow.toJSON()
+            ]
+          }]
+        });
+      } catch (e) {
+        console.warn("⚠️ finderpanel V2:", e.message);
+        await targetChannel.send({
+          content: "## Finder Panel\nThis control panel is for **Finder Panel**.\nIf you're using server tag click the button below or if you got a key click the redeem.",
+          components: [panelRow]
+        });
+      }
       await interaction.editReply({ content: "Posted..." });
       return;
     }
@@ -6835,7 +6924,10 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }
     const isBuyerUser = perm.isBuyer;
     let attachments = await getScriptAttachmentsFromMsgOrReply(msg);
-    if (!attachments.length) { replyUser(msg, "❌ upload a txt or lua file, dumbass.").catch(() => {}); return; }
+    if (!attachments.length) {
+      await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file (or reply to one).").catch(() => {});
+      return;
+    }
     const file = attachments[0];
     const maxUploadSize = 5 * 1024 * 1024;
     if (file.size > maxUploadSize) { replyUser(msg, "❌ max is **5MB**.").catch(() => {}); return; }
@@ -6855,7 +6947,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       }
       if (!content) throw new Error("could not read file from reply/attachment");
       const apiKey = process.env.PASTEFY_API_KEY;
-      if (!apiKey) throw new Error("PASTEFY_API_KEY not set in env vars");
+      if (!apiKey) throw new Error("PASTEFY_API_KEY not set — add it in bot env");
       const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` };
       const body = { title: file.name || "script.lua", content };
       let pastefyRes = await fetch("https://pastefy.app/api/v2/paste", { method: "POST", headers, body: JSON.stringify(body) });
