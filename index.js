@@ -5096,6 +5096,8 @@ client.on("interactionCreate", async interaction => {
     if (!fileMeta) {
       return interaction.reply({ content: "❌ invalid file number.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
+    // Remaining files (chosen one removed), renumbered on next panel
+    const remaining = session.files.filter((_, i) => i !== (idx - 1));
     detectSessions.delete(interaction.message.id);
     try {
       await interaction.update({
@@ -5116,19 +5118,50 @@ client.on("interactionCreate", async interaction => {
         return;
       }
       const result = detectThreatAnalysis(body);
-      const textBody =
+      const pickedName = String(fileMeta.name || fileMeta.filename || "file").slice(0, 80);
+      let textBody =
         `## Detected: ${result.title}\n` +
+        (pickedName ? `-# File: \`${pickedName}\`\n` : "") +
         (result.line != null ? `**Line: ${result.line}**\n` : "") +
         "```" + result.description + "```";
-      await interaction.channel.send({
+
+      const children = [{ type: 10, content: textBody.slice(0, 3500) }];
+      if (remaining.length > 0) {
+        const n = Math.min(10, remaining.length);
+        const nameLines = remaining.slice(0, n).map((f, i) =>
+          "`" + (i + 1) + ".` " + String(f.name || f.filename || "file").slice(0, 60)
+        ).join("\n");
+        children.push({ type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL });
+        children.push({
+          type: 10,
+          content: ("### Detect more\nPick another file:\n\n" + nameLines).slice(0, 1800)
+        });
+        const rows = buildNumberButtonRows("detectfile", ownerId, n);
+        for (const r of rows) children.push(r.toJSON());
+      }
+
+      const resultMsg = await interaction.channel.send({
         flags: IS_COMPONENTS_V2,
         components: [{
           type: 17,
           accent_color: result.color,
-          components: [{ type: 10, content: textBody.slice(0, 3900) }]
+          components: children
         }],
         allowedMentions: { repliedUser: false, parse: [] }
       });
+      if (remaining.length > 0 && resultMsg?.id) {
+        detectSessions.set(resultMsg.id, {
+          authorId: ownerId,
+          files: remaining.slice(0, 10),
+          at: Date.now()
+        });
+        if (detectSessions.size > 80) {
+          const cutoff = Date.now() - 30 * 60 * 1000;
+          for (const [k, v] of detectSessions) {
+            if (!v?.at || v.at < cutoff) detectSessions.delete(k);
+          }
+        }
+      }
       try { await interaction.message.delete().catch(() => {}); } catch {}
     } catch (e) {
       await interaction.followUp({ content: "❌ " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5136,7 +5169,7 @@ client.on("interactionCreate", async interaction => {
     return;
   }
 
-  if (interaction.customId.startsWith("clean_v1_") || interaction.customId.startsWith("clean_v2_") || interaction.customId.startsWith("clean_rename_")) {
+if (interaction.customId.startsWith("clean_v1_") || interaction.customId.startsWith("clean_v2_") || interaction.customId.startsWith("clean_rename_")) {
     const isV2 = interaction.customId.startsWith("clean_v2_");
     const isRename = interaction.customId.startsWith("clean_rename_");
     const ownerId = interaction.customId.replace(/^clean_(?:v[12]|rename)_/, "");
