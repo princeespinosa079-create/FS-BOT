@@ -777,11 +777,17 @@ function getGuildProtection(guildId) {
       antiNuke: false,
       antiBot: false,
       antiAdvertise: false,
+      antiLink: false,
+      antiForward: false,
+      antiInvite: false,
       ignoreRoleIds: []
     };
   }
   const g = protectionStore.guilds[id];
   if (!Array.isArray(g.ignoreRoleIds)) g.ignoreRoleIds = [];
+  if (typeof g.antiLink !== "boolean") g.antiLink = false;
+  if (typeof g.antiForward !== "boolean") g.antiForward = false;
+  if (typeof g.antiInvite !== "boolean") g.antiInvite = false;
   return g;
 }
 function onOff(v) { return v ? "**ON**" : "**OFF**"; }
@@ -795,6 +801,9 @@ function buildProtectionPanel(guildId) {
     "Anti Nuke: " + onOff(g.antiNuke) + "\n" +
     "Anti Bot: " + onOff(g.antiBot) + "\n" +
     "Anti Advertise / Promote: " + onOff(g.antiAdvertise) + "\n" +
+    "Anti Link: " + onOff(g.antiLink) + "\n" +
+    "Anti Forward: " + onOff(g.antiForward) + "\n" +
+    "Anti Discord Invite: " + onOff(g.antiInvite) + "\n" +
     "Ignore Role: " + ignoreTxt;
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -810,6 +819,20 @@ function buildProtectionPanel(guildId) {
       .setLabel("Anti Ad: " + (g.antiAdvertise ? "ON" : "OFF"))
       .setStyle(g.antiAdvertise ? ButtonStyle.Success : ButtonStyle.Secondary)
   );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("prot_link_" + guildId)
+      .setLabel("Anti Link: " + (g.antiLink ? "ON" : "OFF"))
+      .setStyle(g.antiLink ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("prot_fwd_" + guildId)
+      .setLabel("Anti Forward: " + (g.antiForward ? "ON" : "OFF"))
+      .setStyle(g.antiForward ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("prot_inv_" + guildId)
+      .setLabel("Anti Invite: " + (g.antiInvite ? "ON" : "OFF"))
+      .setStyle(g.antiInvite ? ButtonStyle.Success : ButtonStyle.Secondary)
+  );
   const row4 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("prot_ignore_" + guildId).setLabel("Set Ignore Role").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("prot_ignore_clear_" + guildId).setLabel("Clear Ignore").setStyle(ButtonStyle.Secondary)
@@ -823,12 +846,12 @@ function buildProtectionPanel(guildId) {
         { type: 10, content: body },
         { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
         row1.toJSON(),
+        row2.toJSON(),
         row4.toJSON()
       ]
     }]
   };
 }
-
 const TOKENS_FILE = path.join(DATA_DIR, "tokens.json");
 const MAX_REGULAR_TOKENS = 10;
 const PH_OFFSET_MS = 8 * 60 * 60 * 1000; 
@@ -2052,6 +2075,20 @@ async function fetchTextFromUrl(url) {
   return text;
 }
 
+
+
+function buildDetectedLuaFile(result) {
+  const title = String(result?.title || "Unknown");
+  const line = result?.line != null ? String(result.line) : "n/a";
+  const desc = String(result?.description || "").trim();
+  return (
+    "-- Detected by Prince Bot | .gg/freesource\n" +
+    "-- Detected: " + title + "\n" +
+    "-- Line: " + line + "\n" +
+    "--\n" +
+    (desc ? desc + "\n" : "")
+  );
+}
 
 function detectThreatAnalysis(code) {
   const raw = String(code || "");
@@ -4723,10 +4760,7 @@ const commands = [
       .setDescription("Attach a file if you want.")
       .setRequired(false))
     .toJSON(),
-  new SlashCommandBuilder()
-    .setName("finderpanel")
-    .setDescription("Post the Finder Panel here.")
-    .toJSON(),
+  
   new SlashCommandBuilder()
     .setName("blacklist")
     .setDescription("Open the blacklist config.")
@@ -4993,6 +5027,9 @@ client.on("interactionCreate", async interaction => {
     if (parts[1] === "nuke") g.antiNuke = !g.antiNuke;
     else if (parts[1] === "bot") g.antiBot = !g.antiBot;
     else if (parts[1] === "ad") g.antiAdvertise = !g.antiAdvertise;
+    else if (parts[1] === "link") g.antiLink = !g.antiLink;
+    else if (parts[1] === "fwd") g.antiForward = !g.antiForward;
+    else if (parts[1] === "inv") g.antiInvite = !g.antiInvite;
     saveProtection();
     return interaction.update(buildProtectionPanel(guildId)).catch(() => {});
   }
@@ -5118,14 +5155,12 @@ client.on("interactionCreate", async interaction => {
         return;
       }
       const result = detectThreatAnalysis(body);
-      const pickedName = String(fileMeta.name || fileMeta.filename || "file").slice(0, 80);
       let textBody =
-        `## Detected: ${result.title}\n` +
-        (pickedName ? `-# File: \`${pickedName}\`\n` : "") +
-        (result.line != null ? `**Line: ${result.line}**\n` : "") +
-        "```" + result.description + "```";
+        `## Detected: ${result.title}` +
+        (result.line != null ? `\n**Line: ${result.line}**` : "");
 
       const children = [{ type: 10, content: textBody.slice(0, 3500) }];
+      const detectedFile = new AttachmentBuilder(Buffer.from(buildDetectedLuaFile(result), "utf8"), { name: "detected.lua" });
       if (remaining.length > 0) {
         const n = Math.min(10, remaining.length);
         const nameLines = remaining.slice(0, n).map((f, i) =>
@@ -5142,6 +5177,7 @@ client.on("interactionCreate", async interaction => {
 
       const resultMsg = await interaction.channel.send({
         flags: IS_COMPONENTS_V2,
+        files: [detectedFile],
         components: [{
           type: 17,
           accent_color: result.color,
@@ -5643,376 +5679,32 @@ if (interaction.customId === "alt_prev" || interaction.customId === "alt_next") 
     return;
   }
   
-  if (interaction.customId === "finderpanel_redeem") {
-    if (isBlacklisted(interaction.user.id) && !isOwner(interaction.user.id)) {
-      try { await interaction.deferUpdate(); } catch {}
-      return;
-    }
-    const modal = new ModalBuilder()
-      .setCustomId("finderpanel_redeem_modal")
-      .setTitle("Redeem Premium Key");
-    const keyInput = new TextInputBuilder()
-      .setCustomId("finderpanel_key")
-      .setLabel("Premium Key")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("PRINCE-XXXXXXXXXXXX")
-      .setRequired(true)
-      .setMaxLength(80);
-    modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
-    return interaction.showModal(modal).catch((e) => {
-      console.warn("⚠️ showModal:", e.message);
-      return interaction.reply({ content: "❌ could not open form: " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
-    });
-  }
-
-  if (interaction.customId === "finderpanel_clean") {
-    if (isBlacklisted(interaction.user.id) && !isOwner(interaction.user.id)) {
-      try { await interaction.deferUpdate(); } catch {}
-      return;
-    }
-    try {
-      const modal = new ModalBuilder()
-        .setCustomId("finderpanel_clean_modal_paste")
-        .setTitle("Upload Lua file");
-      const input = new TextInputBuilder()
-        .setCustomId("clean_paste")
-        .setLabel("Paste Lua code or file URL")
-        .setStyle(TextInputStyle.Paragraph)
-        .setPlaceholder("Paste script text or a direct .lua/.txt URL (max 5MB)")
-        .setRequired(true)
-        .setMaxLength(4000);
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      await interaction.showModal(modal);
-    } catch (e) {
-      return interaction.reply({
-        content: "❌ could not open clean form: " + String(e.message || e).slice(0, 100),
-        flags: MessageFlags.Ephemeral
-      }).catch(() => {});
-    }
-    return;
-  }
-
-  if (interaction.customId === "finderpanel_find" || interaction.customId === "finderpanel_get") {
-    const uid = interaction.user.id;
-    
-    if (isBlacklisted(uid) && !isOwner(uid)) {
-      try { await interaction.deferUpdate(); } catch {}
-      return;
-    }
-    
-    const buyer = isOwner(uid) || await isBuyer(uid, interaction.member);
-    if (!buyer) {
-      const hasTag = await hasPrinceStatus(uid);
-      if (!hasTag) {
-        pendingTagRetry.set(String(uid), {
-          content: "",
-          channelId: String(interaction.channelId || ""),
-          guildId: String(interaction.guildId || ""),
-          messageId: String(interaction.message?.id || ""),
-          at: Date.now(),
-          fromPanel: true
-        });
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("tagcheck_" + uid)
-            .setLabel("Check again")
-            .setStyle(ButtonStyle.Success)
-        );
-        return interaction.reply({
-          flags: IS_COMPONENTS_V2 | ((MessageFlags && MessageFlags.Ephemeral != null) ? MessageFlags.Ephemeral : 64),
-          components: [{
-            type: 17,
-            accent_color: 0xED4245,
-            components: [
-              { type: 10, content: "## Server tag required\nWear the `FS` server tag, then click check again." },
-              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-              row.toJSON()
-            ]
-          }]
-        }).catch(() => {});
-      }
-    }
-    if (interaction.customId === "finderpanel_find") {
-      const modal = new ModalBuilder()
-        .setCustomId("finderpanel_find_modal")
-        .setTitle("Find Source");
-      const queryInput = new TextInputBuilder()
-        .setCustomId("finderpanel_query")
-        .setLabel("File name")
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder("Type the file name to search...")
-        .setRequired(true)
-        .setMaxLength(100);
-      modal.addComponents(new ActionRowBuilder().addComponents(queryInput));
-      return interaction.showModal(modal).catch((e) => {
-      console.warn("⚠️ showModal:", e.message);
-      return interaction.reply({ content: "❌ could not open form: " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
-    });
-    }
-    
-    const modal = new ModalBuilder()
-      .setCustomId("finderpanel_get_modal")
-      .setTitle("Get Source by ID");
-    const idInput = new TextInputBuilder()
-      .setCustomId("finderpanel_ids")
-      .setLabel(buyer ? "File ID(s) — premium: up to 10" : "File ID — 1 only")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder(buyer ? "id1 id2 ..." : "single file id")
-      .setRequired(true)
-      .setMaxLength(120);
-    modal.addComponents(new ActionRowBuilder().addComponents(idInput));
-    return interaction.showModal(modal).catch((e) => {
-      console.warn("⚠️ showModal:", e.message);
-      return interaction.reply({ content: "❌ could not open form: " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
-    });
-  }
-
-  
-  if (interaction.customId === "scripanel_how") {
-    if (!isOwner(interaction.user.id)) {
-      return interaction.reply({ content: "❌ owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const how = [
-      "### How to use Script Panel",
-      "**1.** Owner runs `/scripanel` in a channel to post this panel.",
-      "**2.** Click **Update** → paste a **Pastefy URL** (from `.upload` / `.obf`) and/or upload **FILE** (script text).",
-      "**3.** Every save is protected with **Prince Obfuscator** automatically.",
-      "**4.** To remove the Pastefy URL only, set **Delete URL** to `yes` in the modal.",
-      "**5.** Only the **owner** can use **How** / **Update** on this panel."
-    ].join("\n");
-    return interaction.reply({
-      flags: IS_COMPONENTS_V2 | ((MessageFlags && MessageFlags.Ephemeral != null) ? MessageFlags.Ephemeral : 64),
-      components: [{ type: 17, accent_color: RENAME_V2_ACCENT, components: [{ type: 10, content: how }] }]
-    }).catch(() => {});
-  }
-if (interaction.customId === "scripanel_update") {
-    if (!isOwner(interaction.user.id)) {
-      return interaction.reply({ content: "❌ owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-    const modal = new ModalBuilder()
-      .setCustomId("scripanel_update_modal")
-      .setTitle("Upload Lua file");
-    const urlInput = new TextInputBuilder()
-      .setCustomId("scripanel_url")
-      .setLabel("Pastefy URL (optional)")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("https://pastefy.app/XXXX/raw")
-      .setRequired(false)
-      .setMaxLength(400);
-    const fileInput = new TextInputBuilder()
-      .setCustomId("scripanel_file")
-      .setLabel("Upload File — paste script source")
-      .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("Paste one source file to obfuscate / update URL code...")
-      .setRequired(false)
-      .setMaxLength(4000);
-    const delUrlInput = new TextInputBuilder()
-      .setCustomId("scripanel_delete_url")
-      .setLabel("Delete URL (type yes to remove Pastefy URL)")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("yes / no")
-      .setRequired(false)
-      .setMaxLength(10);
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(urlInput),
-      new ActionRowBuilder().addComponents(fileInput),
-      new ActionRowBuilder().addComponents(delUrlInput)
-    );
-    return interaction.showModal(modal).catch((e) => {
-      console.warn("⚠️ showModal:", e.message);
-      return interaction.reply({ content: "❌ could not open form: " + String(e.message || e).slice(0, 100), flags: MessageFlags.Ephemeral }).catch(() => {});
-    });
-  }
-
-  return;
 });
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isModalSubmit()) return;
   try {
     if (interaction.customId.startsWith("prot_ignore_modal_")) {
-      const guildId = interaction.customId.replace("prot_ignore_modal_", "");
+      const guildId = interaction.customId.slice("prot_ignore_modal_".length);
       if (!interaction.guild || String(interaction.guild.id) !== String(guildId)) {
-        await interaction.reply({ content: "❌ wrong server.", flags: MessageFlags.Ephemeral }).catch(() => {});
-        return;
+        return interaction.reply({ content: "❌ use this in the same server.", flags: MessageFlags.Ephemeral }).catch(() => {});
       }
       if (interaction.guild.ownerId !== interaction.user.id && !isOwner(interaction.user.id)) {
-        await interaction.reply({ content: "❌ server owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
-        return;
+        return interaction.reply({ content: "❌ server owner only.", flags: MessageFlags.Ephemeral }).catch(() => {});
       }
-      let roleId = (interaction.fields.getTextInputValue("role_id") || "").trim();
-      roleId = roleId.replace(/[<@&>]/g, "");
+      const raw = (interaction.fields.getTextInputValue("role_id") || "").trim();
+      const roleId = raw.replace(/[<@&>]/g, "");
       if (!/^\d{15,22}$/.test(roleId)) {
-        await interaction.reply({ content: "❌ invalid role id.", flags: MessageFlags.Ephemeral }).catch(() => {});
-        return;
+        return interaction.reply({ content: "❌ invalid role id.", flags: MessageFlags.Ephemeral }).catch(() => {});
       }
       const g = getGuildProtection(guildId);
       if (!g.ignoreRoleIds.includes(roleId)) g.ignoreRoleIds.push(roleId);
       saveProtection();
-      await interaction.reply({ content: "✅ Ignore role set: <@&" + roleId + ">", flags: MessageFlags.Ephemeral }).catch(() => {});
       try {
-        // refresh panel message if possible - user may need to re-open
-      } catch {}
-      return;
-    }
-
-    if (interaction.customId === "finderpanel_redeem_modal") {
-      const key = (interaction.fields.getTextInputValue("finderpanel_key") || "").trim();
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      const rec = keyStore.keys.find(k => k.key === key);
-      if (!rec) { await interaction.editReply({ content: "❌ invalid key." }); return; }
-      if (rec.redeemedBy) { await interaction.editReply({ content: "❌ already redeemed." }); return; }
-      if (findActiveKeyForUser(interaction.user.id)) { await interaction.editReply({ content: "❌ you already got a key active." }); return; }
-      if (rec.expiresAt && Date.now() > rec.expiresAt) { await interaction.editReply({ content: "❌ key expired." }); return; }
-      rec.redeemedBy = interaction.user.id;
-      rec.redeemedAt = Date.now();
-      try { fs.writeFileSync(KEYS_FILE, JSON.stringify(keyStore, null, 2)); } catch {}
-      try {
-        const g = await client.guilds.fetch(GUILD_ID);
-        const m = await g.members.fetch(interaction.user.id);
-        await m.roles.add(BUYER_ROLE_ID);
-      } catch {}
-      await interaction.editReply({ content: "✅ key redeemed successfully." });
-      try {
-        const keyShow = key.length > 8 ? (key.slice(0, 6) + "…" + key.slice(-4)) : key;
-        logFinderPanel(interaction.user, "Redeem", "Key `" + keyShow + "` redeemed successfully.").catch(() => {});
-      } catch {}
-      return;
-    }
-    
-    if (interaction.customId === "finderpanel_clean_modal" || interaction.customId === "finderpanel_clean_modal_paste") {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      try {
-        let content = "";
-        let fromName = "clean_input.lua";
-        const MAX_CLEAN_BYTES = 5 * 1024 * 1024;
-
-        if (interaction.customId === "finderpanel_clean_modal_paste") {
-          content = interaction.fields.getTextInputValue("clean_paste") || "";
-          if (/^https?:\/\//i.test(content.trim())) {
-            const url = content.trim().split(/\s+/)[0];
-            const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
-            if (!res.ok) throw new Error("HTTP " + res.status);
-            const buf = Buffer.from(await res.arrayBuffer());
-            if (buf.length > MAX_CLEAN_BYTES) {
-              await interaction.editReply({ content: "❌ file too large — max **5MB**." });
-              return;
-            }
-            content = buf.toString("utf8");
-            fromName = "from_url.lua";
-          } else if (Buffer.byteLength(content, "utf8") > MAX_CLEAN_BYTES) {
-            await interaction.editReply({ content: "❌ file too large — max **5MB**." });
-            return;
-          }
-        } else {
-          let att = null;
-          try {
-            if (typeof interaction.fields?.getUploadedFiles === "function") {
-              const ups = interaction.fields.getUploadedFiles("clean_upload_file");
-              att = (ups && typeof ups.first === "function" ? ups.first() : null) || (Array.isArray(ups) ? ups[0] : null) || ups || null;
-            }
-          } catch {}
-          try {
-            if (!att && interaction.data?.resolved?.attachments) {
-              const vals = Object.values(interaction.data.resolved.attachments);
-              if (vals.length) att = vals[0];
-            }
-          } catch {}
-          try {
-            if (!att && interaction.fields?.fields) {
-              const f = interaction.fields.fields.get("clean_upload_file");
-              if (f) att = f;
-            }
-          } catch {}
-          if (!att) {
-            await interaction.editReply({ content: "❌ no file uploaded." });
-            return;
-          }
-          const size = Number(att.size || att.file_size || 0);
-          if (size > MAX_CLEAN_BYTES) {
-            await interaction.editReply({ content: "❌ file too large — max **5MB**." });
-            return;
-          }
-          const url = att.url || att.proxyURL || att.proxy_url || att.attachment;
-          if (!url || typeof url !== "string") {
-            await interaction.editReply({ content: "❌ could not read upload." });
-            return;
-          }
-          const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
-          if (!res.ok) throw new Error("HTTP " + res.status);
-          const buf = Buffer.from(await res.arrayBuffer());
-          if (buf.length > MAX_CLEAN_BYTES) {
-            await interaction.editReply({ content: "❌ file too large — max **5MB**." });
-            return;
-          }
-          content = buf.toString("utf8");
-          fromName = att.name || att.filename || "upload.lua";
-        }
-
-        if (!content || !content.trim()) {
-          await interaction.editReply({ content: "❌ empty file." });
-          return;
-        }
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("clean_v1_" + interaction.user.id).setLabel("Clean V1").setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId("clean_v2_" + interaction.user.id).setLabel("Clean V2").setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId("clean_rename_" + interaction.user.id).setLabel("Rename").setStyle(ButtonStyle.Secondary)
-        );
-        const panelMsg = await interaction.editReply({
-          flags: IS_COMPONENTS_V2,
-          content: null,
-          embeds: [],
-          components: [{
-            type: 17,
-            accent_color: RENAME_V2_ACCENT,
-            components: [
-              { type: 10, content: "### Choose a Clean Version\nSelect a clean version below." },
-              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-              row.toJSON()
-            ]
-          }]
-        });
-        const panelId = panelMsg?.id;
-        if (panelId) {
-          cleanSessions.set(panelId, {
-            authorId: interaction.user.id,
-            content: String(content),
-            at: Date.now(),
-            fromName
-          });
-        }
-        try {
-          logFinderPanel(interaction.user, "Clean", "Uploaded `" + String(fromName).slice(0, 80) + "` (" + Buffer.byteLength(content, "utf8") + " bytes) — waiting V1/V2").catch(() => {});
-        } catch {}
-      } catch (e) {
-        await interaction.editReply({ content: "❌ " + String(e.message || e).slice(0, 120) }).catch(() => {});
+        await interaction.update(buildProtectionPanel(guildId));
+      } catch {
+        await interaction.reply({ content: "✅ ignore role set.", flags: MessageFlags.Ephemeral }).catch(() => {});
       }
-      return;
-    }
-
-    if (interaction.customId === "finderpanel_find_modal") {
-      const query = (interaction.fields.getTextInputValue("finderpanel_query") || "").trim();
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      const isBuyerUser = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
-      const cd = checkCommandCooldown(interaction.user.id, "get", isBuyerUser);
-      if (cd.onCooldown) {
-        await interaction.editReply({ content: `❌ you're on ${cd.remaining} cooldown, please wait.` });
-        return;
-      }
-      const ids = raw.split(/[\s,]+/).filter(Boolean);
-      const maxGet = isBuyerUser ? 10 : 1;
-      if (!ids.length) { await interaction.editReply({ content: "❌ put an id." }); return; }
-      if (ids.length > maxGet) { await interaction.editReply({ content: isBuyerUser ? "❌ max 10 id." : "❌ buy premium for multiple id." }); return; }
-      const files = [];
-      for (const id of ids) {
-        const file = getFile(id);
-        if (!file || !canGetLibraryFile(file, interaction.user.id)) continue;
-        const freshUrl = await getFreshUrl(file);
-        files.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
-      }
-      if (!files.length) { await interaction.editReply({ content: "❌ wrong id." }); return; }
-      await interaction.editReply({ content: "**Here you go!**", files });
       return;
     }
 
@@ -6027,7 +5719,6 @@ client.on("interactionCreate", async interaction => {
         const urlRaw = (interaction.fields.getTextInputValue("scripanel_url") || "").trim();
         const fileRaw = (interaction.fields.getTextInputValue("scripanel_file") || "").trim();
 
-        
         if (delUrlRaw === "yes" || delUrlRaw === "y" || delUrlRaw === "delete") {
           scripanelStore.url = "";
           scripanelStore.updatedAt = Date.now();
@@ -6040,13 +5731,11 @@ client.on("interactionCreate", async interaction => {
           return;
         }
 
-        
         if (urlRaw && !isPastefyUrl(urlRaw)) {
           await interaction.editReply({ content: "❌ URL must be a **Pastefy** link from `.upload` or `.obf` (pastefy.app)." });
           return;
         }
 
-        
         let source = fileRaw;
         if (!source && urlRaw) {
           source = await fetchTextFromUrl(urlRaw);
@@ -6056,7 +5745,6 @@ client.on("interactionCreate", async interaction => {
           return;
         }
 
-        
         const protectedScript = obfuscateLua(source);
         if (urlRaw) scripanelStore.url = urlRaw;
         scripanelStore.script = protectedScript;
@@ -6076,7 +5764,6 @@ client.on("interactionCreate", async interaction => {
       }
       return;
     }
-
   } catch (e) {
     console.error("❌ modal:", e.message);
     try {
@@ -6160,43 +5847,7 @@ if (interaction.commandName === "say") {
       }
       return;
     }
-    if (interaction.commandName === "finderpanel") {
-      const targetChannel = interaction.channel;
-      if (!targetChannel || !targetChannel.isTextBased?.()) {
-        await interaction.editReply({ content: "❌ use this in a text channel." });
-        return;
-      }
-      const panelRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("finderpanel_find").setLabel("Find").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("finderpanel_get").setLabel("Get").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("finderpanel_redeem").setLabel("Redeem").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("finderpanel_clean").setLabel("Clean").setStyle(ButtonStyle.Secondary)
-      );
-      try {
-        await targetChannel.send({
-          flags: IS_COMPONENTS_V2,
-          components: [{
-            type: 17,
-            accent_color: FINDER_V2_ACCENT,
-            components: [
-              { type: 10, content: "## Finder Panel\nThis control panel is for **Finder Panel**.\nIf you're using server tag click the button below or if you got a key click the redeem." },
-              { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
-              panelRow.toJSON()
-            ]
-          }]
-        });
-      } catch (e) {
-        console.warn("⚠️ finderpanel V2:", e.message);
-        await targetChannel.send({
-          content: "## Finder Panel\nThis control panel is for **Finder Panel**.\nIf you're using server tag click the button below or if you got a key click the redeem.",
-          components: [panelRow]
-        });
-      }
-      await interaction.editReply({ content: "Posted..." });
-      return;
-    }
-    
-if (interaction.commandName === "blacklist") {
+    if (interaction.commandName === "blacklist") {
       const mode = (interaction.options.getString("mode") || "").toLowerCase();
       const targetUser = interaction.options.getUser("user");
       if (mode === "list") {
@@ -6292,6 +5943,38 @@ client.on("messageCreate", async msg => {
               /\b(free\s*nitro|join\s*(my|our|this)\s*server|check\s*(my|our|this)\s*server|dm\s*me\s*for|join\s*now|invite\s*link)\b/i.test(hay) ||
               /\b(promote|promotion|advertis(?:e|ing)|giveaway\s*dm|selling\s*(robux|accounts?))\b/i.test(hay);
             if (isAd) {
+              await msg.delete().catch(() => {});
+              return;
+            }
+          }
+        }
+        if (!msg.author.bot && !protectionIgnoresMember(msg.member, msg.guild.id)) {
+          const c2 = String(msg.content || "");
+          const embeds2 = (msg.embeds || []).map(e =>
+            [e.title, e.description, e.url, ...((e.fields || []).map(f => (f.name || "") + " " + (f.value || "")))]
+              .filter(Boolean).join(" ")
+          ).join(" ");
+          const hay2 = (c2 + " " + embeds2);
+          if (pg.antiInvite && /(discord\.gg\/|discord\.com\/invite\/|discordapp\.com\/invite\/|discord\.me\/)/i.test(hay2)) {
+            await msg.delete().catch(() => {});
+            return;
+          }
+          if (pg.antiLink && /https?:\/\//i.test(hay2)) {
+            await msg.delete().catch(() => {});
+            return;
+          }
+          if (pg.antiForward) {
+            let isFwd = false;
+            try {
+              if (msg.messageSnapshots && msg.messageSnapshots.size > 0) isFwd = true;
+            } catch {}
+            try {
+              if (msg.flags && typeof msg.flags.has === "function" && MessageFlags.IsCrosspost != null && msg.flags.has(MessageFlags.IsCrosspost)) isFwd = true;
+            } catch {}
+            try {
+              if (msg.reference && Number(msg.reference.type) === 1) isFwd = true;
+            } catch {}
+            if (isFwd) {
               await msg.delete().catch(() => {});
               return;
             }
@@ -7156,14 +6839,14 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
         if (!code || !String(code).trim()) throw new Error("could not read file");
         const result = detectThreatAnalysis(code);
         let body =
-          `## Detected: ${result.title}\n` +
-          (result.line != null ? `**Line: ${result.line}**\n` : "") +
-          
-          "```" + result.description + "```";
+          `## Detected: ${result.title}` +
+          (result.line != null ? `\n**Line: ${result.line}**` : "");
         if (loadingMsg) await loadingMsg.delete().catch(() => {});
         pendingTokenLine.delete(String(msg.author.id));
+        const detectedFile = new AttachmentBuilder(Buffer.from(buildDetectedLuaFile(result), "utf8"), { name: "detected.lua" });
         await replyComponentsV2(msg, {
           flags: IS_COMPONENTS_V2,
+          files: [detectedFile],
           components: [{
             type: 17,
             accent_color: result.color,
