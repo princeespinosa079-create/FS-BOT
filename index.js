@@ -1009,6 +1009,28 @@ function subtractTokens(userId, amount) {
   return { ok: true, tokens: data.tokens };
 }
 
+
+async function logDmCommand(user, action, detail) {
+  try {
+    const chId = config.logChannelId ? String(config.logChannelId) : null;
+    if (!chId) return;
+    const ch = await client.channels.fetch(chId).catch(() => null);
+    if (!ch || !ch.isTextBased?.()) return;
+    const embed = new EmbedBuilder()
+      .setColor(BLURPLE)
+      .setTitle("DM Command Log")
+      .addFields(
+        { name: "Action", value: String(action || "—").slice(0, 256), inline: true },
+        { name: "User", value: `<@${user.id}> (\`@${user.username}\` / \`${user.id}\`)`.slice(0, 1024), inline: true },
+        { name: "Details", value: String(detail || "—").slice(0, 1024) }
+      )
+      .setTimestamp(new Date());
+    await ch.send({ embeds: [embed] }).catch(() => {});
+  } catch (e) {
+    console.warn("⚠️ logDmCommand:", e.message);
+  }
+}
+
 async function logFinderPanel(user, action, detail) {
   try {
     const chId = config.logChannelId ? String(config.logChannelId) : null;
@@ -3657,17 +3679,58 @@ function normalizeLuaSpacing(src) {
 }
 
 function cleanLuaV2(text) {
-  let out = cleanLuaForRename(String(text || ""));
+  // V2: only remove risks (remote loaders / IP grabbers / steal webhooks) + comments, then readable spacing.
+  // Do NOT strip normal logic or rename anything.
+  let out = String(text || "").replace(/^\uFEFF/, "").replace(/\0/g, "");
   out = stripRemoteLoaders(out);
   try {
-    out = out.replace(/^\uFEFF/, "").replace(/\0/g, "");
-    out = out.split("\n").filter(line => {
-      const tr = line.trim();
-      if (!tr) return true;
-      if (/^::\w+::$/.test(tr)) return false;
-      if (/^\d+\s*$/.test(tr)) return false;
-      return true;
-    }).join("\n");
+    const ipGrabberDomains = [
+      "iplogger", "grabify", "blasze", "ipgrabber", "ip-logger", "ipify.org", "ipinfo.io",
+      "ip-api.com", "icanhazip", "ifconfig.me", "2no.co", "yip.su", "ps3cfw.com"
+    ];
+    const riskLine = (line) => {
+      const l = String(line || "").toLowerCase();
+      if (ipGrabberDomains.some(d => l.includes(d))) return true;
+      if (/loadstring\s*\(\s*game\s*:\s*HttpGet/i.test(line)) return true;
+      if (/loadstring\s*\(\s*[^)]*HttpGet/i.test(line)) return true;
+      if (/require\s*\(\s*["']https?:\/\//i.test(line)) return true;
+      if (/https?:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\//i.test(line) &&
+          /cookie|token|password|robloxsecurity|\.roblosecurity|steal|exfil/i.test(line)) return true;
+      return false;
+    };
+    const lines = out.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    const kept = [];
+    let inBlockComment = false;
+    for (let original of lines) {
+      let line = original;
+      const trimmed = line.trim();
+      if (inBlockComment) {
+        if (trimmed.includes("]]")) inBlockComment = false;
+        continue; // drop comment body
+      }
+      if (/^--\[\[/.test(trimmed) || /^--\[=+\[/.test(trimmed)) {
+        if (!trimmed.includes("]]")) inBlockComment = true;
+        continue;
+      }
+      if (trimmed.startsWith("--")) continue; // line comments only
+      if (riskLine(trimmed)) continue;
+      // strip trailing -- comment outside strings (simple)
+      let inS = false, inD = false, cutAt = -1;
+      for (let i = 0; i < line.length - 1; i++) {
+        const c = line[i], n = line[i + 1];
+        if (c === "\\" && (inS || inD)) { i++; continue; }
+        if (c === '"' && !inS) inD = !inD;
+        if (c === "'" && !inD) inS = !inS;
+        if (!inS && !inD && c === "-" && n === "-") { cutAt = i; break; }
+      }
+      if (cutAt >= 0) line = line.slice(0, cutAt);
+      if (!line.trim()) {
+        kept.push("");
+        continue;
+      }
+      kept.push(line);
+    }
+    out = kept.join("\n");
     out = normalizeLuaSpacing(out);
   } catch {
     try { out = normalizeLuaSpacing(out); } catch {}
@@ -5286,20 +5349,15 @@ RULES:
           
           if (openaiClient && text && text.length < 120000) {
             try {
-              const V2_CLEAN_PROMPT = `You are an expert Lua/Luau formatter that makes scrambled code readable.
+              const V2_CLEAN_PROMPT = `Rewrite this code to make it READABLE and CLEAN, but follow these strict rules:
 
-TASK: Format Lua into normal expert-readable source (like a skilled developer wrote it).
-
-RULES:
-- Use normal spacing and 2-space indentation (if/then/end, functions, loops).
-- Remove ONLY excessive blank lines (e.g. a blank line between every statement); keep one blank line between logical sections.
-- Do NOT minify. Do NOT strip all spaces.
-- Do NOT change logic, behavior, or functionality at all.
-- Do NOT rename variables or functions.
-- Do NOT remove comments, strings, loaders, URLs, or any code.
-- Do NOT add or remove features.
-- Preserve every statement and side effect exactly.
-- Output ONLY the full Lua source in a lua code block. No explanations.`;
+1. DO NOT rename any variables, functions, or classes. Keep all names exactly the same.
+2. DO NOT change the logic, values, conditions, or output. Must work 100% the same.
+3. ONLY change: indentation, spacing, line breaks, blank lines, and the ORDER of functions / blocks where it is safe and does not break logic.
+4. Group related code together, put functions in logical order from top to bottom.
+5. Add simple comments to separate sections, but do not change the code itself.
+6. Remove ONLY risks and comments: Remote Loader / script loader remote fetches (loadstring+HttpGet URL, require https), IP logger links, and non-code comments. Do NOT remove any normal logic or safe code.
+7. Return only the final clean code, no explanation.`;
               const completion = await openaiClient.chat.completions.create({
                 model: process.env.OPENAI_MODEL || "gpt-4o-mini",
                 temperature: 0.1,
@@ -6012,6 +6070,10 @@ client.on("messageCreate", async msg => {
     try {
       const cmdName = (txt.slice(1).split(/\s+/)[0] || "").toLowerCase();
       if (cmdName && cmdName !== "leaderboard") trackCommandUse(msg.author);
+      if (!msg.guild && cmdName) {
+        const detail = String(txt || "").slice(0, 300);
+        logDmCommand(msg.author, "." + cmdName, detail).catch(() => {});
+      }
     } catch {}
 
     const isDM = !msg.guild;
