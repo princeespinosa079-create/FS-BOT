@@ -1031,27 +1031,6 @@ async function logDmCommand(user, action, detail) {
   }
 }
 
-async function logFinderPanel(user, action, detail) {
-  try {
-    const chId = config.logChannelId ? String(config.logChannelId) : null;
-    if (!chId) return;
-    const ch = await client.channels.fetch(chId).catch(() => null);
-    if (!ch || !ch.isTextBased?.()) return;
-    const embed = new EmbedBuilder()
-      .setColor(REGULAR_COLOR)
-      .setTitle("Finder Panel Log")
-      .setDescription(
-        `**User:** <@${user.id}> (\`@${user.username}\` / \`${user.id}\`)\n` +
-        `**Action:** ${action}\n` +
-        `**Detail:** ${detail || "—"}\n` +
-        `**Time:** <t:${Math.floor(Date.now() / 1000)}:F>`
-      );
-    await ch.send({ embeds: [embed] }).catch(() => {});
-  } catch (e) {
-    console.warn("⚠️ logFinderPanel:", e.message);
-  }
-}
-
 function parseDuration(str) {
   if (!str || str === "" || str === "infinite" || str === "0") return null;
   const match = String(str).match(/^(\d+)([smhdw])$/i);
@@ -1471,6 +1450,32 @@ function collectMessageAttachments(message) {
   try {
     for (const s of message.messageSnapshots?.values?.() || []) {
       for (const a of s.attachments?.values?.() || []) pushAtt(a);
+      try {
+        // V2 components inside forwarded snapshot
+        const snapMsg = s.message || s;
+        const walkSnap = (comps) => {
+          if (!Array.isArray(comps)) return;
+          for (const c of comps) {
+            if (!c) continue;
+            if ((c.type === 13 || c.type === "file") && c.file) {
+              let name = String(c.file.name || c.file.filename || "").trim();
+              let url = String(c.file.url || "");
+              if (url.startsWith("attachment://")) {
+                const ref = url.slice("attachment://".length);
+                if (!name) name = ref;
+                for (const a of (s.attachments?.values?.() || snapMsg.attachments?.values?.() || [])) {
+                  const an = String(a.name || a.filename || "");
+                  if (an === name || an === ref) { pushAtt(a); break; }
+                }
+              } else if (url.startsWith("http")) {
+                pushAtt({ name: name || "file", filename: name || "file", url, proxyURL: url, size: c.file.size || 0 });
+              }
+            }
+            if (Array.isArray(c.components)) walkSnap(c.components);
+          }
+        };
+        walkSnap(snapMsg.components || s.components);
+      } catch {}
     }
   } catch {}
   // Components V2: type 13 file may use attachment://name — map to real attachment URLs
@@ -1587,6 +1592,15 @@ function attachmentsFromRawMessage(raw) {
   };
   walk(raw.components);
 
+  // Forwarded / snapshot messages (Components V2 included)
+  const snaps = raw.message_snapshots || raw.messageSnapshots || [];
+  for (const snap of snaps) {
+    const m = snap.message || snap;
+    if (!m) continue;
+    for (const a of m.attachments || []) push(a);
+    walk(m.components);
+  }
+
   return out;
 }
 
@@ -1676,6 +1690,15 @@ async function attachmentsFromMsgOrReply(msg, filterFn = null) {
       try {
         const raw = await fetchMessageRaw(refChannelId, refId);
         list = onlyFiles(attachmentsFromRawMessage(raw));
+        // Also merge snapshot attachments from raw if still empty-ish
+        if (raw && (!list.length || (raw.message_snapshots || raw.messageSnapshots))) {
+          const more = onlyFiles(attachmentsFromRawMessage(raw));
+          const seen = new Set(list.map(x => x.url + "|" + x.name));
+          for (const a of more) {
+            const k = a.url + "|" + a.name;
+            if (!seen.has(k)) { list.push(a); seen.add(k); }
+          }
+        }
       } catch {}
     }
     
@@ -2103,10 +2126,16 @@ function buildDetectedLuaFile(result) {
   const title = String(result?.title || "Unknown");
   const line = result?.line != null ? String(result.line) : "n/a";
   const desc = String(result?.description || "").trim();
+  const dets = Array.isArray(result?.detections) ? result.detections : [];
+  let extra = "";
+  if (dets.length > 1) {
+    extra = dets.map(d => "-- - " + d.title + (d.line != null ? " @ line " + d.line : "")).join("\n") + "\n";
+  }
   return (
     "-- Detected by Prince Bot | .gg/freesource\n" +
     "-- Detected: " + title + "\n" +
     "-- Line: " + line + "\n" +
+    extra +
     "--\n" +
     (desc ? desc + "\n" : "")
   );
@@ -2169,53 +2198,60 @@ function detectThreatAnalysis(code) {
     return remoteLoaderPatterns.some(re => re.test(line));
   });
 
+  const found = [];
   if (lineIp != null) {
-    return {
+    found.push({
       title: "IP Logger",
       color: 0xED4245,
       line: lineIp,
       description: "A link/URL that steals the target's IP, location, device info, and ISP when clicked. Used for doxxing or harassment."
-    };
+    });
   }
-  // URL Script Loader first when it matches
   if (lineScriptLoader != null) {
-    return {
+    found.push({
       title: "Script Loader",
       color: 0xF26522,
       line: lineScriptLoader,
       description: "URL script loader — pulls a script from a link (loadstring + HttpGet URL / require https) and runs it."
-    };
+    });
   }
   if (lineRemote != null) {
-    return {
+    found.push({
       title: "Remote Loader",
       color: 0xED4245,
       line: lineRemote,
       description: "Remote code fetch/execute (HttpGet, request, pcall remote). Runs hidden code from the internet at runtime."
-    };
+    });
   }
   if (webhookMalicious) {
-    return {
+    found.push({
       title: "Discord Webhook",
       color: 0xED4245,
       line: lineWh,
       description: "Sends private data to a scammer's Discord channel (cookies, tokens, IPs, inventory)."
-    };
-  }
-  if (webhookBenign) {
-    return {
+    });
+  } else if (webhookBenign) {
+    found.push({
       title: "Discord Webhook",
       color: 0x5865F2,
       line: lineWh,
       description: "Contains a Discord webhook URL. May be logging or data-sending — review before running."
+    });
+  }
+  if (!found.length) {
+    return {
+      title: "Safe",
+      color: 0x57F287,
+      line: null,
+      description: "No IP Logger, Remote Loader, Script Loader, or stealing Webhook found.",
+      detections: []
     };
   }
-  return {
-    title: "Safe",
-    color: 0x57F287,
-    line: null,
-    description: "No IP Logger, Remote Loader, Script Loader, or stealing Webhook found."
-  };
+  const title = found.map(f => f.title).join(", ");
+  const color = found.some(f => f.color === 0xED4245) ? 0xED4245 : (found.some(f => f.color === 0xF26522) ? 0xF26522 : found[0].color);
+  const line = found.map(f => f.line).filter(x => x != null)[0] ?? null;
+  const description = found.map(f => f.title + (f.line != null ? " (line " + f.line + ")" : "") + ": " + f.description).join("\n");
+  return { title, color, line, description, detections: found };
 }
 
 async function downloadAttachmentText(file) {
@@ -5153,8 +5189,7 @@ client.on("interactionCreate", async interaction => {
       }
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("clean_v1_" + ownerId).setLabel("Clean V1").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("clean_v2_" + ownerId).setLabel("Clean V2").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("clean_rename_" + ownerId).setLabel("Rename").setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId("clean_v2_" + ownerId).setLabel("Clean V2").setStyle(ButtonStyle.Secondary)
       );
       const ch = interaction.channel;
       const panelMsg = await ch.send({
@@ -5274,6 +5309,9 @@ if (interaction.customId.startsWith("clean_v1_") || interaction.customId.startsW
     const ownerId = interaction.customId.replace(/^clean_(?:v[12]|rename)_/, "");
     if (interaction.user.id !== ownerId) {
       return interaction.reply({ content: "❌ not yours.", flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    if (isRename) {
+      return interaction.reply({ content: "❌ Rename was removed from Clean panel.", flags: MessageFlags.Ephemeral }).catch(() => {});
     }
     if (isV2) {
       const buyerOk = isOwner(interaction.user.id) || await isBuyer(interaction.user.id, interaction.member);
@@ -5428,7 +5466,6 @@ RULES:
           try {
             const ver = isV2 ? "Clean V2" : "Clean V1";
             const src = session.fromName ? String(session.fromName).slice(0, 80) : "script";
-            logFinderPanel(interaction.user, ver, "Source `" + src + "` · out `" + safeName + "` (" + fileBuf.length + " bytes)").catch(() => {});
           } catch {}
         } catch (e) {
           await interaction.followUp({
@@ -6760,7 +6797,113 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     return;
   }
 
-  if (/^\.(?:clean|cl)$/i.test(txt)) {
+  
+  if (/^\.(?:redeem|red)(?:\s|$)/i.test(txt)) {
+    const key = txt.replace(/^\.(?:redeem|red)\s*/i, "").trim();
+    if (!key) {
+      await sendInputErrorV2(msg, "**Tips:**\n- Usage: `.redeem PRINCE-XXXXXXXX`").catch(() => {});
+      return;
+    }
+    cleanupExpiredKeys();
+    const rec = keyStore.keys.find(k => String(k.key || "").toUpperCase() === key.toUpperCase());
+    if (!rec) {
+      replyUser(msg, "❌ invalid key.").catch(() => {});
+      return;
+    }
+    if (rec.redeemedBy && String(rec.redeemedBy) !== String(msg.author.id)) {
+      replyUser(msg, "❌ this key was already redeemed.").catch(() => {});
+      return;
+    }
+    if (rec.redeemedBy && String(rec.redeemedBy) === String(msg.author.id)) {
+      replyUser(msg, "❌ you already redeemed this key.").catch(() => {});
+      return;
+    }
+    if (findActiveKeyForUser(msg.author.id)) {
+      replyUser(msg, "❌ you already got a key active.").catch(() => {});
+      return;
+    }
+    rec.redeemedBy = String(msg.author.id);
+    rec.redeemedAt = Date.now();
+    try {
+      const tmp = `${KEYS_FILE}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(keyStore, null, 2));
+      fs.renameSync(tmp, KEYS_FILE);
+    } catch {}
+    try {
+      const g = await client.guilds.fetch(GUILD_ID);
+      const m = await g.members.fetch(msg.author.id);
+      if (BUYER_ROLE_ID) await m.roles.add(BUYER_ROLE_ID, "Premium key redeemed").catch(() => {});
+    } catch (e) {
+      console.warn("⚠️ redeem role:", e.message);
+    }
+    replyUser(msg, "✅ key redeemed — premium unlocked.").catch(() => {});
+    return;
+  }
+
+
+  if (/^\.fetch(?:\s|$)/i.test(txt)) {
+    const perm = await checkRegularPermission(msg, false, { skipChannelCheck: true });
+    if (!perm.allowed) {
+      if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
+    }
+    const loadingMsg = await replyComponentsV2(msg, {
+      flags: IS_COMPONENTS_V2,
+      components: [{
+        type: 17,
+        accent_color: RENAME_V2_ACCENT,
+        components: [{ type: 10, content: "## Fetching...\n⏳ Processing..." }]
+      }]
+    }, { mention: false }).catch(() => null);
+    try {
+      let content = null;
+      let files = await getScriptAttachmentsFromMsgOrReply(msg);
+      if (files.length) {
+        content = await downloadAttachmentText(files[0]);
+      }
+      if (!content) {
+        const resolved = await resolveScriptInput(msg, txt);
+        if (resolved?.content) content = resolved.content;
+      }
+      if (!content || !String(content).trim()) {
+        if (loadingMsg) await loadingMsg.delete().catch(() => {});
+        await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or reply / forward a sample.").catch(() => {});
+        return;
+      }
+      let out = String(content).replace(/^\uFEFF/, "");
+      const header = "-- Fetch by Prince Bot";
+      if (!out.startsWith(header)) out = header + "\n" + out;
+      const preview = buildPreviewText ? buildPreviewText(out) : out.split("\n").slice(0, 5).join("\n");
+      const previewBody = "### File Preview\n```lua\n" + String(preview).slice(0, 3500) + "\n```";
+      const fileBuf = Buffer.from(out, "utf8");
+      const att = new AttachmentBuilder(fileBuf, { name: "fetch.lua" });
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      await replyComponentsV2(msg, {
+        flags: IS_COMPONENTS_V2,
+        files: [att],
+        components: [{
+          type: 17,
+          accent_color: RENAME_V2_ACCENT,
+          components: [
+            { type: 10, content: previewBody.slice(0, 3900) },
+            { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
+            { type: 13, file: { url: "attachment://fetch.lua" } }
+          ]
+        }]
+      }, { mention: false }).catch(async () => {
+        await msg.channel.send({
+          content: previewBody.slice(0, 1900),
+          files: [att],
+          reply: { messageReference: msg.id, failIfNotExists: false }
+        }).catch(() => {});
+      });
+    } catch (e) {
+      if (loadingMsg) await loadingMsg.delete().catch(() => {});
+      await sendInputErrorV2(msg, "Failed: " + String(e.message || e).slice(0, 120)).catch(() => {});
+    }
+    return;
+  }
+
+if (/^\.clean(?:\s|$)/i.test(txt)) {
     const perm = await checkRegularPermission(msg, false);
     if (!perm.allowed) {
       if (!perm.silent && perm.reason) replyUser(msg, perm.reason).catch(() => {}); return;
@@ -6785,8 +6928,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       }
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("clean_rename_" + msg.author.id).setLabel("Rename").setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Secondary)
       );
       try {
         const panelMsg = await replyComponentsV2(msg, {
@@ -6818,8 +6960,7 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       }
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("clean_v1_" + msg.author.id).setLabel("Clean V1").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("clean_rename_" + msg.author.id).setLabel("Rename").setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId("clean_v2_" + msg.author.id).setLabel("Clean V2").setStyle(ButtonStyle.Secondary)
       );
       try {
         const panelMsg = await replyComponentsV2(msg, {
