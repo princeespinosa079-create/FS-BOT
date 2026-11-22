@@ -2107,6 +2107,26 @@ const _WEAREDEVS_SIGNALS = [
     /local\s+o\s*=\s*\{\s*"(?:\\[0-9]{2,3}){6,}"/,
 ];
 
+function extractCleanHttpUrl(text) {
+  const m = String(text || "").match(/https?:\/\/[^\s<>]+/i);
+  if (!m) return null;
+  let url = m[0];
+  // strip trailing junk from pastes like: ...lua"))()
+  url = url.replace(/["'<>]+$/g, "");
+  url = url.replace(/[)\]}>,;]+$/g, "");
+  // repeatedly strip trailing ) or (
+  let prev;
+  do {
+    prev = url;
+    url = url.replace(/\)+$/g, "").replace(/\($/g, "");
+  } while (url !== prev);
+  // Prefer cut at common script extensions if garbage follows
+  const extCut = url.match(/^(https?:\/\/\S+?\.(?:lua|luau|txt|json|js))(?:$|[^a-z0-9._-])/i);
+  if (extCut) url = extCut[1];
+  if (!/^https?:\/\/.+/i.test(url)) return null;
+  return url;
+}
+
 async function fetchTextFromUrl(url) {
   const u = String(url || "").trim();
   if (!/^https?:\/\//i.test(u)) return null;
@@ -5031,6 +5051,8 @@ const helpPages = [
     .setDescription(
 `**\`.find\`** Search a file by it's name.
 
+**\`.fetch\`** Fetch a script.
+
 **\`.leaderboard\`** Show top user uses commands.
 
 **\`.help\`** Show this message.`
@@ -5039,7 +5061,7 @@ const helpPages = [
     .setTitle("🤖 Bot Commands")
     .setColor(YELLOW_COLOR)
     .setDescription(
-`**\`.clean\`** [\`.cl\`] Clean a script.
+`**\`.clean\`** Clean a script.
 
 > Premium users can use all commands in DMs.
 > Premium users bypass cooldown.`
@@ -5055,10 +5077,12 @@ const helpPageBodies = [
 **\`.get\`** Get the file using it's ID.` },
   { color: 0x5865F2, text: `**\`.find\`** Search a file by it's name.
 
+**\`.fetch\`** Fetch a script.
+
 **\`.leaderboard\`** Show top user uses commands.
 
 **\`.help\`** Show this message.` },
-  { color: 0xFEE75C, text: `**\`.clean\`** [\`.cl\`] Clean a script.
+  { color: 0xFEE75C, text: `**\`.clean\`** Clean a script.
 
 > Premium users can use all commands in DMs.
 > Premium users bypass cooldown.` }
@@ -6856,9 +6880,19 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
     }, { mention: false }).catch(() => null);
     try {
       let content = null;
-      let files = await getScriptAttachmentsFromMsgOrReply(msg);
-      if (files.length) {
-        content = await downloadAttachmentText(files[0]);
+      const cleanUrl = extractCleanHttpUrl(txt);
+      if (cleanUrl) {
+        try {
+          content = await fetchTextFromUrl(cleanUrl);
+        } catch (e) {
+          console.warn("⚠️ fetch url:", e.message);
+        }
+      }
+      if (!content) {
+        let files = await getScriptAttachmentsFromMsgOrReply(msg);
+        if (files.length) {
+          content = await downloadAttachmentText(files[0]);
+        }
       }
       if (!content) {
         const resolved = await resolveScriptInput(msg, txt);
@@ -6866,7 +6900,15 @@ Key Active: ${activeKey ? "\`" + activeKey.key + "\`" : "❌ No active key."}`
       }
       if (!content || !String(content).trim()) {
         if (loadingMsg) await loadingMsg.delete().catch(() => {});
-        await sendInputErrorV2(msg, "**Tips:**\n- Attach a `.lua`, `.luau`, or `.txt` file, or provide a URL, or reply / forward a sample.").catch(() => {});
+        const errBody = "## Input Error\nPlease attach a file, code block, URL, reply to a message with a link/file, or forward a message.\n\n**Tips:**\n- Check that the link is accessible and not expired\n- If using a code block, make sure the URL is inside it.";
+        await replyComponentsV2(msg, {
+          flags: IS_COMPONENTS_V2,
+          components: [{
+            type: 17,
+            accent_color: 0xED4245,
+            components: [{ type: 10, content: errBody }]
+          }]
+        }, { mention: false }).catch(() => {});
         return;
       }
       let out = String(content).replace(/^\uFEFF/, "");
