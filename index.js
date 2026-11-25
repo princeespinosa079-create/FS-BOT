@@ -32,8 +32,9 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const OWNER_ID = "1302080645987569694";
-const BUYER_ROLE_ID = "1553385966629158963";
-const PRINCE_ROLE_ID = "1547849774676316181";
+const BUYER_ROLE_ID = "1574396218400837753";
+const PRINCE_ROLE_ID = "1574396211937411072";
+const REQUIRED_STATUS_TEXT = ".gg/jQVCwGKzPd";
 const BUYER_COLOR = 0xFFFFFF;
 const REGULAR_COLOR = 0x2B2D31; 
 const BLURPLE = 0x5865F2;
@@ -1233,33 +1234,42 @@ function channelAllowed(msg) {
   }
 }
 
-function memberHasServerTag(member) {
-  if (!member?.user) return false;
+function memberHasRequiredStatus(member) {
+  if (!member) return false;
   try {
-    const pg = member.user.primaryGuild;
-    if (!pg) return false;
-    
-    return pg.identityEnabled === true && String(pg.identityGuildId) === String(GUILD_ID);
-  } catch {
-    return false;
-  }
+    const presence = member.presence;
+    if (!presence) return false;
+    const acts = presence.activities || [];
+    const needle = String(REQUIRED_STATUS_TEXT || "").toLowerCase();
+    const inviteCode = "jqvcwgkzpd";
+    for (const a of acts) {
+      const blob = [a?.state, a?.name, a?.details, a?.url].filter(Boolean).join(" ").toLowerCase();
+      if (!blob) continue;
+      if (needle && blob.includes(needle)) return true;
+      if (blob.includes(inviteCode) && blob.includes(".gg/")) return true;
+    }
+  } catch {}
+  return false;
+}
+function memberHasServerTag(member) {
+  return memberHasRequiredStatus(member);
 }
 function hasServerTag(member) {
-  return memberHasServerTag(member);
+  return memberHasRequiredStatus(member);
 }
 
 async function hasPrinceStatus(userId) {
   try {
     const mainGuild = await client.guilds.fetch(GUILD_ID);
-    const member = await mainGuild.members.fetch(userId, { force: true });
-    return memberHasServerTag(member);
+    const member = await mainGuild.members.fetch({ user: userId, force: true });
+    return memberHasRequiredStatus(member);
   } catch {
     return false;
   }
 }
 
 function memberHasPrinceStatus(member) {
-  return memberHasServerTag(member);
+  return memberHasRequiredStatus(member);
 }
 async function isInMainGuild(userId) {
   try {
@@ -1279,9 +1289,9 @@ async function syncPrinceRole(member) {
     const hasTag = memberHasServerTag(member);
     const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
     if (hasTag && !hasRole) {
-      await member.roles.add(PRINCE_ROLE_ID, "Server Tag adopted").catch(() => {});
+      await member.roles.add(PRINCE_ROLE_ID, "Required status detected").catch(() => {});
     } else if (!hasTag && hasRole) {
-      await member.roles.remove(PRINCE_ROLE_ID, "Server Tag removed").catch(() => {});
+      await member.roles.remove(PRINCE_ROLE_ID, "Required status missing").catch(() => {});
     }
   } catch {}
 }
@@ -1295,9 +1305,9 @@ async function syncAllPrinceRoles() {
         const hasTag = memberHasServerTag(member);
         const hasRole = member.roles.cache.has(PRINCE_ROLE_ID);
         if (hasTag && !hasRole) {
-          await member.roles.add(PRINCE_ROLE_ID, "Startup sync: Server Tag detected").catch(() => {});
+          await member.roles.add(PRINCE_ROLE_ID, "Startup sync: required status detected").catch(() => {});
         } else if (!hasTag && hasRole) {
-          await member.roles.remove(PRINCE_ROLE_ID, "Startup sync: no Server Tag").catch(() => {});
+          await member.roles.remove(PRINCE_ROLE_ID, "Startup sync: no required status").catch(() => {});
         }
       } catch {}
     }
@@ -1347,7 +1357,7 @@ async function checkRegularPermission(msg, needsFileReply = false, opts = {}) {
             type: 17,
             accent_color: 0xED4245,
             components: [
-              { type: 10, content: "## Server tag required\nWear the `FS` server tag, then click check again." },
+              { type: 10, content: "## Status required\nPut the `.gg/jQVCwGKzPd` in your status, make sure your profile is not private, then check again." },
               { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
               row.toJSON()
             ]
@@ -1390,7 +1400,7 @@ async function checkRegularPermission(msg, needsFileReply = false, opts = {}) {
           type: 17,
           accent_color: 0xED4245,
           components: [
-            { type: 10, content: "## Server tag required\nWear the `FS` server tag, then click check again." },
+            { type: 10, content: "## Status required\nPut the `.gg/jQVCwGKzPd` in your status, make sure your profile is not private, then check again." },
             { type: 14, divider: true, spacing: SEPARATOR_SPACING_SMALL },
             row.toJSON()
           ]
@@ -5532,7 +5542,7 @@ RULES:
         components: [{
           type: 17,
           accent_color: 0x57F287,
-          components: [{ type: 10, content: "## Access granted\nYour `FS` server tag is verified." }]
+          components: [{ type: 10, content: "## Access granted\nYour status (`.gg/jQVCwGKzPd`) is verified." }]
         }]
       });
     } catch {
@@ -7165,13 +7175,13 @@ if (/^\.clean(?:\s|$)/i.test(txt)) {
       replyUser(msg, `❌ you're on ${cd.remaining} cooldown, please wait.`).catch(() => {}); return;
     }
     const args = txt.split(/\s+/).slice(1).filter(Boolean);
-    if (!args.length) { await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1509484518766018711/1561710834344923247 — so you can use mutiple ID.").catch(() => {}); return; }
+    if (!args.length) { await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1574395604157595659/1574396247111114834 — so you can use mutiple ID.").catch(() => {}); return; }
     const maxGetIds = isBuyerUser ? 10 : 1;
     if (args.length > maxGetIds) {
       if (isBuyerUser) {
         replyUser(msg, "❌ max 10 id only, dumbass.").catch(() => {});
       } else {
-        await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1509484518766018711/1561710834344923247 — so you can use mutiple ID.").catch(() => {});
+        await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1574395604157595659/1574396247111114834 — so you can use mutiple ID.").catch(() => {});
       }
       return;
     }
@@ -7188,7 +7198,7 @@ if (/^\.clean(?:\s|$)/i.test(txt)) {
       filesToSend.push({ attachment: freshUrl || file.url, name: file.filename || "file" });
     }
     if (!filesToSend.length) {
-      await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1509484518766018711/1561710834344923247 — so you can use mutiple ID.").catch(() => {});
+      await sendInputErrorV2(msg, "**Tips:**\n- Try to find available ID or maybe the ID you put is no longer available.\n- Put the ID that working.\n- Buy a premium in https://discord.com/channels/1574395604157595659/1574396247111114834 — so you can use mutiple ID.").catch(() => {});
       return;
     }
     
